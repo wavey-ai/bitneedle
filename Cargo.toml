@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "bitneedle",
+  "bytes2rgb",
+  "record-core",
+  "record-decode",
+  "record-descriptor",
+  "record-sidecar",
+  "test-spin"
+]
+resolver = "2"

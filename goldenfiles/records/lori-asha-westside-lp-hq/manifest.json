@@ -1,0 +1,105 @@
+{
+  "formatVersion": 1,
+  "generation": {
+    "directDecode": {
+      "bundle_dir": "/Users/jamie/wavey.ai/encodec-rs/onnx-bundles/encodec_48khz_12kbps",
+      "decoded_samples": 10008451,
+      "input_ecdc": "/Users/jamie/wavey.ai/bitneedle/.tmp-local/fixtures/westside-regeneration/lori-asha-westside-premix.ecdc",
+      "output_wav": "/Users/jamie/wavey.ai/bitneedle/.tmp-local/fixtures/westside-regeneration/lori-asha-westside-premix.decoded.wav",
+      "sample_rate": 48000
+    },
+    "encode": {
+      "bandwidth_kbps": 12,
+      "batch_size": 16,
+      "bundle_dir": "/Users/jamie/wavey.ai/encodec-rs/onnx-bundles/encodec_48khz_12kbps",
+      "chunk_crc": true,
+      "input_wav": "/Users/jamie/wavey.ai/bitneedle/.tmp-local/fixtures/westside-regeneration/lori-asha-westside-premix.48k-stereo.wav",
+      "language_model": true,
+      "model_name": "encodec_48khz",
+      "output_ecdc": "/Users/jamie/wavey.ai/bitneedle/.tmp-local/fixtures/westside-regeneration/lori-asha-westside-premix.ecdc",
+      "payload_bytes": 255061,
+      "sample_rate": 48000
+    },
+    "generatedOn": "2026-05-18",
+    "notes": [
+      "Regenerated from the Lori Asha album premix MP3 via native encodec-rs and bitneedle-record-render.",
+      "Used as a geometry, byte-recovery, and local decode regression fixture.",
+      "Full record PNG fixtures carry signed Bitneedle release headers using the production release verification key."
+    ]
+  },
+  "id": "lori-asha-westside-lp-hq",
+  "payload": {
+    "bytes": 255295,
+    "kind": "ecdc",
+    "path": "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.ecdc",
+    "sha256": "e5a665a9f25032131e146099391d05c629b6e48f73ba699fea961240044c5d1e"
+  },
+  "record": {
+    "bValue": 0.3730910498805641,
+    "exact": true,
+    "geometry": {
+      "labelRadius": 95,
+      "leadInBandThickness": 6,
+      "outerRadius": 287,
+      "outerRimThickness": 4,
+      "payloadInnerRadius": 109,
+      "payloadOuterRadius": 280,
+      "recordProfile": "lp",
+      "spindleHoleRadius": 7
+    },
+    "height": 576,
+    "pngPath": "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.record.png",
+    "pngSha256": "973fc10add9d652137c51f0937709c1f449cc88a6973316a9d105d650acf80fb",
+    "profile": "lp",
+    "rpm": 33.3333333333,
+    "width": 576
+  },
+  "roundTrip": {
+    "decode": {
+      "bundle_dir": "/Users/jamie/wavey.ai/encodec-rs/onnx-bundles/encodec_48khz_12kbps",
+      "decoded_samples": 10008451,
+      "input_ecdc": "/Users/jamie/wavey.ai/bitneedle/goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.roundtrip.local.ecdc",
+      "output_wav": "/Users/jamie/wavey.ai/bitneedle/goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.roundtrip.local.wav",
+      "sample_rate": 48000
+    },
+    "directAndRoundTripDecodedWavMatch": true,
+    "payloadPath": "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.roundtrip.local.ecdc",
+    "payloadSha256": "e5a665a9f25032131e146099391d05c629b6e48f73ba699fea961240044c5d1e",
+    "sourceAndRoundTripPayloadMatch": true,
+    "wavPath": "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.roundtrip.local.wav",
+    "wavSha256": "bdf16081f6743098cca608fc5aca664aa2262cb805307b80362f905811f1109d"
+  },
+  "signedRelease": {
+    "algorithm": "ed25519",
+    "headerByteLength": 807,
+    "keyId": "bn-prod-2026-05-18-01",
+    "manifest": {
+      "artist": "Lori Asha",
+      "canonicalUrl": "https://bitneedle.com/r/lori-asha-westside-lp-hq",
+      "createdAt": "2026-05-18T00:00:00Z",
+      "issuer": "bitneedle.com",
+      "keyId": "bn-prod-2026-05-18-01",
+      "label": "Bitneedle Golden Fixture",
+      "payloadByteLength": 255061,
+      "payloadContainer": "ecdc",
+      "payloadSha256": "5aZlqfJQMhMeFGCZOR0Fxim25I9zummf6pYSQARMXR4",
+      "recordProfile": "lp",
+      "releaseId": "lori-asha-westside-lp-hq",
+      "title": "Westside",
+      "type": "bitneedle.release",
+      "v": 1
+    },
+    "manifestSha256": "oUeBMmfgOi82l47E-ZAzyqfGinPr-XF67-P-12ftC50",
+    "metadataByteCapacity": 2822,
+    "metadataBytesRemaining": 2015,
+    "publicKey": "cIrx9lAynSgsSBBaaNuOIoM4Xxz9RNc6bRgkIuwymiQ",
+    "signature": "XlkFYS7HjGiUIJSrgeB4Yv_tQC7hSUwaj0o5PEC5HTeEufZJxHqLOPijGaX8hIDyXdsxdP46oiNOSFddpMK3Cg"
+  },
+  "source": {
+    "bytes": 4273043,
+    "description": "Lori Asha - Westside, album premix MP3",
+    "localPath": "/Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3",
+    "sha256": "eb4e62b86e1f87b5a0dc6cbae114e28687ef109a9de85c31f61b3ee0b212e86a"
+  },
+  "title": "Lori Asha - Westside"
+}

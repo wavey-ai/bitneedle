@@ -1,0 +1,22 @@
+[package]
+name = "test-spin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "bitneedle record validator"
+repository = "https://github.com/wavey-ai/bitneedle"
+readme = "README.md"
+
+[[bin]]
+name = "test-spin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+record-core = { path = "../record-core", version = "0.1.0" }
+record-decode = { path = "../record-decode", version = "0.1.0" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.0" }
+encodec-rs = { path = "../../encodec-rs", version = "0.1.0", default-features = false, features = [
+  "ecdc",
+] }
