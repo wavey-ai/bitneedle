@@ -1,0 +1,947 @@
+# The Bitneedle Picture Record Format
+
+Internet-Draft: draft-bitneedle-picture-record-format-01
+Intended status: Informational
+Date: 19 June 2026
+Expires: 19 December 2026
+SPDX-License-Identifier: CC0-1.0
+
+## Abstract
+
+This document specifies the Bitneedle Picture Record Format, an exact-digital
+raster image format in which a recoverable byte stream is carried by the visible
+spiral groove of a record-like image.
+
+The base format uses a 576 by 576 PNG/RGBA carrier, two registered annular
+record profiles, an outer and inner grayscale metadata spiral carrying a BRD1
+record descriptor, and a main Archimedean payload spiral carrying a BRS1
+Bitneedle Record Stream.
+
+BRS1 is payload-format independent. It carries one or more logical payload
+entries described by compact binary metadata and transported in CRC-protected,
+optionally signed, and optionally encrypted chunks. A conventional single-track
+record is the one-entry, one-track case of the same multitrack-capable format.
+
+This document also specifies an optional BSC1 Bitneedle Sidecar container
+carried through pair-sign modulation of pixels in non-payload visual regions.
+The BSC1 carrier is independent of the removed groove-patternisation system:
+the main payload groove is no longer patternised or reversibly transformed.
+
+Earlier experimental BCS2, JSON-BRS1, BPLP, ECLP, BTS1, BNPM, and unwrapped
+single-payload forms are not conforming to this revision.
+
+## Status of This Memo
+
+This document is an Internet-Draft-style work in progress. It has no standing
+in the IETF standards process unless submitted through the normal IETF
+Internet-Draft process.
+
+## Intellectual Property and Licence Notice
+
+Certain aspects of Bitneedle records, encoding, decoding, rendering, caching,
+and playback are patent pending. This specification is published for
+interoperability and implementation clarity. No express or implied patent
+licence is granted by this document.
+
+## 1. Introduction
+
+A Bitneedle picture record is a raster image in which selected pixels are
+arranged along deterministic record-like spiral paths. A conforming decoder
+traces those paths, reads exact pixel samples, and reconstructs exact bytes.
+
+The format is exact-digital. Printing, photography, resampling, lossy
+recompression, automatic colour correction, and scan recovery are outside the
+scope of this revision.
+
+### 1.1 Scope
+
+This document specifies:
+
+* the 576 by 576 RGBA carrier;
+* the registered record profiles single45 and lp;
+* deterministic spiral tracing and duplicate-pixel handling;
+* the BRD1 binary record descriptor;
+* direct-RGB main-payload pixel mapping;
+* the BRS1 compact binary stream metadata and chunk framing;
+* the canonical payload-entry and track-mapping model;
+* the binary signed-release reference;
+* the optional BSC1 binary sidecar container; and
+* the BSC1 pair-sign carrier scheme.
+
+Codec containers such as ECDC and MOSSNANO are named by BRS1 payload
+descriptors but are not themselves specified here.
+
+### 1.2 Canonical Layering
+
+    PNG/RGBA
+    |
+    +-- BRD1 descriptor
+    |     geometry, stream length, display metadata,
+    |     optional signed-release reference, optional BSC1 pointer
+    |
+    +-- BRS1 record stream
+    |     compact binary metadata
+    |     CRC-protected chunks
+    |     optional chunk signatures
+    |     optional chunk encryption
+    |
+    +-- logical payload entries
+    |     ECDC, RAW, MOSSNANO, extension containers
+    |
+    +-- optional BSC1 sidecar
+          auxiliary text, JSON, images, or opaque bytes
+
+A transport chunk is not a track. A codec frame is not a payload entry. A
+sidecar item is not part of the playable BRS1 payload.
+
+## 2. Conventions and Terminology
+
+### 2.1 Requirements Language
+
+The key words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, MAY, and OPTIONAL
+are to be interpreted as described in BCP 14 when they appear in all capitals.
+
+### 2.2 Numeric Representation
+
+Unless otherwise stated:
+
+* u8 is an unsigned 8-bit integer.
+* u16be, u32be, and u64be are unsigned integers in network byte order.
+* varuint is an unsigned LEB128-like integer limited to ten bytes and MUST use
+  its shortest canonical encoding.
+* f64be is an IEEE 754 binary64 bit pattern encoded as u64be.
+* byte offsets are zero-based.
+* lengths are byte lengths unless stated otherwise.
+* CRC-32 means CRC-32/IEEE.
+* hashes in binary wire fields are stored as raw digest bytes.
+* textual hash representations used by APIs, manifests, or tools are outside
+  the canonical BRD1, BRS1, and BSC1 wire formats.
+
+### 2.3 Coordinate System
+
+The raster origin is the upper-left pixel. Positive x points right and positive
+y points down.
+
+    centre_x = width / 2
+    centre_y = height / 2
+    start_angle = PI / 2
+    round_half_up(v) = floor(v + 0.5)
+
+Spirals rotate clockwise.
+
+### 2.4 Terms
+
+record profile
+    A named annular geometry, currently single45 or lp.
+
+record descriptor
+    The BRD1 byte stream encoded across the header and trailer spirals.
+
+record stream
+    The complete BRS1 stream carried by the main payload spiral.
+
+payload descriptor
+    A compact binary description of a payload container and optional codec
+    interpretation.
+
+payload entry
+    One contiguous logical byte range reconstructed from BRS1 chunks.
+
+track
+    A user-visible playable item mapped to one payload entry.
+
+transport chunk
+    A CRC-protected, optionally signed, and optionally encrypted BRS1 unit.
+
+codec frame
+    An internal unit of a payload codec.
+
+sidecar
+    An independent BSC1 auxiliary byte stream recovered through pair-sign
+    modulation of selected non-payload pixels.
+
+## 3. Conformance
+
+### 3.1 Encoders
+
+A conforming encoder MUST:
+
+* produce a 576 by 576, 8-bit RGBA raster;
+* use a registered record profile;
+* encode a valid BRD1 descriptor;
+* include BRD1 segment types 1, 2, 4, and 7;
+* set BRD1 segment 2 to the exact BRS1 stream length;
+* use payload encoding rgb;
+* write a valid BRS1 stream along the main payload spiral;
+* include at least one payload descriptor, payload entry, track, and chunk;
+* map every track to an existing payload entry;
+* write a correct CRC-32 for every stored chunk payload;
+* fill the fixed 64-byte signature slot in every chunk;
+* use an all-zero signature slot when the chunk is unsigned;
+* use a non-zero signature produced by the selected external signing profile
+  when the chunk is signed; and
+* use the same entry model for single-track and multitrack records.
+
+A conforming encoder MUST NOT emit JSON BRS1 metadata, toned-v1, BNPM, BPLP,
+ECLP, BTS1, or a newly encoded legacy stream.
+
+### 3.2 Decoders
+
+A conforming decoder MUST:
+
+* recover and validate BRD1;
+* recover exactly the declared BRS1 length;
+* decode compact BRS1 metadata;
+* validate all metadata flags and indexes;
+* parse all chunks without truncation or trailing bytes;
+* verify each chunk CRC-32;
+* distinguish all-zero unsigned signatures from non-zero signed chunks;
+* verify non-zero signatures only when a signing profile and trusted key are
+  available;
+* validate payload-entry lengths and derived offsets;
+* validate track-to-entry mappings; and
+* expose tracks without treating transport chunks as tracks.
+
+A decoder MUST NOT treat black RGB as empty. Alpha zero marks the first
+unwritten main-groove pixel.
+
+### 3.3 Sidecar Decoders
+
+A BSC1-capable decoder MUST complete normal BRD1 and BRS1 recovery first.
+Failure to recover BSC1 MUST NOT invalidate an otherwise valid base record.
+
+## 4. Raster Container
+
+### 4.1 Canonical Raster
+
+    dimensions: 576 x 576
+    colour:     8-bit RGB
+    alpha:      8-bit
+    container:  PNG/RGBA
+
+Other lossless containers MAY be used only when decoding yields identical RGBA
+samples at every encoded pixel.
+
+### 4.2 Alpha Semantics
+
+All written BRD1 and BRS1 pixels MUST have non-zero alpha. Main-payload tracing
+stops at the first sampled pixel whose alpha is zero. Recovered bytes are then
+truncated to the exact BRS1 length declared by BRD1.
+
+## 5. Record Geometry
+
+### 5.1 Registered Profiles
+
+| Profile | Spindle | Label | Payload inner | Payload outer | Outer edge | Lead band |
+|---------|--------:|------:|--------------:|--------------:|-----------:|----------:|
+| single45 | 63 | 151 | 169 | 280 | 287 | 6 |
+| lp       | 7  | 95  | 109 | 280 | 287 | 6 |
+
+The header metadata band lies between radii 280 and 286. The trailer metadata
+band lies between the label radius and payload inner radius.
+
+## 6. Spiral Tracing
+
+At accumulated angle theta:
+
+    angle  = start_angle - theta
+    radius = outer_radius - pitch * theta
+    x      = round_half_up(centre_x + radius * cos(angle))
+    y      = round_half_up(centre_y - radius * sin(angle))
+
+The iterative step is:
+
+    pixel_gap  = 1.0
+    theta_step = pixel_gap / sqrt(radius^2 + pitch^2)
+
+For the main groove, pitch is BRD1 b_value. Only unique pixels in the open
+payload annulus are addressable. First occurrence wins.
+
+The header metadata spiral uses two turns. The trailer metadata spiral uses
+four turns. BRD1 is one logical byte stream written to the header first and then
+continued in the trailer.
+
+## 7. BRD1 Record Descriptor
+
+### 7.1 Pixel Encoding
+
+Each descriptor byte is encoded as two grayscale pixels:
+
+    first pixel  = 120 + high nibble
+    second pixel = 120 + low nibble
+
+R, G, and B MUST be equal. Alpha MUST be non-zero.
+
+### 7.2 Prefix
+
+| Offset | Size | Type | Meaning |
+|-------:|-----:|------|---------|
+| 0 | 4 | bytes | ASCII BRD1 |
+| 4 | 1 | u8 | version, currently 1 |
+| 5 | 2 | u16be | total descriptor length |
+| 7 | 2 | u16be | segment count |
+| 9 | 2 | u16be | segment-stream length |
+| 11 | 8 | f64be | main-groove b_value |
+
+The total descriptor length includes the 19-byte prefix.
+
+### 7.3 Segment Framing
+
+| Size | Type | Meaning |
+|-----:|------|---------|
+| 1 | u8 | segment type |
+| 2 | u16be | payload length |
+| N | bytes | payload |
+
+A version-1 canonical decoder MUST reject unregistered segment types. Future
+versions may define explicit extension handling.
+
+### 7.4 Segment Registry
+
+| Type | Name | Payload | Required |
+|-----:|------|---------|:--------:|
+| 1 | descriptor CRC-32 | u32be | yes |
+| 2 | BRS1 stream length | u64be or u64::MAX | yes |
+| 4 | record profile | non-empty UTF-8 | yes |
+| 5 | title | optional UTF-8 | no |
+| 6 | artist | optional UTF-8 | no |
+| 7 | payload encoding | non-empty UTF-8 | yes |
+| 8 | release ID | optional UTF-8 | no |
+| 9 | catalogue number | optional UTF-8 | no |
+| 10 | label | optional UTF-8 | no |
+| 11 | artwork credit | optional UTF-8 | no |
+| 13 | canonical URL | optional UTF-8 | no |
+| 14 | created-at | optional UTF-8 | no |
+| 16 | signed-release reference | binary envelope | no |
+| 21 | BSC1 pointer | opaque binary pointer | no |
+
+An optional text segment with a zero-length payload decodes as absent.
+Canonical encoders SHOULD omit absent optional text segments.
+
+### 7.5 Descriptor CRC-32
+
+Segment 1 contains CRC-32/IEEE over the complete descriptor with the four bytes
+of the CRC payload treated as zero.
+
+### 7.6 Signed-Release Reference
+
+Segment 16 contains:
+
+| Field | Type |
+|-------|------|
+| reference version | u8 |
+| manifest-hash algorithm code | u8 |
+| manifest-hash length | u16be |
+| manifest-hash bytes | N raw bytes |
+| signature algorithm code | u8 |
+| key-ID length | u16be |
+| key-ID bytes | N opaque bytes |
+| signature length | u16be |
+| signature bytes | N raw bytes |
+
+Version 1 requirements:
+
+* reference version MUST equal 1;
+* both algorithm codes MUST be non-zero;
+* manifest hash, key ID, and signature MUST be non-empty;
+* each variable field MUST fit in u16 length;
+* the manifest itself is not carried by this envelope; and
+* algorithm-code registries, manifest serialization, signing preimage, trust,
+  and revocation policy are defined by external signing profiles.
+
+### 7.7 BSC1 Pointer
+
+The current BSC1 pointer is 48 bytes:
+
+| Offset | Size | Meaning |
+|-------:|-----:|---------|
+| 0 | 4 | ASCII BSC1 |
+| 4 | 1 | pointer version, 1 |
+| 5 | 1 | carrier scheme ID |
+| 6 | 1 | carrier flags |
+| 7 | 1 | reserved, zero |
+| 8 | 4 | non-zero shuffle seed |
+| 12 | 4 | exact BSC1 byte length |
+| 16 | 32 | raw SHA-256 digest of BSC1 |
+
+Carrier flags are 0x01 label, 0x02 intergroove, and 0x04 lead-in/deadwax.
+
+## 8. Main Payload Pixel Mapping
+
+The only canonical payload encoding in this revision is rgb.
+
+Every three BRS1 bytes map directly to R, G, and B of one payload pixel. Alpha
+MUST be non-zero. Unused channels in the final pixel are zero.
+
+    pixels written = ceil(BRS1 byte length / 3)
+
+The decoder recovers groove-order RGB bytes and truncates them to the exact
+length declared by BRD1.
+
+toned-v1 and rgbTone are not part of this revision.
+
+## 9. BRS1 Record Stream
+
+### 9.1 Top-Level Layout
+
+| Offset | Size | Meaning |
+|-------:|-----:|---------|
+| 0 | 4 | ASCII BRS1 |
+| 4 | 4 | compact metadata length, u32be |
+| 8 | N | compact binary metadata |
+| 8+N | remainder | one or more transport chunks |
+
+### 9.2 Compact Metadata Header
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| version | u8 | currently 1 |
+| flags | u8 | metadata feature flags |
+| descriptor count | u8 | 1 to 255 |
+| descriptors | variable | payload descriptors |
+| entry count | u16be | at least 1 |
+| entries | variable | payload-entry declarations |
+| track count | u16be | at least 1 |
+| tracks | variable | track declarations |
+
+Known flags:
+
+| Bit | Name | Effect |
+|----:|------|--------|
+| 0x01 | encrypted | each chunk includes a 12-byte nonce |
+| 0x02 | entry descriptor indexes | each entry stores a u8 descriptor index |
+| 0x04 | track entry mappings | each track stores a varuint entry index |
+
+Unknown metadata flags MUST be rejected.
+
+### 9.3 Payload Descriptors
+
+Each descriptor begins:
+
+| Field | Type |
+|-------|------|
+| container code | u8 |
+| descriptor flags | u8 |
+
+Container codes:
+
+| Code | Container |
+|-----:|-----------|
+| 0 | RAW |
+| 1 | ECDC |
+| 2 | MOSSNANO |
+| 255 | extension name follows as a wire string |
+
+An extension container name is encoded as u16be byte length followed by
+non-empty UTF-8.
+
+Descriptor flags:
+
+| Bit | Field |
+|----:|-------|
+| 0x01 | codec wire string |
+| 0x02 | sample rate u32be |
+| 0x04 | channels u8 |
+
+Sample rate and channel count, when present, MUST be greater than zero. Unknown
+descriptor flags MUST be rejected.
+
+### 9.4 Payload Entries
+
+Each payload entry contains:
+
+| Field | Type |
+|-------|------|
+| byte length | canonical varuint |
+| descriptor index | optional u8 when metadata flag 0x02 is set |
+
+Byte length MUST be greater than zero. When descriptor indexes are omitted,
+index zero is implied.
+
+Entry indexes and byte offsets are derived from array position and cumulative
+length; they are not stored on the wire.
+
+For entries E0 through En:
+
+    E0.offset = 0
+    Ei.offset = sum(E0.length ... E(i-1).length)
+
+Entries therefore form one contiguous logical payload.
+
+### 9.5 Tracks
+
+Each track contains:
+
+| Field | Type |
+|-------|------|
+| title | u16be length plus non-empty UTF-8 |
+| payload entry index | optional canonical varuint when flag 0x04 is set |
+
+When mappings are omitted, track i maps to payload entry i. Every resolved
+entry index MUST exist. Track numbers are derived as array position plus one.
+
+### 9.6 Chunk Layout
+
+Every chunk contains a fixed 64-byte signature slot, regardless of whether the
+chunk is signed.
+
+Unencrypted chunk:
+
+| Offset | Size | Meaning |
+|-------:|-----:|---------|
+| 0 | 2 | chunk index, u16be |
+| 2 | 2 | total chunk count, u16be |
+| 4 | 1 | payload descriptor index |
+| 5 | 4 | stored payload length, u32be |
+| 9 | 4 | CRC-32 of stored payload |
+| 13 | 64 | signature slot |
+| 77 | N | stored payload |
+
+Encrypted chunk:
+
+| Offset | Size | Meaning |
+|-------:|-----:|---------|
+| 0 | 77 | fields above through signature |
+| 77 | 12 | ChaCha20-Poly1305 nonce |
+| 89 | N | ciphertext including authentication tag |
+
+Signature semantics:
+
+* 64 zero bytes mean unsigned;
+* any non-zero signature means signed under an external chunk-signing profile;
+* parsers MUST retain the exact signature bytes;
+* base structural validation does not require a key resolver;
+* a verifier with a selected profile SHOULD verify non-zero signatures; and
+* failure of a required external signature policy is an authorization failure,
+  not a CRC/framing failure.
+
+### 9.7 Chunk CRC-32
+
+CRC-32 covers the stored payload bytes exactly as carried. For encrypted chunks
+it therefore covers ciphertext including its authentication tag.
+
+### 9.8 Chunk Rules
+
+* chunk count MUST be non-zero;
+* indexes MUST be contiguous from zero;
+* every chunk MUST declare the same chunk count;
+* parsed chunk count MUST equal the declared count;
+* descriptor indexes MUST exist;
+* each CRC-32 MUST match;
+* the stream MUST contain no trailing bytes;
+* unencrypted chunks MUST lie wholly inside one declared payload entry; and
+* an unencrypted chunk descriptor index MUST match that entry.
+
+Canonical encoders SHOULD split at payload-entry boundaries and SHOULD use
+codec-frame boundaries where a codec-aware planner exists.
+
+### 9.9 Signature Preimages
+
+For a signed unencrypted chunk:
+
+    ASCII "bitneedle.record-stream.chunk.v1"
+    u32be metadata length
+    exact compact metadata bytes
+    u16be chunk index
+    u16be chunk count
+    u8 descriptor index
+    u32be payload length
+    u32be CRC-32
+    exact stored payload bytes
+
+For a signed encrypted chunk:
+
+    ASCII "bitneedle.record-stream.chunk.v1.nonce"
+    u32be metadata length
+    exact compact metadata bytes
+    u16be chunk index
+    u16be chunk count
+    u8 descriptor index
+    u32be nonce length
+    nonce bytes
+    u32be payload length
+    u32be CRC-32
+    ciphertext bytes
+
+The cryptographic algorithm used to produce the fixed 64-byte signature is
+defined by the applicable chunk-signing profile.
+
+### 9.10 Encryption
+
+Metadata flag 0x01 declares ChaCha20-Poly1305 chunk encryption with:
+
+    key length   = 32 bytes
+    nonce length = 12 bytes
+    tag length   = 16 bytes
+
+Associated data is:
+
+    ASCII "bitneedle.record-stream.chunk-encryption.v1"
+    u32be metadata length
+    exact compact metadata bytes
+    u16be chunk index
+    u16be chunk count
+    u8 descriptor index
+    u32be nonce length
+    nonce bytes
+
+Key distribution is outside this document.
+
+### 9.11 Reconstruction
+
+For an unencrypted stream, concatenate stored chunk payloads in chunk-index
+order.
+
+For an encrypted stream, authenticate and decrypt every chunk, then concatenate
+plaintext in chunk-index order.
+
+The resulting byte sequence is partitioned into entries by the cumulative entry
+lengths declared in compact metadata.
+
+## 10. Single-Track and Multitrack Semantics
+
+Single-track and multitrack records use the same wire structure.
+
+Single-track:
+
+    descriptors = 1 or more
+    entries     = 1
+    tracks      = 1
+
+Multitrack:
+
+    descriptors = 1 or more
+    entries     = 2 or more
+    tracks      = 2 or more
+
+Entries not referenced by a top-level track MAY be used by a higher-level
+profile for stems, alternates, or auxiliary playable data. This base revision
+does not encode an entry role field.
+
+## 11. Signed Releases
+
+BRD1 MAY carry one SignedReleaseReference in segment 16.
+
+The reference binds a signature to the digest of an external manifest. The
+manifest may be supplied through BSC1, a registry, a canonical URL, a local
+bundle, or another application-defined mechanism.
+
+This revision does not define:
+
+* a canonical release-manifest serialization;
+* release or edition manifest fields;
+* recordCommitment or editionCommitment construction;
+* wallet signing;
+* account authorization;
+* issuance attestations;
+* registration receipt chains;
+* hash or signature algorithm-code assignments;
+* key resolution or revocation policy.
+
+Those concerns belong to external signing and rights profiles.
+
+A base verifier can validate only the binary envelope structure. Cryptographic
+verification requires the manifest bytes, the selected algorithm profile, and a
+trusted key resolver.
+
+A key is not trusted merely because its identifier appears in the image.
+
+## 12. BSC1 Bitneedle Sidecar
+
+### 12.1 Independence from BRS1
+
+BSC1 is auxiliary. It MUST NOT be concatenated with or substituted for BRS1.
+Its pair-sign carrier remains valid even though main-groove patternisation has
+been removed.
+
+### 12.2 Carrier Regions
+
+The registered carrier regions are:
+
+| Flag | Name |
+|-----:|------|
+| 0x01 | label |
+| 0x02 | intergroove |
+| 0x04 | leadInDeadwax |
+
+The default carrier set is label plus intergroove.
+
+### 12.3 Pair-Sign Scheme
+
+Scheme ID 1 is pairsign-safe-luma-v2.
+
+Candidate carrier pixels are grouped into ordered pairs, shuffled
+deterministically with the non-zero pointer seed using Mulberry32 and
+Fisher-Yates, and decoded using Rec. 709 luma.
+
+Each pair carries two bits:
+
+* sign bit: whether first-pixel luma is greater than second-pixel luma;
+* magnitude bit: whether the absolute luma difference is at least 16.0.
+
+The current capacity is therefore two bits per pair, or one byte per four
+pairs.
+
+### 12.4 BSC1 Container Header
+
+| Offset | Size | Meaning |
+|-------:|-----:|---------|
+| 0 | 4 | ASCII BSC1 |
+| 4 | 1 | version, currently 1 |
+| 5 | 1 | flags, currently zero |
+| 6 | 2 | item count, u16be |
+| 8 | 4 | total byte length, u32be |
+
+### 12.5 Item Header
+
+| Field | Size |
+|-------|-----:|
+| item type | 1 |
+| codec | 1 |
+| flags | 1 |
+| reserved | 1 |
+| raw byte length | 4 |
+| stored byte length | 4 |
+| name length | 2 |
+| MIME length | 2 |
+| name UTF-8 | variable |
+| MIME UTF-8 | variable |
+| stored data | variable |
+
+The reserved byte and item flags MUST be zero in version 1.
+
+Item types:
+
+| Code | Type |
+|-----:|------|
+| 0 | opaque bytes |
+| 1 | UTF-8 text |
+| 2 | image |
+| 3 | JSON |
+
+Codes 4 through 31 are reserved. Higher values are private extensions.
+
+Codecs:
+
+| Code | Codec |
+|-----:|-------|
+| 0 | raw |
+| 1 | Brotli |
+| 2 | Zstandard |
+| 3 | AVIF |
+
+Codes 4 through 31 are reserved. Higher values are private extensions.
+
+JSON is permitted as an item payload. It is not BSC1 structural metadata.
+
+### 12.6 Sidecar Recovery
+
+A sidecar-capable decoder:
+
+1. validates BRD1;
+2. validates BRS1;
+3. reads the BRD1 segment-21 pointer;
+4. reconstructs the selected carrier pairs;
+5. applies the deterministic shuffle;
+6. recovers exactly the declared BSC1 byte length;
+7. verifies the raw SHA-256 digest;
+8. validates the BSC1 container and item framing; and
+9. exposes supported items.
+
+## 13. Complete Decoding Procedure
+
+A conforming decoder performs:
+
+1. Decode exact RGBA.
+2. Infer or select single45 or lp.
+3. Trace the header spiral.
+4. Recover the 19-byte BRD1 prefix.
+5. Parse descriptor length and b_value.
+6. Trace the trailer spiral.
+7. Recover the complete BRD1 stream.
+8. Verify BRD1 framing and CRC-32.
+9. Read record profile, rgb encoding, and BRS1 length.
+10. Trace the main payload spiral using b_value.
+11. Read RGB bytes until alpha zero.
+12. Truncate to the declared BRS1 length.
+13. Verify BRS1 magic and metadata length.
+14. Decode compact binary metadata.
+15. Parse all chunks.
+16. Verify indexes, counts, descriptor indexes, CRC-32 values, and framing.
+17. Classify each signature slot as unsigned or signed.
+18. Verify signed chunks when an external profile and trusted key are supplied.
+19. Decrypt chunks when metadata declares encryption and a key is supplied.
+20. Concatenate plaintext bytes.
+21. Resolve entry offsets from cumulative declared lengths.
+22. Validate track mappings.
+23. Expose tracks and other entries.
+24. Optionally recover and validate BSC1.
+
+## 14. Exact-Digital Requirements
+
+Encoded samples MUST be preserved exactly. Scaling, resampling, filtering,
+lossy recompression, colour correction, and alpha destruction invalidate the
+format.
+
+## 15. Unsupported Earlier Forms
+
+The following forms are outside this revision and are rejected by the canonical
+reference implementation:
+
+    BCS2
+    JSON-based BRS1 metadata
+    BPLP
+    ECLP
+    unwrapped single-payload streams
+    BTS1
+    toned-v1 / rgbTone
+    BNPM groove patternisation
+    arbitrary-JSON BRD1 segments
+    inline JSON signed manifests
+    JSON receipt and authorization envelopes
+
+Conversion from an earlier experiment creates new canonical bytes and requires
+new hashes and signatures.
+
+## 16. Extension Points
+
+Future revisions may define:
+
+* additional raster sizes and record profiles;
+* BRD1 versions and segment types;
+* new payload pixel encodings;
+* additional BRS1 metadata flags;
+* container codes and descriptor fields;
+* chunk-signing profiles;
+* encryption profiles;
+* signed-release algorithm registries;
+* BSC1 carrier schemes;
+* BSC1 item types and codecs.
+
+An extension MUST NOT silently reinterpret an existing version-1 field.
+
+## 17. Security Considerations
+
+All decoded metadata, payloads, URLs, sidecars, compressed data, and codec
+containers are untrusted.
+
+Implementations SHOULD:
+
+* validate lengths before allocation;
+* enforce all integer bounds;
+* reject overlong varuint encodings;
+* reject unknown flags and codes where required;
+* cap decompressor output;
+* sandbox codec parsing;
+* verify every CRC-32;
+* distinguish structural validity from signature authorization;
+* require an explicit trust policy for non-zero signatures;
+* reject overlapping or out-of-range derived data;
+* verify BSC1 hashes before exposing items; and
+* rate-limit public cache writes.
+
+CRC-32 detects accidental corruption but is not a cryptographic authenticity
+mechanism.
+
+## 18. Privacy Considerations
+
+BRD1 and BSC1 may contain identifiers, timestamps, URLs, credits, images, and
+other intentionally published data. Encoders SHOULD avoid embedding private
+information unintentionally.
+
+## 19. IANA Considerations
+
+This document has no IANA actions.
+
+## Appendix A. Binary Examples
+
+### A.1 BRD1 Summary
+
+    BRD1
+    version: 1
+    b_value: binary64
+    segments:
+      1  descriptor CRC-32
+      2  exact BRS1 length
+      4  single45
+      7  rgb
+      5  title (optional)
+      6  artist (optional)
+      16 signed-release reference (optional)
+      21 BSC1 pointer (optional)
+
+### A.2 One-Track BRS1
+
+    metadata:
+      version = 1
+      flags = 0
+      descriptors:
+        0: ECDC
+      entries:
+        0: 301809 bytes, descriptor 0
+      tracks:
+        1: "Main Mix" -> entry 0
+
+    chunks:
+      0 .. N-1, contiguous
+      each CRC-protected
+      each signature slot either all-zero or externally signed
+
+### A.3 Two-Track BRS1
+
+    metadata:
+      descriptors:
+        0: ECDC
+      entries:
+        0: 301809 bytes
+        1: 290114 bytes
+      tracks:
+        1: "Main Mix" -> entry 0
+        2: "Instrumental" -> entry 1
+
+    resolved payload:
+      [entry 0 bytes][entry 1 bytes]
+
+## Appendix B. Reference API Shape
+
+The public parser exposes typed structures equivalent to:
+
+    RecordStreamMetadata {
+        version,
+        encrypted,
+        payload_descriptors,
+        payload_entries,
+        tracks,
+    }
+
+    PayloadEntryDescriptor {
+        byte_length,
+        payload_descriptor_index,
+    }
+
+    TrackDescriptor {
+        title,
+        payload_entry_index,
+    }
+
+Inspection tools MAY serialize these typed values as pretty JSON for human or
+machine consumption. Such JSON is presentation output and is not BRS1 wire
+metadata.
+
+## Appendix C. Changes in Draft 01
+
+Draft 01:
+
+* uses BRD1 plus compact binary BRS1;
+* uses direct RGB payload pixels only;
+* makes payload entries mandatory for single-track and multitrack records;
+* stores entry lengths and derives offsets;
+* stores track titles and entry mappings compactly;
+* requires CRC protection for every chunk;
+* permits chunks to be unsigned through an all-zero fixed signature slot;
+* permits signed chunks through an external fixed-64-byte signing profile;
+* permits optional ChaCha20-Poly1305 encryption;
+* replaces inline signed manifests with a binary signed-release reference;
+* retains BSC1 and its pair-sign sidecar carrier;
+* removes groove patternisation and BNPM; and
+* provides no canonical legacy decoder path.

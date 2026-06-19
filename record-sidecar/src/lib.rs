@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 
-pub const SIDECAR_MAGIC: &[u8; 4] = b"BTS1";
+pub const SIDECAR_MAGIC: &[u8; 4] = b"BSC1";
 pub const SIDECAR_CONTAINER_VERSION: u8 = 1;
 pub const SIDECAR_POINTER_VERSION: u8 = 1;
 pub const SIDECAR_POINTER_LENGTH: usize = 48;
@@ -36,9 +36,6 @@ pub const PACKAGE_METADATA_ITEM_NAME: &str = "bitneedle-package-metadata.json";
 pub const PACKAGE_METADATA_MIME: &str = "application/vnd.bitneedle.package-metadata+json";
 pub const PACKAGE_PHOTO_MIME: &str = "image/avif";
 pub const PACKAGE_COVER_ITEM_NAME: &str = "album-cover.avif";
-pub const PACKAGE_PATTERN_SIDECAR_ITEM_NAME: &str = "bitneedle-pattern-map";
-pub const PACKAGE_PATTERN_SIDECAR_MIME: &str = "application/vnd.bitneedle.pattern-map";
-
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,7 +95,7 @@ pub struct SidecarDecodeResult {
     pub ok: bool,
     pub descriptor: serde_json::Value,
     pub validation: SidecarContainerValidation,
-    pub bts1_byte_length: usize,
+    pub bsc1_byte_length: usize,
     pub sha256: String,
     pub carrier_pixels: usize,
     pub carrier_pairs: usize,
@@ -124,8 +121,8 @@ pub struct SidecarHeaderPointer {
     pub carriers: Vec<SidecarCarrier>,
     pub seed: u32,
     pub length: usize,
-    pub sha256: String,
-    pub sha256_bytes: [u8; 32],
+    /// Raw SHA-256 digest bytes from the fixed-width BSC1 pointer.
+    pub sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -678,28 +675,37 @@ pub fn decode_sidecar_header_pointer(payload: &[u8]) -> Result<SidecarHeaderPoin
     if length == 0 {
         bail!("sidecar length must be nonzero");
     }
-    let mut sha256_bytes = [0u8; 32];
-    sha256_bytes.copy_from_slice(&payload[16..48]);
-    let sha256 = general_purpose::URL_SAFE_NO_PAD.encode(sha256_bytes);
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&payload[16..48]);
+
     Ok(SidecarHeaderPointer {
         scheme,
         carriers,
         seed,
         length,
         sha256,
-        sha256_bytes,
     })
+}
+
+pub fn sidecar_pointer_sha256_base64url(
+    pointer: &SidecarHeaderPointer,
+) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(pointer.sha256)
 }
 
 pub fn sidecar_header_pointer_json(pointer: &SidecarHeaderPointer) -> serde_json::Value {
     serde_json::json!({
         "v": SIDECAR_POINTER_VERSION,
-        "c": "BTS1",
+        "c": "BSC1",
         "s": pointer.scheme.as_str(),
-        "r": pointer.carriers.iter().map(|carrier| sidecar_carrier_name(*carrier)).collect::<Vec<_>>(),
+        "r": pointer
+            .carriers
+            .iter()
+            .map(|carrier| sidecar_carrier_name(*carrier))
+            .collect::<Vec<_>>(),
         "n": pointer.seed,
         "l": pointer.length,
-        "h": pointer.sha256.as_str(),
+        "h": sidecar_pointer_sha256_base64url(pointer),
     })
 }
 
@@ -866,12 +872,12 @@ pub fn decode_sidecar_from_pairs(
     scheme: &str,
     byte_length: usize,
 ) -> Result<(Vec<u8>, SidecarDecodeResult)> {
-    let bts1 = decode_pairsign_sidecar_bytes_from_pairs(rgba, pairs, scheme, byte_length)?;
-    let validation = validate_sidecar_container(&bts1)?;
-    let sha256 = sha256_base64url(&bts1);
+    let bsc1 = decode_pairsign_sidecar_bytes_from_pairs(rgba, pairs, scheme, byte_length)?;
+    let validation = validate_sidecar_container(&bsc1)?;
+    let sha256 = sha256_base64url(&bsc1);
     let capacity = sidecar_capacity_bytes_for_scheme(scheme, pairs.len())?;
     let descriptor = serde_json::json!({
-        "container": "BTS1",
+        "container": "BSC1",
         "scheme": normalize_sidecar_scheme(Some(scheme))?,
         "length": byte_length,
     });
@@ -879,11 +885,11 @@ pub fn decode_sidecar_from_pairs(
         ok: true,
         descriptor,
         validation,
-        bts1_byte_length: bts1.len(),
+        bsc1_byte_length: bsc1.len(),
         sha256,
         carrier_pixels: pairs.len() * 2,
         carrier_pairs: pairs.len(),
         capacity_bytes: capacity,
     };
-    Ok((bts1, result))
+    Ok((bsc1, result))
 }

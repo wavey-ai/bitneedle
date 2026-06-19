@@ -2,10 +2,13 @@
 members = [
   "bitneedle",
   "bytes2rgb",
+  "bitneedle-id",
   "record-core",
   "record-decode",
   "record-descriptor",
+  "record-verify",
   "record-sidecar",
-  "test-spin"
+  "test-spin",
+  "bitneedle-id",
 ]
 resolver = "2"

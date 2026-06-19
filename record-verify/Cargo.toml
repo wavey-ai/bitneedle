@@ -1,0 +1,11 @@
+[package]
+name = "record-verify"
+version = "0.1.3"
+edition = "2021"
+description = "bitneedle public verification: canonical hashing, registration receipt chains, and signature verification"
+repository = "https://github.com/wavey-ai/bitneedle"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+record-descriptor = { path = "../record-descriptor", version = "0.1.3" }
