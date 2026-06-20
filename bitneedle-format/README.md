@@ -26,9 +26,6 @@ This README is explanatory. The normative details are in
 └──────────────────────────────────────────────────────────┘
 ```
 
-The main groove is **not patternised**. BSC1 still uses its own independent
-pair-sign pixel carrier in selected non-payload regions.
-
 ## Format stack
 
 | Layer | Magic | Purpose | Structural encoding |
