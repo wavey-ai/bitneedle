@@ -17,36 +17,18 @@ pub enum SignedReleaseStatus {
     UntrustedKey,
 }
 
+/// SHA-256 and Ed25519 are fixed by `SIGNED_RELEASE_REFERENCE_VERSION`; the
+/// verifier no longer receives algorithm selector bytes.
 pub trait SignedReleaseVerifier {
-    fn verify(
-        &mut self,
-        manifest_hash_algorithm: u8,
-        manifest_hash: &[u8],
-        signature_algorithm: u8,
-        key_id: &[u8],
-        signature: &[u8],
-    ) -> Result<()>;
+    fn verify(&mut self, release_commitment_sha256: &[u8], key_id: &[u8], signature: &[u8]) -> Result<()>;
 }
 
 impl<F> SignedReleaseVerifier for F
 where
-    F: FnMut(u8, &[u8], u8, &[u8], &[u8]) -> Result<()>,
+    F: FnMut(&[u8], &[u8], &[u8]) -> Result<()>,
 {
-    fn verify(
-        &mut self,
-        manifest_hash_algorithm: u8,
-        manifest_hash: &[u8],
-        signature_algorithm: u8,
-        key_id: &[u8],
-        signature: &[u8],
-    ) -> Result<()> {
-        self(
-            manifest_hash_algorithm,
-            manifest_hash,
-            signature_algorithm,
-            key_id,
-            signature,
-        )
+    fn verify(&mut self, release_commitment_sha256: &[u8], key_id: &[u8], signature: &[u8]) -> Result<()> {
+        self(release_commitment_sha256, key_id, signature)
     }
 }
 
@@ -63,9 +45,7 @@ pub fn verify_signed_release(
     }
 
     match verifier.verify(
-        reference.manifest_hash_algorithm,
-        &reference.manifest_hash,
-        reference.signature_algorithm,
+        &reference.release_commitment_sha256,
         &reference.key_id,
         &reference.signature,
     ) {

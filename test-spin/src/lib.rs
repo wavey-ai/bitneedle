@@ -1,20 +1,17 @@
 //! Reusable verbose inspection for Bitneedle PNG records.
 //!
 //! BRD1 and BRS1 remain compact binary wire formats. This library renders the
-//! decoded typed structures as human-readable text (and optionally pretty JSON)
-//! for diagnostics. Presentation JSON is never treated as canonical wire data.
+//! decoded typed structures as labelled human-readable text for diagnostics.
+//! Canonical BRD1 and BRS1 data remains compact binary.
 
 use std::fmt::Write as _;
-use std::io::Cursor;
-
 use anyhow::{bail, Context, Result};
-use encodec_rs::binary::{read_chunk_payload, read_ecdc_header};
-use encodec_rs::format::{segment_starts, EcdcMetadata};
 use record_core::{
-    inspect_record_stream, parse_record_stream, payload_descriptor_count_from_metadata,
-    validate_payload_entries_metadata, validate_track_listing_metadata, RecordStreamMetadata,
-    ResolvedPayloadEntry, CONTAINER_ECDC, CONTAINER_EXTENSION, CONTAINER_MOSS_NANO,
-    CONTAINER_RAW, RECORD_STREAM_HEADER_LENGTH, RECORD_STREAM_MAGIC,
+    gap, parse_record_stream, payload_descriptor_count_from_metadata,
+    validate_payload_entries_metadata, validate_track_listing_metadata,
+    RecordStreamMetadata, ResolvedPayloadEntry, CONTAINER_ECDC, CONTAINER_EXTENSION,
+    CONTAINER_MOSS_NANO, PAYLOAD_CONTAINER_ECDC, PAYLOAD_CONTAINER_GAP,
+    RECORD_STREAM_HEADER_LENGTH, RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{RecordDescriptor, SignedReleaseReference};
 
@@ -37,6 +34,9 @@ pub struct InspectionOptions<'a> {
 
     /// Maximum prefix bytes printed for each binary object.
     pub max_hex_bytes: usize,
+
+    /// Print every payload entry instead of the default first/last compact view.
+    pub verbose_payload_entries: bool,
 }
 
 impl<'a> InspectionOptions<'a> {
@@ -47,6 +47,7 @@ impl<'a> InspectionOptions<'a> {
             manifest: None,
             max_chunks: 12,
             max_hex_bytes: 256,
+            verbose_payload_entries: false,
         }
     }
 }
@@ -101,6 +102,7 @@ pub fn inspect_record_png(
         &mut out,
         &decoded.chunk_stream.bytes,
         decoded.chunk_stream.pixel_count,
+        &decoded.record_profile,
         options,
     )?;
 
@@ -219,23 +221,13 @@ pub fn report_signed_release_reference(
     writeln!(out, "  envelope version:        {}", reference.version)?;
     writeln!(
         out,
-        "  manifest hash algorithm: {}",
-        reference.manifest_hash_algorithm
+        "  release commitment bytes: {}",
+        reference.release_commitment_sha256.len()
     )?;
     writeln!(
         out,
-        "  manifest hash bytes:     {}",
-        reference.manifest_hash.len()
-    )?;
-    writeln!(
-        out,
-        "  manifest hash (hex):     {}",
-        hex::encode(&reference.manifest_hash)
-    )?;
-    writeln!(
-        out,
-        "  signature algorithm:     {}",
-        reference.signature_algorithm
+        "  release commitment (hex): {}",
+        hex::encode(reference.release_commitment_sha256)
     )?;
 
     match printable_utf8(&reference.key_id) {
@@ -289,13 +281,8 @@ pub fn report_external_manifest(
     if let Some(reference) = reference {
         writeln!(
             out,
-            "  expected hash algorithm: {}",
-            reference.manifest_hash_algorithm
-        )?;
-        writeln!(
-            out,
-            "  expected hash (hex):     {}",
-            hex::encode(&reference.manifest_hash)
+            "  expected release commitment (hex): {}",
+            hex::encode(reference.release_commitment_sha256)
         )?;
         writeln!(
             out,
@@ -306,10 +293,8 @@ pub fn report_external_manifest(
     }
 
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(manifest.bytes) {
-        writeln!(out, "  display format:          JSON (tooling view only)")?;
-        let pretty = serde_json::to_string_pretty(&value)
-            .context("failed to pretty-print manifest JSON")?;
-        writeln!(out, "{}", indent(&pretty, 4))?;
+        writeln!(out, "  display format:          JSON")?;
+        report_json_structure(out, &value)?;
     } else if let Some(text) = printable_utf8(manifest.bytes) {
         writeln!(out, "  display format:          UTF-8 text")?;
         writeln!(out, "{}", indent(text, 4))?;
@@ -330,6 +315,7 @@ pub fn report_stream(
     out: &mut String,
     stream: &[u8],
     extracted_groove_pixels: usize,
+    record_profile: &str,
     options: &InspectionOptions<'_>,
 ) -> Result<()> {
     section(out, "BRS1 RECORD STREAM");
@@ -367,19 +353,61 @@ pub fn report_stream(
     )?;
 
     let parsed = parse_record_stream(stream)?;
-    let inspection = inspect_record_stream(&parsed)?;
 
-    section(out, "BRS1 TYPED METADATA");
-
-    // JSON here is a presentation format generated from the typed structure.
-    // It is not read from the BRS1 wire and does not determine canonical bytes.
-    let pretty = serde_json::to_string_pretty(&inspection)
-        .context("failed to render typed BRS1 inspection")?;
-    writeln!(out, "{}", indent(&pretty, 2))?;
-
+    report_stream_summary(out, &parsed)?;
     report_metadata_summary(out, &parsed.metadata)?;
     report_chunks(out, &parsed, options.max_chunks)?;
+    report_actual_programme_layout(
+        out,
+        &parsed,
+        record_profile,
+        options.verbose_payload_entries,
+    )?;
     report_entries(out, &parsed, options)?;
+    report_spec_consistency(out, &parsed, record_profile)?;
+
+    Ok(())
+}
+
+fn report_stream_summary(out: &mut String, parsed: &record_core::RecordStream) -> Result<()> {
+    section(out, "BRS1 SUMMARY");
+
+    let musical_revolutions = parsed
+        .metadata
+        .tracks
+        .iter()
+        .map(|track| track.revolution_count)
+        .sum::<usize>();
+
+    // Track-gap entries are reported purely from the explicit `track_gaps`
+    // metadata — never by sniffing a payload container, classifying small
+    // ECDC entries as gaps, or inferring gaps from entries left uncovered by
+    // a track. A gap's bytes are an ordinary payload entry (ECDC in
+    // practice); only this metadata says what it is.
+    let track_gap_entries = parsed
+        .metadata
+        .track_gaps
+        .iter()
+        .map(|gap| gap.revolution_count as usize)
+        .sum::<usize>();
+
+    let total_entries = parsed.metadata.payload_entries.len();
+
+    writeln!(out, "  report mode:               compact-v3")?;
+    writeln!(out, "  tracks:                    {}", parsed.metadata.tracks.len())?;
+    writeln!(out, "  TrackGap ranges:           {}", parsed.metadata.track_gaps.len())?;
+    writeln!(out, "  musical timeline entries:  {musical_revolutions}")?;
+    writeln!(out, "  TrackGap timeline entries: {track_gap_entries}")?;
+    writeln!(out, "  total timeline entries:    {total_entries}")?;
+    writeln!(out, "  transport chunks:          {}", parsed.chunks.len())?;
+
+    if musical_revolutions + track_gap_entries != total_entries {
+        bail!(
+            "musical timeline entries ({musical_revolutions}) + TrackGap timeline entries \
+             ({track_gap_entries}) != total timeline entries ({total_entries}); every payload \
+             entry must belong to exactly one track or track gap"
+        );
+    }
 
     Ok(())
 }
@@ -388,10 +416,9 @@ fn report_metadata_summary(
     out: &mut String,
     metadata: &RecordStreamMetadata,
 ) -> Result<()> {
-    section(out, "BRS1 CANONICAL METADATA CHECK");
+    section(out, "BRS1 HEADER METADATA");
 
     let descriptor_count = payload_descriptor_count_from_metadata(metadata)?;
-    validate_track_listing_metadata(metadata)?;
 
     writeln!(out, "  metadata version:          {}", metadata.version)?;
     writeln!(out, "  encrypted:                 {}", metadata.encrypted)?;
@@ -403,30 +430,167 @@ fn report_metadata_summary(
     )?;
     writeln!(out, "  tracks:                    {}", metadata.tracks.len())?;
 
+    section(out, "BRS1 PAYLOAD DESCRIPTORS");
+
     for (index, descriptor) in metadata.payload_descriptors.iter().enumerate() {
+        writeln!(out, "  descriptor[{index}]")?;
+        writeln!(out, "    container:              {}", descriptor.container)?;
         writeln!(
             out,
-            "  descriptor[{index}]: container={} codec={:?} sample_rate={:?} channels={:?}",
-            descriptor.container,
-            descriptor.codec,
-            descriptor.sample_rate,
-            descriptor.channels
+            "    codec:                  {}",
+            descriptor.codec.as_deref().unwrap_or("<absent>")
         )?;
+        writeln!(
+            out,
+            "    sample rate:            {}",
+            descriptor
+                .sample_rate
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<absent>".to_owned())
+        )?;
+        writeln!(
+            out,
+            "    channels:               {}",
+            descriptor
+                .channels
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<absent>".to_owned())
+        )?;
+        writeln!(
+            out,
+            "    block samples:          {}",
+            descriptor
+                .block_samples
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<absent>".to_owned())
+        )?;
+        writeln!(
+            out,
+            "    output offset samples:  {}",
+            descriptor
+                .output_offset_samples
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<absent>".to_owned())
+        )?;
+        writeln!(
+            out,
+            "    output samples:         {}",
+            descriptor
+                .output_samples
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<absent>".to_owned())
+        )?;
+
+        match descriptor.codec_metadata.as_deref() {
+            Some(bytes) => {
+                writeln!(out, "    codec metadata bytes:   {}", bytes.len())?;
+                match std::str::from_utf8(bytes) {
+                    Ok(text) => {
+                        writeln!(out, "    codec metadata UTF-8:   yes")?;
+                        match serde_json::from_str::<serde_json::Value>(text) {
+                            Ok(value) => {
+                                writeln!(out, "    codec metadata JSON:    yes")?;
+                                writeln!(
+                                    out,
+                                    "    codec metadata value:   {}",
+                                    serde_json::to_string(&value)?
+                                )?;
+                            }
+                            Err(error) => {
+                                writeln!(out, "    codec metadata JSON:    no")?;
+                                writeln!(out, "    codec metadata error:   {error}")?;
+                                writeln!(
+                                    out,
+                                    "{}",
+                                    indent(&hex_prefix(bytes, 384), 6)
+                                )?;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        writeln!(out, "    codec metadata UTF-8:   no")?;
+                        writeln!(out, "    codec metadata error:   {error}")?;
+                        writeln!(
+                            out,
+                            "{}",
+                            indent(&hex_prefix(bytes, 384), 6)
+                        )?;
+                    }
+                }
+            }
+            None => {
+                writeln!(out, "    codec metadata:         absent")?;
+            }
+        }
     }
 
-    section(out, "BRS1 TRACK LISTING");
+    section(out, "BRS1 PAYLOAD ENTRY TABLE");
+
+    let display_indices = track_boundary_entry_indices(metadata);
+    let mut byte_offset = 0usize;
+    let mut previous_printed_index = None;
+
+    for (index, entry) in metadata.payload_entries.iter().enumerate() {
+        if display_indices.binary_search(&index).is_ok() {
+            if let Some(previous_index) = previous_printed_index {
+                let omitted = index.saturating_sub(previous_index + 1);
+                if omitted > 0 {
+                    writeln!(out, "  ... {omitted} intermediate payload entries omitted")?;
+                }
+            }
+
+            writeln!(
+                out,
+                "  entry[{index}]: byte_offset={} byte_length={} descriptor_index={}",
+                byte_offset,
+                entry.byte_length,
+                entry.payload_descriptor_index
+            )?;
+            previous_printed_index = Some(index);
+        }
+
+        byte_offset = byte_offset
+            .checked_add(entry.byte_length)
+            .context("payload entry byte offset overflow while reporting header table")?;
+    }
+
+    section(out, "BRS1 TRACK TABLE");
 
     for (index, track) in metadata.tracks.iter().enumerate() {
         writeln!(
             out,
-            "  track[{}]: title={:?} payload_entry_index={}",
-            index + 1,
+            "  track[{index}]: title={:?} first_revolution_index={} revolution_count={}",
             track.title,
-            track.payload_entry_index
+            track.first_revolution_index,
+            track.revolution_count
         )?;
     }
 
     Ok(())
+}
+
+fn track_boundary_entry_indices(metadata: &RecordStreamMetadata) -> Vec<usize> {
+    let mut indices = Vec::new();
+
+    for track in &metadata.tracks {
+        if track.revolution_count == 0 {
+            continue;
+        }
+
+        let first = track.first_revolution_index;
+        let last = first.saturating_add(track.revolution_count.saturating_sub(1));
+
+        if first < metadata.payload_entries.len() {
+            indices.push(first);
+        }
+        if last < metadata.payload_entries.len() && last != first {
+            indices.push(last);
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 fn report_chunks(
@@ -441,10 +605,7 @@ fn report_chunks(
     for (index, chunk) in parsed.chunks.iter().enumerate().take(max_chunks) {
         writeln!(
             out,
-            "  chunk[{index}]: stream_index={} chunk_count={} descriptor_index={} payload_bytes={} crc32={:08x} nonce={}",
-            chunk.index,
-            chunk.chunk_count,
-            chunk.payload_descriptor_index,
+            "  chunk[{index}]: payload_bytes={} crc32={:08x} nonce={}",
             chunk.payload.len(),
             chunk.crc32,
             if chunk.nonce.is_some() { "present" } else { "absent" }
@@ -462,28 +623,621 @@ fn report_chunks(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct SpecCheck {
+    passed: bool,
+    label: String,
+    detail: String,
+}
+
+impl SpecCheck {
+    fn pass(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            passed: true,
+            label: label.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn fail(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            passed: false,
+            label: label.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+fn report_actual_programme_layout(
+    out: &mut String,
+    parsed: &record_core::RecordStream,
+    record_profile: &str,
+    _verbose_payload_entries: bool,
+) -> Result<()> {
+    section(out, "DERIVED PROGRAMME LAYOUT");
+
+    let payload = record_core::record_stream_payload_bytes(parsed);
+    let entries = validate_payload_entries_metadata(&parsed.metadata, Some(payload.len()))?;
+
+    let mut track_by_entry: Vec<Option<(usize, &str)>> =
+        vec![None; parsed.metadata.payload_entries.len()];
+
+    for (track_index, track) in parsed.metadata.tracks.iter().enumerate() {
+        let end = track
+            .first_revolution_index
+            .checked_add(track.revolution_count)
+            .context("track revolution range overflow while reporting layout")?;
+
+        for entry_index in track.first_revolution_index..end {
+            if let Some(slot) = track_by_entry.get_mut(entry_index) {
+                *slot = Some((track_index + 1, track.title.as_str()));
+            }
+        }
+    }
+
+    let mut chunk_ranges = Vec::with_capacity(parsed.chunks.len());
+    let mut chunk_offset = 0usize;
+    for (chunk_index, chunk) in parsed.chunks.iter().enumerate() {
+        let end = chunk_offset
+            .checked_add(chunk.payload.len())
+            .context("transport chunk byte range overflow")?;
+        chunk_ranges.push((chunk_index, chunk_offset, end));
+        chunk_offset = end;
+    }
+
+    let sample_rate = parsed
+        .metadata
+        .payload_descriptors
+        .iter()
+        .find_map(|descriptor| descriptor.sample_rate);
+
+    let display_indices = track_boundary_entry_indices(&parsed.metadata);
+    let mut sample_cursor = 0u64;
+    let mut sample_cursor_known = true;
+    let mut previous_printed_index = None;
+
+    writeln!(out, "  note:                      derived from header tables and payload bodies")?;
+    writeln!(out, "  record profile:            {record_profile}")?;
+    writeln!(out, "  logical payload entries:   {}", entries.len())?;
+    writeln!(out, "  transport chunks:          {}", parsed.chunks.len())?;
+    writeln!(out, "  stored payload bytes:      {}", payload.len())?;
+    writeln!(
+        out,
+        "  sample rate:               {}",
+        sample_rate
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<absent>".to_owned())
+    )?;
+
+    for entry in &entries {
+        let descriptor = parsed
+            .metadata
+            .payload_descriptors
+            .get(entry.payload_descriptor_index as usize)
+            .context("payload descriptor index is out of range")?;
+
+        let entry_end = entry
+            .byte_offset
+            .checked_add(entry.byte_length)
+            .context("payload entry byte range overflow")?;
+
+        let entry_bytes = payload
+            .get(entry.byte_offset..entry_end)
+            .context("payload entry exceeds stored payload")?;
+
+        let ownership = track_by_entry[entry.index]
+            .map(|(number, title)| format!("track {number} {:?}", title));
+
+        let should_print = display_indices.binary_search(&entry.index).is_ok();
+
+        let sample_count_result: Result<(u64, &'static str)> =
+            if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP) {
+                gap::decode_gap_header(entry_bytes)
+                    .map(|header| (header.sample_count, "GAP1 header"))
+                    .context("failed to read GAP1 sample count")
+            } else if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
+                record_core::ecdc::headerless_entry_sample_count(entry_bytes, descriptor)
+                    .map(|samples| (samples, "headerless ECDC entry"))
+                    .context("failed to read exact headerless ECDC sample count")
+            } else {
+                descriptor
+                    .output_samples
+                    .map(|samples| (u64::from(samples), "descriptor outputSamples"))
+                    .context("no exact sample-count rule for this payload entry")
+            };
+
+        let covering_chunks = chunk_ranges
+            .iter()
+            .filter_map(|(chunk_index, chunk_start, chunk_end)| {
+                let overlap_start = entry.byte_offset.max(*chunk_start);
+                let overlap_end = entry_end.min(*chunk_end);
+
+                if overlap_start < overlap_end {
+                    Some(format!(
+                        "{chunk_index}[{}..{}]",
+                        overlap_start - *chunk_start,
+                        overlap_end - *chunk_start
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if should_print {
+            if let Some(previous_index) = previous_printed_index {
+                let omitted = entry.index.saturating_sub(previous_index + 1);
+                if omitted > 0 {
+                    writeln!(out, "  ... {omitted} intermediate payload entries omitted")?;
+                }
+            }
+
+            writeln!(
+                out,
+                "  entry[{}] {}",
+                entry.index,
+                ownership.as_deref().unwrap_or("semantic gap")
+            )?;
+            writeln!(out, "    descriptor index:       {}", entry.payload_descriptor_index)?;
+            writeln!(
+                out,
+                "    container / codec:      {} / {}",
+                descriptor.container,
+                descriptor.codec.as_deref().unwrap_or("<absent>")
+            )?;
+            writeln!(
+                out,
+                "    stored byte range:      {}..{} ({} bytes)",
+                entry.byte_offset,
+                entry_end,
+                entry.byte_length
+            )?;
+
+            if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
+                writeln!(out, "    payload prefix:         headerless codec body")?;
+            } else {
+                writeln!(out, "    payload magic:          {:?}", ascii_magic(entry_bytes))?;
+            }
+
+            writeln!(
+                out,
+                "    transport coverage:     {}",
+                if covering_chunks.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    covering_chunks.join(", ")
+                }
+            )?;
+            previous_printed_index = Some(entry.index);
+        }
+
+        match sample_count_result {
+            Ok((0, source))
+                if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) =>
+            {
+                sample_cursor_known = false;
+                if should_print {
+                    writeln!(out, "    sample count:           invalid zero ({source})")?;
+                    writeln!(out, "    programme samples:      unavailable from this entry onward")?;
+                }
+            }
+            Ok((samples, source)) => {
+                let start_sample = sample_cursor;
+                let end_sample = start_sample
+                    .checked_add(samples)
+                    .context("programme sample range overflow")?;
+
+                if should_print {
+                    writeln!(out, "    sample count:           {samples} ({source})")?;
+                    if sample_cursor_known {
+                        writeln!(out, "    programme samples:      {start_sample}..{end_sample}")?;
+                        if let Some(rate) = sample_rate.filter(|value| *value > 0) {
+                            writeln!(
+                                out,
+                                "    programme time:         {:.6}..{:.6} s",
+                                start_sample as f64 / rate as f64,
+                                end_sample as f64 / rate as f64
+                            )?;
+                        }
+                    } else {
+                        writeln!(
+                            out,
+                            "    programme samples:      unknown because an earlier entry could not be measured"
+                        )?;
+                    }
+                }
+
+                sample_cursor = end_sample;
+            }
+            Err(error) => {
+                sample_cursor_known = false;
+                if should_print {
+                    writeln!(out, "    sample count:           unavailable")?;
+                    writeln!(out, "    sample-count error:     {error:#}")?;
+                }
+            }
+        }
+    }
+
+    if sample_cursor_known {
+        writeln!(out, "  total programme samples:   {sample_cursor}")?;
+        if let Some(rate) = sample_rate.filter(|value| *value > 0) {
+            writeln!(
+                out,
+                "  total programme duration:  {:.6} s",
+                sample_cursor as f64 / rate as f64
+            )?;
+        }
+    } else {
+        writeln!(
+            out,
+            "  total programme samples:   unavailable because one or more entries could not be measured"
+        )?;
+    }
+
+    Ok(())
+}
+
+fn collect_spec_checks(
+    parsed: &record_core::RecordStream,
+    record_profile: &str,
+) -> Vec<SpecCheck> {
+    let mut checks = Vec::new();
+
+    checks.push(if parsed.metadata.version == record_core::RECORD_STREAM_METADATA_VERSION {
+        SpecCheck::pass(
+            "BRS1 metadata version",
+            format!("version {}", parsed.metadata.version),
+        )
+    } else {
+        SpecCheck::fail(
+            "BRS1 metadata version",
+            format!(
+                "expected {}, found {}",
+                record_core::RECORD_STREAM_METADATA_VERSION,
+                parsed.metadata.version
+            ),
+        )
+    });
+
+    checks.push(match record_core::normalize_record_profile_name(record_profile) {
+        Ok(profile) => SpecCheck::pass("Record profile", profile),
+        Err(error) => SpecCheck::fail("Record profile", format!("{error:#}")),
+    });
+
+    checks.push(match validate_track_listing_metadata(&parsed.metadata) {
+        Ok(()) => SpecCheck::pass(
+            "Musical track ranges",
+            "all payload entries are covered exactly once by either Track or TrackGap",
+        ),
+        Err(error) => SpecCheck::fail("Musical track ranges", format!("{error:#}")),
+    });
+
+    let payload = record_core::record_stream_payload_bytes(parsed);
+    let resolved = match validate_payload_entries_metadata(
+        &parsed.metadata,
+        Some(payload.len()),
+    ) {
+        Ok(entries) => {
+            checks.push(SpecCheck::pass(
+                "Payload entry byte coverage",
+                format!("{} entries cover all {} stored payload bytes", entries.len(), payload.len()),
+            ));
+            Some(entries)
+        }
+        Err(error) => {
+            checks.push(SpecCheck::fail(
+                "Payload entry byte coverage",
+                format!("{error:#}"),
+            ));
+            None
+        }
+    };
+
+    for (index, descriptor) in parsed.metadata.payload_descriptors.iter().enumerate() {
+        checks.push(match record_core::validate_payload_descriptor(descriptor) {
+            Ok(()) => SpecCheck::pass(
+                format!("Descriptor {index} generic validation"),
+                format!("container {}", descriptor.container),
+            ),
+            Err(error) => SpecCheck::fail(
+                format!("Descriptor {index} generic validation"),
+                format!("{error:#}"),
+            ),
+        });
+
+        if descriptor
+            .container
+            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+        {
+            let mut problems = Vec::new();
+
+            if !matches!(
+                descriptor.codec.as_deref(),
+                Some(codec) if codec.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+            ) {
+                problems.push("codec is absent or not ECDC".to_owned());
+            }
+            if !matches!(descriptor.sample_rate, Some(value) if value > 0) {
+                problems.push("sampleRate is absent or zero".to_owned());
+            }
+            if !matches!(descriptor.channels, Some(value) if value > 0) {
+                problems.push("channels is absent or zero".to_owned());
+            }
+            if descriptor.block_samples.is_none()
+                || descriptor.output_offset_samples.is_none()
+                || descriptor.output_samples.is_none()
+            {
+                problems.push("typed output geometry is incomplete".to_owned());
+            }
+
+            match descriptor.codec_metadata.as_deref() {
+                None => problems.push("codecMetadata is absent".to_owned()),
+                Some(bytes) if bytes.is_empty() => {
+                    problems.push("codecMetadata is empty".to_owned())
+                }
+                Some(bytes) => {
+                    if let Err(error) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                        problems.push(format!("codecMetadata is not valid JSON: {error}"));
+                    }
+                }
+            }
+
+            checks.push(if problems.is_empty() {
+                SpecCheck::pass(
+                    format!("Descriptor {index} canonical ECDC shape"),
+                    "codec, sample format, output geometry and codecMetadata are present",
+                )
+            } else {
+                SpecCheck::fail(
+                    format!("Descriptor {index} canonical ECDC shape"),
+                    problems.join("; "),
+                )
+            });
+        }
+
+        if descriptor
+            .container
+            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+        {
+            let mut problems = Vec::new();
+
+            if !matches!(
+                descriptor.codec.as_deref(),
+                Some(codec) if codec.eq_ignore_ascii_case("GAP")
+            ) {
+                problems.push("codec is absent or not GAP".to_owned());
+            }
+            if !matches!(descriptor.sample_rate, Some(value) if value > 0) {
+                problems.push("sampleRate is absent or zero".to_owned());
+            }
+            if !matches!(descriptor.channels, Some(value) if value > 0) {
+                problems.push("channels is absent or zero".to_owned());
+            }
+            if descriptor.block_samples.is_some()
+                || descriptor.output_offset_samples.is_some()
+                || descriptor.output_samples.is_some()
+            {
+                problems.push("GAP descriptor incorrectly contains output geometry".to_owned());
+            }
+            if descriptor.codec_metadata.is_some() {
+                problems.push("GAP descriptor incorrectly contains codecMetadata".to_owned());
+            }
+
+            checks.push(if problems.is_empty() {
+                SpecCheck::pass(
+                    format!("Descriptor {index} canonical GAP shape"),
+                    "container GAP, codec GAP, sample rate/channels present, no geometry",
+                )
+            } else {
+                SpecCheck::fail(
+                    format!("Descriptor {index} canonical GAP shape"),
+                    problems.join("; "),
+                )
+            });
+        }
+    }
+
+    if let Some(entries) = resolved {
+        for entry in entries {
+            let descriptor = match parsed
+                .metadata
+                .payload_descriptors
+                .get(entry.payload_descriptor_index as usize)
+            {
+                Some(descriptor) => descriptor,
+                None => {
+                    checks.push(SpecCheck::fail(
+                        format!("Entry {} descriptor reference", entry.index),
+                        "descriptor index is out of range",
+                    ));
+                    continue;
+                }
+            };
+
+            let end = match entry.byte_offset.checked_add(entry.byte_length) {
+                Some(end) => end,
+                None => {
+                    checks.push(SpecCheck::fail(
+                        format!("Entry {} byte range", entry.index),
+                        "byte range overflow",
+                    ));
+                    continue;
+                }
+            };
+
+            let bytes = match payload.get(entry.byte_offset..end) {
+                Some(bytes) => bytes,
+                None => {
+                    checks.push(SpecCheck::fail(
+                        format!("Entry {} byte range", entry.index),
+                        "entry exceeds stored payload",
+                    ));
+                    continue;
+                }
+            };
+
+            if descriptor
+                .container
+                .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+            {
+                checks.push(match gap::validate_gap_payload(bytes) {
+                    Ok(header) => SpecCheck::pass(
+                        format!("Entry {} GAP1 payload", entry.index),
+                        format!(
+                            "{} samples, {} bytes, seed 0x{:08x}",
+                            header.sample_count,
+                            header.payload_byte_length,
+                            header.seed
+                        ),
+                    ),
+                    Err(error) => SpecCheck::fail(
+                        format!("Entry {} GAP1 payload", entry.index),
+                        format!("{error:#}"),
+                    ),
+                });
+            }
+
+            if descriptor
+                .container
+                .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+            {
+                checks.push(match record_core::ecdc::headerless_entry_sample_count(bytes, descriptor) {
+                    Ok(0) => SpecCheck::fail(
+                        format!("Entry {} exact ECDC sample count", entry.index),
+                        "musical ECDC entry resolved to zero samples",
+                    ),
+                    Ok(samples) => SpecCheck::pass(
+                        format!("Entry {} exact ECDC sample count", entry.index),
+                        format!("{samples} samples"),
+                    ),
+                    Err(error) => SpecCheck::fail(
+                        format!("Entry {} exact ECDC sample count", entry.index),
+                        format!("{error:#}"),
+                    ),
+                });
+            }
+        }
+    }
+
+    checks.push(match record_core::build_programme_map(parsed, Some(record_profile)) {
+        Ok(map) => SpecCheck::pass(
+            "Pre-decode programme map",
+            format!(
+                "{} samples across {} regions",
+                map.total_samples,
+                map.regions.len()
+            ),
+        ),
+        Err(error) => SpecCheck::fail("Pre-decode programme map", format!("{error:#}")),
+    });
+
+    checks
+}
+
+fn report_spec_consistency(
+    out: &mut String,
+    parsed: &record_core::RecordStream,
+    record_profile: &str,
+) -> Result<()> {
+    section(out, "SPEC CONSISTENCY");
+
+    let checks = collect_spec_checks(parsed, record_profile);
+    let mut omitted_entry_passes = 0usize;
+
+    for check in &checks {
+        let repetitive_entry_pass = check.passed
+            && check.label.starts_with("Entry ")
+            && (check.label.ends_with(" exact ECDC sample count")
+                || check.label.ends_with(" GAP1 payload"));
+
+        if repetitive_entry_pass {
+            omitted_entry_passes += 1;
+            continue;
+        }
+
+        let status = if check.passed {
+            "\x1b[1;32mPASS\x1b[0m"
+        } else {
+            "\x1b[1;31mFAIL\x1b[0m"
+        };
+
+        writeln!(out, "  [{status}] {}", check.label)?;
+        writeln!(out, "         {}", check.detail)?;
+    }
+
+    if omitted_entry_passes > 0 {
+        writeln!(
+            out,
+            "  {omitted_entry_passes} successful per-entry payload checks omitted"
+        )?;
+    }
+
+    let passed = checks.iter().filter(|check| check.passed).count();
+    let failed = checks.len().saturating_sub(passed);
+
+    section(out, "FINAL PASS / FAIL REPORT");
+
+    if failed == 0 {
+        writeln!(
+            out,
+            "\x1b[1;32m  PASS — all {passed} format and layout checks passed.\x1b[0m"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "\x1b[1;31m  FAIL — {failed} of {} checks failed; {passed} passed.\x1b[0m",
+            checks.len()
+        )?;
+        writeln!(
+            out,
+            "\x1b[1;33m  The stored PNG was inspected as-is. No standalone ECDC object was reconstructed.\x1b[0m"
+        )?;
+    }
+
+    Ok(())
+}
+
 fn report_entries(
     out: &mut String,
     parsed: &record_core::RecordStream,
     options: &InspectionOptions<'_>,
 ) -> Result<()> {
-    section(out, "BRS1 PAYLOAD ENTRIES");
+    section(out, "BRS1 PAYLOAD BODIES");
 
     let payload = record_core::chunk_stream_payload_bytes(parsed);
-    let entries = validate_payload_entries_metadata(
-        &parsed.metadata,
-        Some(payload.len()),
-    )?;
+    let entries = validate_payload_entries_metadata(&parsed.metadata, Some(payload.len()))?;
 
-    writeln!(
-        out,
-        "  reconstructed payload bytes: {}",
-        payload.len()
-    )?;
+    writeln!(out, "  reconstructed payload bytes: {}", payload.len())?;
     writeln!(out, "  logical payload entries:     {}", entries.len())?;
 
-    for entry in &entries {
+    let display_entries = track_boundary_entry_indices(&parsed.metadata);
+
+    let mut previous_printed_index = None;
+
+    for entry_index in display_entries {
+        if let Some(previous_index) = previous_printed_index {
+            let omitted = entry_index.saturating_sub(previous_index + 1);
+            if omitted > 0 {
+                writeln!(
+                    out,
+                    "  ... {omitted} intermediate payload entries omitted; use --verbose to show all"
+                )?;
+            }
+        }
+
+        let entry = &entries[entry_index];
         let bytes = payload_entry_bytes(&payload, entry)?;
+
+        section(
+            out,
+            &format!("PAYLOAD BODY {} / {}", entry.index + 1, entries.len()),
+        );
+
+        writeln!(out, "  entry index:              {}", entry.index)?;
+        writeln!(out, "  byte offset:              {}", entry.byte_offset)?;
+        writeln!(out, "  byte length:              {}", entry.byte_length)?;
+        writeln!(out, "  descriptor index:         {}", entry.payload_descriptor_index)?;
 
         let descriptor = parsed
             .metadata
@@ -491,74 +1245,30 @@ fn report_entries(
             .get(entry.payload_descriptor_index as usize)
             .context("payload descriptor index is out of range")?;
 
-        writeln!(
-            out,
-            "  entry[{}]: offset={} byte_length={} descriptor_index={} container={} magic={:?}",
-            entry.index,
-            entry.byte_offset,
-            entry.byte_length,
-            entry.payload_descriptor_index,
-            descriptor.container,
-            ascii_magic(bytes)
-        )?;
-
-        section(
-            out,
-            &format!(
-                "PAYLOAD ENTRY {} / {}",
-                entry.index + 1,
-                entries.len()
-            ),
-        );
-
-        writeln!(out, "  index:                    {}", entry.index)?;
-        writeln!(
-            out,
-            "  byte offset:              {}",
-            entry.byte_offset
-        )?;
-        writeln!(
-            out,
-            "  byte length:              {}",
-            entry.byte_length
-        )?;
-        writeln!(
-            out,
-            "  payload descriptor index: {}",
-            entry.payload_descriptor_index
-        )?;
-        writeln!(
-            out,
-            "  container:                {}",
-            descriptor.container
-        )?;
-        writeln!(out, "  codec:                    {:?}", descriptor.codec)?;
-        writeln!(
-            out,
-            "  sample rate:              {:?}",
-            descriptor.sample_rate
-        )?;
-        writeln!(
-            out,
-            "  channels:                 {:?}",
-            descriptor.channels
-        )?;
-        writeln!(out, "  magic:                    {:?}", ascii_magic(bytes))?;
-
-        if container_is_ecdc(&descriptor.container) {
-            analyse_ecdc_entry(out, bytes, options.bundle_metadata)?;
+        if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
+            writeln!(out, "  payload prefix:           headerless codec body")?;
         } else {
-            writeln!(out, "  payload prefix:")?;
+            writeln!(out, "  first four bytes:         {:?}", ascii_magic(bytes))?;
+        }
+
+        if bytes.get(..4) == Some(gap::GAP_MAGIC.as_slice()) {
+            report_gap_payload_body(out, bytes)?;
+        } else {
+            writeln!(out, "  body prefix:")?;
             writeln!(
                 out,
                 "{}",
-                indent(&hex_prefix(bytes, options.max_hex_bytes.min(128)), 4)
+                indent(&hex_prefix(bytes, options.max_hex_bytes.max(384)), 4)
             )?;
         }
+
+        previous_printed_index = Some(entry_index);
     }
 
     Ok(())
 }
+
+
 
 fn payload_entry_bytes<'a>(
     payload: &'a [u8],
@@ -574,178 +1284,27 @@ fn payload_entry_bytes<'a>(
         .context("payload entry range exceeds reconstructed payload")
 }
 
-fn container_is_ecdc(container: &str) -> bool {
-    container.eq_ignore_ascii_case(record_core::PAYLOAD_CONTAINER_ECDC)
-        || container == CONTAINER_ECDC.to_string()
-}
-
-fn analyse_ecdc_entry(
+fn report_gap_payload_body(
     out: &mut String,
     entry: &[u8],
-    bundle_metadata: Option<&encodec_rs::metadata::OnnxFrameBundleMetadata>,
 ) -> Result<()> {
-    writeln!(out, "  -- ECDC payload --")?;
-    writeln!(out, "  bytes:  {}", entry.len())?;
-    writeln!(out, "  magic:  {:?}", ascii_magic(entry))?;
-    writeln!(out, "  prefix:")?;
-    writeln!(out, "{}", indent(&hex_prefix(entry, 96), 4))?;
+    let header = gap::validate_gap_payload(entry).context("invalid GAP payload")?;
+    let filler_bytes = entry.len().saturating_sub(gap::GAP_HEADER_LENGTH);
 
-    let mut reader = Cursor::new(entry);
-    let metadata: EcdcMetadata = match read_ecdc_header(&mut reader) {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            writeln!(out, "  !! read_ecdc_header FAILED: {err:#}")?;
-            return Ok(());
-        }
-    };
-
-    let header_end = reader.position() as usize;
-
+    writeln!(out, "  GAP1 payload:")?;
+    writeln!(out, "    encoded bytes:         {}", entry.len())?;
     writeln!(
         out,
-        "  ECDC header parsed: {} bytes, {} bytes remain for packets",
-        header_end,
-        entry.len().saturating_sub(header_end)
+        "    declared payload bytes: {}",
+        header.payload_byte_length
     )?;
-    writeln!(out, "  model name:              {}", metadata.model_name)?;
-    writeln!(out, "  audio length:            {}", metadata.audio_length)?;
-    writeln!(out, "  num codebooks:           {}", metadata.num_codebooks)?;
-    writeln!(out, "  use LM:                  {}", metadata.use_lm)?;
-    writeln!(
-        out,
-        "  bitstream version:       {}",
-        metadata.bitstream_version
-    )?;
-    writeln!(out, "  LM hash:                 {:?}", metadata.lm_hash)?;
-    writeln!(
-        out,
-        "  chunk samples:           {:?}",
-        metadata.chunk_samples
-    )?;
-    writeln!(
-        out,
-        "  chunk stride:            {:?}",
-        metadata.chunk_stride
-    )?;
-    writeln!(
-        out,
-        "  LM frame length:         {:?}",
-        metadata.lm_frame_length
-    )?;
-
-    if !metadata.extra.is_empty() {
-        writeln!(out, "  extra:                   {:?}", metadata.extra)?;
-    }
-
-    let mut raw_chunks = 0usize;
-    let mut chunk_error: Option<String> = None;
-
-    loop {
-        if reader.position() as usize >= entry.len() {
-            break;
-        }
-
-        match read_chunk_payload(&mut reader, true) {
-            Ok(payload) => {
-                if raw_chunks < 12 {
-                    writeln!(
-                        out,
-                        "  ECDC packet[{raw_chunks}]: payload_bytes={}",
-                        payload.len()
-                    )?;
-                }
-                raw_chunks += 1;
-            }
-            Err(err) => {
-                chunk_error = Some(format!("{err:#}"));
-                break;
-            }
-        }
-    }
-
-    if raw_chunks > 12 {
-        writeln!(out, "  ... {} more ECDC packets", raw_chunks - 12)?;
-    }
-
-    writeln!(out, "  ECDC packet bodies present: {raw_chunks}")?;
-
-    if let Some(err) = chunk_error {
-        writeln!(out, "  !! ECDC packet read stopped early: {err}")?;
-    }
-
-    report_implied_chunks(out, &metadata, bundle_metadata, raw_chunks)?;
+    writeln!(out, "    sample count:          {}", header.sample_count)?;
+    writeln!(out, "    filler seed:           0x{:08x}", header.seed)?;
+    writeln!(out, "    filler bytes:          {filler_bytes}")?;
 
     Ok(())
 }
 
-fn report_implied_chunks(
-    out: &mut String,
-    metadata: &EcdcMetadata,
-    bundle_metadata: Option<&encodec_rs::metadata::OnnxFrameBundleMetadata>,
-    raw_chunks: usize,
-) -> Result<()> {
-    writeln!(out, "  -- implied ECDC packet count --")?;
-
-    if let Some(stride) = metadata.chunk_stride {
-        let implied = segment_starts(metadata.audio_length, stride).len();
-        writeln!(
-            out,
-            "  metadata chunk_stride={stride}: implies {implied} packets"
-        )?;
-        verdict(out, raw_chunks, implied)?;
-        return Ok(());
-    }
-
-    if let Some(bundle) = bundle_metadata {
-        match encodec_rs::format::ecdc_chunk_layout_for_chunk_count(
-            bundle,
-            metadata,
-            raw_chunks,
-        ) {
-            Ok(layout) => {
-                let implied =
-                    segment_starts(metadata.audio_length, layout.stride).len();
-                writeln!(
-                    out,
-                    "  bundle stride={}: implies {implied} packets",
-                    layout.stride
-                )?;
-                verdict(out, raw_chunks, implied)?;
-            }
-            Err(err) => {
-                writeln!(
-                    out,
-                    "  ecdc_chunk_layout_for_chunk_count: {err:#}"
-                )?;
-            }
-        }
-
-        return Ok(());
-    }
-
-    writeln!(
-        out,
-        "  no chunk_stride in ECDC metadata and no bundle metadata was provided"
-    )?;
-
-    Ok(())
-}
-
-fn verdict(out: &mut String, raw_chunks: usize, implied: usize) -> Result<()> {
-    if raw_chunks == implied {
-        writeln!(
-            out,
-            "  => OK: {raw_chunks} packet bodies match {implied} implied"
-        )?;
-    } else {
-        writeln!(
-            out,
-            "  => MISMATCH: {raw_chunks} packet bodies are present, but metadata implies {implied}"
-        )?;
-    }
-
-    Ok(())
-}
 
 pub fn load_bundle_metadata(
     path: impl AsRef<std::path::Path>,
@@ -756,6 +1315,61 @@ pub fn load_bundle_metadata(
 
     serde_json::from_str(&json)
         .context("failed to deserialize OnnxFrameBundleMetadata")
+}
+
+fn report_json_structure(
+    out: &mut String,
+    value: &serde_json::Value,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(object) => {
+            writeln!(out, "  JSON root:               object")?;
+            writeln!(out, "  top-level fields:        {}", object.len())?;
+
+            if !object.is_empty() {
+                writeln!(out, "  field names:")?;
+                for (name, field_value) in object {
+                    writeln!(
+                        out,
+                        "    {name}: {}",
+                        json_value_kind(field_value)
+                    )?;
+                }
+            }
+        }
+        serde_json::Value::Array(array) => {
+            writeln!(out, "  JSON root:               array")?;
+            writeln!(out, "  array items:             {}", array.len())?;
+
+            if let Some(first) = array.first() {
+                writeln!(
+                    out,
+                    "  first item type:         {}",
+                    json_value_kind(first)
+                )?;
+            }
+        }
+        other => {
+            writeln!(
+                out,
+                "  JSON root:               {}",
+                json_value_kind(other)
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn section(out: &mut String, title: &str) {
@@ -849,10 +1463,118 @@ fn png_ihdr(png: &[u8]) -> Option<(u32, u32, u8, u8)> {
 #[allow(dead_code)]
 fn container_code_name(code: u8) -> &'static str {
     match code {
-        CONTAINER_RAW => "RAW",
         CONTAINER_ECDC => "ECDC",
         CONTAINER_MOSS_NANO => "MOSSNANO",
         CONTAINER_EXTENSION => "EXTENSION",
         _ => "UNKNOWN",
+    }
+}
+
+#[cfg(test)]
+mod programme_summary_tests {
+    use super::*;
+    use record_core::{
+        build_programme_map, Chunk, PayloadEntryDescriptor, RecordStream, TrackDescriptor,
+        TrackGapDescriptor,
+    };
+
+    fn ecdc_descriptor() -> record_core::PayloadDescriptor {
+        record_core::ecdc::ecdc_payload_descriptor(
+            48_000,
+            2,
+            &record_core::ecdc::EcdcCodecMetadata {
+                model: "encodec_48khz".to_owned(),
+                num_codebooks: 8,
+                lm: true,
+                fp_scale: 8192,
+                min_range: 2,
+                bitstream_version: 2,
+                lm_frame_length: 203,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Three musical tracks (60 + 60 + 61 = 181 entries) separated by two
+    /// explicit two-revolution track gaps (4 entries): 185 entries total, no
+    /// GAP container or GAP1 payload anywhere — every entry is ordinary ECDC.
+    fn three_tracks_two_gaps_record_stream() -> RecordStream {
+        let entry = vec![0xABu8; 16];
+        let entry_count = 60 + 2 + 60 + 2 + 61;
+        let mut payload = Vec::with_capacity(entry_count * entry.len());
+        let mut payload_entries = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            payload.extend_from_slice(&entry);
+            payload_entries.push(PayloadEntryDescriptor {
+                byte_length: entry.len(),
+                payload_descriptor_index: 0,
+            });
+        }
+
+        let metadata = RecordStreamMetadata {
+            version: record_core::RECORD_STREAM_METADATA_VERSION,
+            encrypted: false,
+            payload_descriptors: vec![ecdc_descriptor()],
+            payload_entries,
+            tracks: vec![
+                TrackDescriptor {
+                    title: "Track A".to_owned(),
+                    first_revolution_index: 0,
+                    revolution_count: 60,
+                },
+                TrackDescriptor {
+                    title: "Track B".to_owned(),
+                    first_revolution_index: 62,
+                    revolution_count: 60,
+                },
+                TrackDescriptor {
+                    title: "Track C".to_owned(),
+                    first_revolution_index: 124,
+                    revolution_count: 61,
+                },
+            ],
+            track_gaps: vec![
+                TrackGapDescriptor {
+                    first_revolution_index: 60,
+                    revolution_count: 2,
+                    after_track_index: 0,
+                },
+                TrackGapDescriptor {
+                    first_revolution_index: 122,
+                    revolution_count: 2,
+                    after_track_index: 1,
+                },
+            ],
+        };
+
+        RecordStream {
+            metadata,
+            metadata_bytes: Vec::new(),
+            chunks: vec![Chunk { payload, crc32: 0, nonce: None }],
+        }
+    }
+
+    #[test]
+    fn summary_reports_musical_and_track_gap_entries_separately() {
+        let stream = three_tracks_two_gaps_record_stream();
+        let mut out = String::new();
+        report_stream_summary(&mut out, &stream).unwrap();
+
+        assert!(out.contains("tracks:                    3"), "{out}");
+        assert!(out.contains("TrackGap ranges:           2"), "{out}");
+        assert!(out.contains("musical timeline entries:  181"), "{out}");
+        assert!(out.contains("TrackGap timeline entries: 4"), "{out}");
+        assert!(out.contains("total timeline entries:    185"), "{out}");
+    }
+
+    #[test]
+    fn record_passes_pre_decode_programme_map_validation() {
+        let stream = three_tracks_two_gaps_record_stream();
+        validate_track_listing_metadata(&stream.metadata).unwrap();
+        let map = build_programme_map(&stream, Some("single45")).unwrap();
+        // 3 track regions + 4 gap regions (gap regions are not merged across
+        // consecutive entries, unlike same-track regions): 7 total.
+        assert_eq!(map.regions.len(), 7);
+        assert_eq!(map.total_samples, 185 * u64::from(record_core::ecdc::ECDC_OUTPUT_SAMPLES));
     }
 }

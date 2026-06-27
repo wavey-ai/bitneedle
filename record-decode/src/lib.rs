@@ -1,10 +1,11 @@
 use anyhow::{bail, Context, Result};
 use bytes2rgb::rgba_to_bytes as track_rgba_to_bytes;
+use bytes2rgb::{decode_toned_spans, TonedConfig, ToneOrdering as BytesToneOrdering, ToneSpan};
 use record_core::{
     build_header_spiral_indices, build_spiral_mask, build_trailer_spiral_indices,
     known_record_profile_names, normalize_record_profile_name, RECORD_STREAM_MAGIC,
 };
-use record_descriptor::RecordDescriptor;
+use record_descriptor::{resolve_tone_spans, RecordDescriptor, ToneOrdering as DescriptorToneOrdering};
 
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
 
@@ -19,6 +20,40 @@ pub struct DecodedRecord {
     pub record_profile: String,
     pub descriptor: RecordDescriptor,
     pub chunk_stream: DecodedChunkStream,
+}
+
+fn decode_toned_track_to_bytes(
+    track_data: &[u8],
+    tone_spans: &[record_descriptor::ToneSpanDescriptor],
+    expected_byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    if tone_spans.is_empty() {
+        bail!("toned-v1 record descriptor has no tone spans");
+    }
+
+    let resolved = resolve_tone_spans(tone_spans, expected_byte_length)
+        .context("invalid toned-v1 carrier map")?;
+
+    let spans: Vec<ToneSpan> = resolved
+        .into_iter()
+        .map(|span| ToneSpan {
+            byte_offset: span.byte_offset,
+            byte_length: span.byte_length,
+            pixel_offset: span.pixel_offset,
+            pixel_count: span.pixel_count,
+            config: TonedConfig {
+                base: span.base,
+                luma_tolerance: span.luma_tolerance,
+                bits_per_pixel: u32::from(span.bits_per_pixel),
+                ordering: match span.ordering {
+                    DescriptorToneOrdering::BaseProximity => BytesToneOrdering::BaseProximity,
+                    DescriptorToneOrdering::ChromaProximity => BytesToneOrdering::ChromaProximity,
+                },
+            },
+        })
+        .collect();
+
+    decode_toned_spans(track_data, &spans).context("failed to decode toned-v1 groove pixels")
 }
 
 fn load_png_rgba(png_bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
@@ -185,7 +220,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
     let normalized_profile = normalize_record_profile_name(record_profile)?;
     let descriptor =
         decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
-    let resolved_byte_length = byte_length.or(descriptor.stream_byte_length);
+    let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
 
     let (track_data, pixel_count) = decode_record_groove_to_track_data(
         &rgba,
@@ -200,10 +235,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
             track_rgba_to_bytes(&track_data, resolved_byte_length)?
         }
         PAYLOAD_ENCODING_TONED_V1 => {
-            bail!(
-                "toned-v1 records require the removed JSON rgbTone map; \
-                 define a binary BRD1/BRS1 tone-map structure before decoding them"
-            )
+            decode_toned_track_to_bytes(&track_data, &descriptor.tone_spans, resolved_byte_length)?
         }
         other => bail!("unsupported record payload encoding: {other}"),
     };
@@ -234,7 +266,7 @@ pub fn decode_record_png_to_chunk_stream_with_length(
 ) -> Result<(String, DecodedChunkStream)> {
     let (profile, descriptor) =
         decode_record_descriptor_from_png(png_bytes, None)?;
-    let resolved_byte_length = byte_length.or(descriptor.stream_byte_length);
+    let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
     let decoded = decode_record_png_to_chunk_stream_for_profile_with_length(
         png_bytes,
         &profile,
@@ -257,7 +289,7 @@ pub fn decode_record_png(png_bytes: &[u8]) -> Result<DecodedRecord> {
         decode_record_png_to_chunk_stream_for_profile_with_length(
             png_bytes,
             &record_profile,
-            descriptor.stream_byte_length,
+            Some(descriptor.stream_byte_length),
         )?;
 
     Ok(DecodedRecord {

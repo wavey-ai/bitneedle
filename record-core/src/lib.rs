@@ -4,6 +4,13 @@
 //! contract. It intentionally contains no application workflow identifiers,
 //! record-creation policy, placeholder signing, JSON stream metadata, legacy JSON support, or presentation masking.
 
+pub mod chunk;
+pub mod commitment;
+pub mod ecdc;
+pub mod gap;
+pub mod tracks;
+pub mod varuint;
+
 use anyhow::{anyhow, bail, Context, Result};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -28,46 +35,55 @@ pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "lp"];
 
 pub const RECORD_STREAM_MAGIC: &[u8; 4] = b"BRS1";
 pub const RECORD_STREAM_HEADER_LENGTH: usize = 8;
-pub const RECORD_STREAM_METADATA_VERSION: u8 = 1;
+// The optional typed PayloadDescriptor fields (codec, sample rate, channels,
+// decoded-block output geometry) and the length-prefixed `codec_metadata` blob
+// are signalled through previously-reserved per-descriptor flag bits, which are
+// now promoted to DESCRIPTOR_KNOWN_FLAGS. Descriptors that set no new flags
+// encode and decode identically to before, so the metadata version is unchanged.
+pub const RECORD_STREAM_METADATA_VERSION: u8 = 2;
 
 pub const METADATA_FLAG_ENCRYPTED: u8 = 0x01;
 pub const METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES: u8 = 0x02;
 pub const METADATA_FLAG_TRACK_ENTRY_MAPPINGS: u8 = 0x04;
+/// Presence of the explicit track-gap section (count + per-gap
+/// first_revolution_index/revolution_count/after_track_index), written after
+/// the track section. Absent on older streams, which have no track gaps.
+pub const METADATA_FLAG_TRACK_GAPS: u8 = 0x08;
 pub const METADATA_KNOWN_FLAGS: u8 = METADATA_FLAG_ENCRYPTED
     | METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES
-    | METADATA_FLAG_TRACK_ENTRY_MAPPINGS;
+    | METADATA_FLAG_TRACK_ENTRY_MAPPINGS
+    | METADATA_FLAG_TRACK_GAPS;
 
+/// Per-descriptor presence flags for the optional typed fields. Each set bit is
+/// followed, in this fixed order, by the corresponding field in the descriptor
+/// body (see `decode_record_stream_metadata`).
 pub const DESCRIPTOR_FLAG_CODEC: u8 = 0x01;
 pub const DESCRIPTOR_FLAG_SAMPLE_RATE: u8 = 0x02;
 pub const DESCRIPTOR_FLAG_CHANNELS: u8 = 0x04;
-pub const DESCRIPTOR_KNOWN_FLAGS: u8 =
-    DESCRIPTOR_FLAG_CODEC | DESCRIPTOR_FLAG_SAMPLE_RATE | DESCRIPTOR_FLAG_CHANNELS;
+/// The three decoded-block output-geometry fields are signalled together by a
+/// single bit: `block_samples`, `output_offset_samples`, `output_samples`.
+pub const DESCRIPTOR_FLAG_OUTPUT_GEOMETRY: u8 = 0x08;
+pub const DESCRIPTOR_FLAG_CODEC_METADATA: u8 = 0x10;
 
-pub const CONTAINER_RAW: u8 = 0;
+pub const DESCRIPTOR_KNOWN_FLAGS: u8 = DESCRIPTOR_FLAG_CODEC
+    | DESCRIPTOR_FLAG_SAMPLE_RATE
+    | DESCRIPTOR_FLAG_CHANNELS
+    | DESCRIPTOR_FLAG_OUTPUT_GEOMETRY
+    | DESCRIPTOR_FLAG_CODEC_METADATA;
+
+/// Upper bound on the length-prefixed `codec_metadata` JSON blob.
+pub const MAX_CODEC_METADATA_BYTES: usize = 64 * 1024;
+
 pub const CONTAINER_ECDC: u8 = 1;
 pub const CONTAINER_MOSS_NANO: u8 = 2;
 pub const CONTAINER_EXTENSION: u8 = 255;
 
-pub const CHUNK_INDEX_LENGTH: usize = 2;
-pub const CHUNK_COUNT_LENGTH: usize = 2;
-pub const CHUNK_PAYLOAD_DESCRIPTOR_INDEX_LENGTH: usize = 1;
-pub const CHUNK_PAYLOAD_LENGTH_FIELD_LENGTH: usize = 4;
 pub const CHUNK_CRC32_LENGTH: usize = 4;
-pub const CHUNK_SIGNATURE_LENGTH: usize = 64;
-pub const CHUNK_FIXED_HEADER_LENGTH: usize = CHUNK_INDEX_LENGTH
-    + CHUNK_COUNT_LENGTH
-    + CHUNK_PAYLOAD_DESCRIPTOR_INDEX_LENGTH
-    + CHUNK_PAYLOAD_LENGTH_FIELD_LENGTH
-    + CHUNK_CRC32_LENGTH
-    + CHUNK_SIGNATURE_LENGTH;
 
 pub const MAX_CHUNKS: usize = u16::MAX as usize;
 pub const MAX_PAYLOAD_DESCRIPTORS: usize = u8::MAX as usize;
 pub const DEFAULT_PAYLOAD_DESCRIPTOR_INDEX: u8 = 0;
 
-pub const CHUNK_SIGNATURE_DOMAIN: &[u8] = b"bitneedle.record-stream.chunk.v1";
-pub const CHUNK_SIGNATURE_WITH_NONCE_DOMAIN: &[u8] =
-    b"bitneedle.record-stream.chunk.v1.nonce";
 pub const CHUNK_ENCRYPTION_DOMAIN: &[u8] =
     b"bitneedle.record-stream.chunk-encryption.v1";
 pub const CHUNK_ENCRYPTION_ALGORITHM_CHACHA20POLY1305: &str = "chacha20poly1305";
@@ -75,10 +91,19 @@ pub const CHUNK_ENCRYPTION_NONCE_LENGTH: usize = 12;
 pub const CHUNK_ENCRYPTION_TAG_LENGTH: usize = 16;
 pub const CHUNK_ENCRYPTION_KEY_LENGTH: usize = 32;
 
-pub const PAYLOAD_CONTAINER_RAW: &str = "RAW";
 pub const PAYLOAD_CONTAINER_ECDC: &str = "ECDC";
 pub const PAYLOAD_CONTAINER_MOSS_NANO: &str = "MOSSNANO";
-pub const DEFAULT_RAW_PAYLOAD_CHUNK_SIZE: usize = 64 * 1024;
+/// Intentional PCM silence in the playable record timeline.
+///
+/// Each GAP payload entry is a canonical, versioned `GAP1` payload (see the
+/// [`gap`] module). The payload is authoritative for its own sample count, total
+/// byte length, and deterministic filler seed; the descriptor supplies only the
+/// sample rate and channel count.
+///
+/// GAP entries occupy timeline positions but are not musical tracks and must
+/// not be covered by `TrackDescriptor` ranges.
+pub const PAYLOAD_CONTAINER_GAP: &str = "GAP";
+pub const PAYLOAD_CODEC_GAP: &str = "GAP";
 
 const MAX_WIRE_STRING_BYTES: usize = u16::MAX as usize;
 
@@ -111,51 +136,70 @@ pub struct RecordProfileGeometry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    pub index: u16,
-    pub chunk_count: u16,
-    pub payload_descriptor_index: u8,
     pub payload: Vec<u8>,
     pub crc32: u32,
-    pub signature: [u8; CHUNK_SIGNATURE_LENGTH],
     pub nonce: Option<[u8; CHUNK_ENCRYPTION_NONCE_LENGTH]>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkRanges {
-    pub chunk: Range<usize>,
-    pub payload: Range<usize>,
-    pub signature: Range<usize>,
-    pub nonce: Option<Range<usize>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChunkHeader {
-    pub index: u16,
-    pub chunk_count: u16,
-    pub payload_descriptor_index: u8,
-    pub payload_len: usize,
-    pub crc32: u32,
-    pub signature: [u8; CHUNK_SIGNATURE_LENGTH],
-    pub nonce: Option<[u8; CHUNK_ENCRYPTION_NONCE_LENGTH]>,
-    pub chunk_start: usize,
-    pub signature_start: usize,
-    pub signature_end: usize,
-    pub nonce_start: Option<usize>,
-    pub nonce_end: Option<usize>,
-    pub payload_start: usize,
-    pub payload_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadDescriptor {
     pub container: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u8>,
+    /// Number of PCM samples per channel produced by decoding one complete
+    /// codec block before any logical-output crop is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_samples: Option<u32>,
+    /// PCM sample offset per channel into the decoded block where the logical
+    /// Bitneedle payload begins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_offset_samples: Option<u32>,
+    /// Number of PCM samples per channel retained as the logical Bitneedle
+    /// payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_samples: Option<u32>,
+    /// UTF-8 JSON bytes containing codec/container-specific metadata that does
+    /// not have a generic typed representation in `PayloadDescriptor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec_metadata: Option<Vec<u8>>,
+}
+
+impl PayloadDescriptor {
+    /// A bare descriptor that carries only a container name (no codec, sample
+    /// rate, channels, output geometry, or codec metadata).
+    pub fn from_container(container: impl Into<String>) -> Self {
+        Self {
+            container: container.into(),
+            codec: None,
+            sample_rate: None,
+            channels: None,
+            block_samples: None,
+            output_offset_samples: None,
+            output_samples: None,
+            codec_metadata: None,
+        }
+    }
+
+    pub fn gap(sample_rate: u32, channels: u8) -> Result<Self> {
+        let descriptor = Self {
+            container: PAYLOAD_CONTAINER_GAP.to_owned(),
+            codec: Some(PAYLOAD_CODEC_GAP.to_owned()),
+            sample_rate: Some(sample_rate),
+            channels: Some(channels),
+            block_samples: None,
+            output_offset_samples: None,
+            output_samples: None,
+            codec_metadata: None,
+        };
+
+        validate_payload_descriptor(&descriptor)?;
+        Ok(descriptor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,7 +213,22 @@ pub struct PayloadEntryDescriptor {
 #[serde(rename_all = "camelCase")]
 pub struct TrackDescriptor {
     pub title: String,
-    pub payload_entry_index: usize,
+    pub first_revolution_index: usize,
+    pub revolution_count: usize,
+}
+
+/// An explicit inter-track programme gap: real, independently decodable
+/// audio (typically ambient near-silence) that is intentionally not part of
+/// any track. `after_track_index` is the 0-based index into `tracks` this
+/// gap immediately follows. See [`crate::tracks`] for the coverage rule this
+/// is validated against: every playable revolution is covered by exactly one
+/// track or track gap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackGapDescriptor {
+    pub first_revolution_index: u32,
+    pub revolution_count: u32,
+    pub after_track_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +239,8 @@ pub struct RecordStreamMetadata {
     pub payload_descriptors: Vec<PayloadDescriptor>,
     pub payload_entries: Vec<PayloadEntryDescriptor>,
     pub tracks: Vec<TrackDescriptor>,
+    #[serde(default)]
+    pub track_gaps: Vec<TrackGapDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,9 +272,23 @@ pub struct RecordStreamInspection {
 pub struct PayloadDescriptorInspection {
     pub index: usize,
     pub container: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub channels: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_samples: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_offset_samples: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_samples: Option<u32>,
+    /// Byte length of the codec metadata blob, if present. The blob itself is
+    /// not dumped here (it may contain long hashes); verbose inspectors can
+    /// parse it separately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec_metadata_byte_length: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -230,7 +305,8 @@ pub struct PayloadEntryInspection {
 pub struct TrackInspection {
     pub number: usize,
     pub title: String,
-    pub payload_entry_index: usize,
+    pub first_revolution_index: usize,
+    pub revolution_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -776,10 +852,6 @@ pub fn read_u32be(bytes: &[u8], offset: usize, label: &str) -> Result<u32> {
     ))
 }
 
-fn push_u16be(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
 fn push_u32be(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_be_bytes());
 }
@@ -792,6 +864,20 @@ pub fn concatenate_payload_entries(entries: &[Vec<u8>]) -> Vec<u8> {
     }
 
     out
+}
+
+pub fn validate_payload_entry_bytes(
+    descriptor: &PayloadDescriptor,
+    bytes: &[u8],
+) -> Result<()> {
+    if descriptor
+        .container
+        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+    {
+        gap::validate_gap_payload(bytes)?;
+    }
+
+    Ok(())
 }
 
 pub fn crc32_ieee(bytes: &[u8]) -> u32 {
@@ -958,12 +1044,150 @@ impl<'a> WireCursor<'a> {
 
 fn container_name(code: u8, cursor: &mut WireCursor<'_>) -> Result<String> {
     match code {
-        CONTAINER_RAW => Ok(PAYLOAD_CONTAINER_RAW.to_string()),
         CONTAINER_ECDC => Ok(PAYLOAD_CONTAINER_ECDC.to_string()),
         CONTAINER_MOSS_NANO => Ok(PAYLOAD_CONTAINER_MOSS_NANO.to_string()),
         CONTAINER_EXTENSION => cursor.read_string("extension container name"),
         _ => bail!("unknown payload container code {code}"),
     }
+}
+
+/// Validate `codec_metadata` bytes: they must be valid UTF-8, syntactically
+/// valid JSON, and (when shaped as a JSON object) must not duplicate any of the
+/// three typed output-geometry fields, which now have dedicated descriptor
+/// fields. The value is not required to be a JSON object.
+pub fn validate_codec_metadata(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("codec metadata is not valid UTF-8")?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).context("codec metadata is not valid JSON")?;
+
+    if let Some(object) = value.as_object() {
+        for key in ["block_samples", "output_offset_samples", "output_samples"] {
+            if object.contains_key(key) {
+                bail!("codec metadata must not duplicate typed geometry field {key:?}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a single `PayloadDescriptor`:
+///
+/// * the three output-geometry fields are all present together or all absent;
+/// * when present, `block_samples > 0`, `output_samples > 0`, and
+///   `output_offset_samples + output_samples <= block_samples` (checked);
+/// * `codec_metadata`, when present, satisfies [`validate_codec_metadata`].
+pub fn validate_payload_descriptor(descriptor: &PayloadDescriptor) -> Result<()> {
+    let geometry_present = [
+        descriptor.block_samples,
+        descriptor.output_offset_samples,
+        descriptor.output_samples,
+    ]
+    .iter()
+    .filter(|value| value.is_some())
+    .count();
+
+    match (
+        geometry_present,
+        descriptor.block_samples,
+        descriptor.output_offset_samples,
+        descriptor.output_samples,
+    ) {
+        (0, _, _, _) => {}
+        (3, Some(block_samples), Some(output_offset_samples), Some(output_samples)) => {
+            if block_samples == 0 {
+                bail!("payload descriptor block_samples must be greater than zero");
+            }
+            if output_samples == 0 {
+                bail!("payload descriptor output_samples must be greater than zero");
+            }
+            let end = output_offset_samples
+                .checked_add(output_samples)
+                .context("payload descriptor output crop range overflows")?;
+            if end > block_samples {
+                bail!(
+                    "payload descriptor output crop range {output_offset_samples}..{end} \
+                     exceeds block_samples {block_samples}"
+                );
+            }
+        }
+        _ => bail!(
+            "payload descriptor output geometry requires block_samples, \
+             output_offset_samples, and output_samples together"
+        ),
+    }
+
+    if let Some(codec_metadata) = &descriptor.codec_metadata {
+        validate_codec_metadata(codec_metadata).context("payload descriptor codec metadata")?;
+    }
+
+    if descriptor
+        .container
+        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+    {
+        match descriptor.codec.as_deref() {
+            Some(codec) if codec.eq_ignore_ascii_case(PAYLOAD_CODEC_GAP) => {}
+            Some(_) => bail!("GAP payload descriptor codec must be GAP"),
+            None => bail!("GAP payload descriptor requires the GAP codec"),
+        }
+
+        match descriptor.sample_rate {
+            Some(sample_rate) if sample_rate > 0 => {}
+            Some(_) => bail!("GAP payload descriptor sample rate must be greater than zero"),
+            None => bail!("GAP payload descriptor requires a sample rate"),
+        }
+
+        match descriptor.channels {
+            Some(channels) if channels > 0 => {}
+            Some(_) => bail!("GAP payload descriptor channel count must be greater than zero"),
+            None => bail!("GAP payload descriptor requires a channel count"),
+        }
+
+        if descriptor.block_samples.is_some()
+            || descriptor.output_offset_samples.is_some()
+            || descriptor.output_samples.is_some()
+        {
+            bail!("GAP payload descriptor must not specify output geometry");
+        }
+
+        if descriptor.codec_metadata.is_some() {
+            bail!("GAP payload descriptor must not specify codec metadata");
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify that two payload descriptors are identical across every field. Used by
+/// record construction to confirm that every revolution shares one descriptor
+/// before storing it once. The error names the first differing field; callers
+/// add the revolution index via `.with_context(...)`.
+pub fn validate_shared_payload_descriptor(
+    expected: &PayloadDescriptor,
+    actual: &PayloadDescriptor,
+) -> Result<()> {
+    macro_rules! check {
+        ($field:ident) => {
+            if expected.$field != actual.$field {
+                bail!(concat!(
+                    "payload descriptor mismatch in field `",
+                    stringify!($field),
+                    "`"
+                ));
+            }
+        };
+    }
+
+    check!(container);
+    check!(codec);
+    check!(sample_rate);
+    check!(channels);
+    check!(block_samples);
+    check!(output_offset_samples);
+    check!(output_samples);
+    check!(codec_metadata);
+
+    Ok(())
 }
 
 pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadata> {
@@ -990,6 +1214,7 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
         flags & METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES != 0;
     let has_track_entry_mappings =
         flags & METADATA_FLAG_TRACK_ENTRY_MAPPINGS != 0;
+    let has_track_gaps = flags & METADATA_FLAG_TRACK_GAPS != 0;
 
     let descriptor_count =
         cursor.read_u8("payload descriptor count")? as usize;
@@ -1015,43 +1240,65 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
         }
 
         let codec = if descriptor_flags & DESCRIPTOR_FLAG_CODEC != 0 {
-            Some(cursor.read_string("payload codec")?)
+            Some(cursor.read_string("payload descriptor codec")?)
         } else {
             None
         };
 
-        let sample_rate =
-            if descriptor_flags & DESCRIPTOR_FLAG_SAMPLE_RATE != 0 {
-                let value = cursor.read_u32be("payload sample rate")?;
+        let sample_rate = if descriptor_flags & DESCRIPTOR_FLAG_SAMPLE_RATE != 0 {
+            Some(cursor.read_u32be("payload descriptor sample rate")?)
+        } else {
+            None
+        };
 
-                if value == 0 {
-                    bail!("payload descriptor {descriptor_index} sample rate must be greater than zero");
-                }
+        let channels = if descriptor_flags & DESCRIPTOR_FLAG_CHANNELS != 0 {
+            Some(cursor.read_u8("payload descriptor channels")?)
+        } else {
+            None
+        };
 
-                Some(value)
+        let (block_samples, output_offset_samples, output_samples) =
+            if descriptor_flags & DESCRIPTOR_FLAG_OUTPUT_GEOMETRY != 0 {
+                (
+                    Some(cursor.read_u32be("payload descriptor block samples")?),
+                    Some(cursor.read_u32be("payload descriptor output offset samples")?),
+                    Some(cursor.read_u32be("payload descriptor output samples")?),
+                )
             } else {
-                None
+                (None, None, None)
             };
 
-        let channels =
-            if descriptor_flags & DESCRIPTOR_FLAG_CHANNELS != 0 {
-                let value = cursor.read_u8("payload channels")?;
+        let codec_metadata = if descriptor_flags & DESCRIPTOR_FLAG_CODEC_METADATA != 0 {
+            let length = cursor.read_u32be("payload descriptor codec metadata length")? as usize;
+            if length > MAX_CODEC_METADATA_BYTES {
+                bail!(
+                    "payload descriptor {descriptor_index} codec metadata length {length} \
+                     exceeds limit {MAX_CODEC_METADATA_BYTES}"
+                );
+            }
+            Some(
+                cursor
+                    .read_bytes(length, "payload descriptor codec metadata")?
+                    .to_vec(),
+            )
+        } else {
+            None
+        };
 
-                if value == 0 {
-                    bail!("payload descriptor {descriptor_index} channels must be greater than zero");
-                }
-
-                Some(value)
-            } else {
-                None
-            };
-
-        payload_descriptors.push(PayloadDescriptor {
+        let descriptor = PayloadDescriptor {
             container,
             codec,
             sample_rate,
             channels,
-        });
+            block_samples,
+            output_offset_samples,
+            output_samples,
+            codec_metadata,
+        };
+        validate_payload_descriptor(&descriptor)
+            .with_context(|| format!("payload descriptor {descriptor_index} is invalid"))?;
+
+        payload_descriptors.push(descriptor);
     }
 
     let entry_count =
@@ -1101,27 +1348,100 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
 
     for track_index in 0..track_count {
         let title = cursor.read_string("track title")?;
-        let payload_entry_index =
+        let (first_revolution_index, revolution_count) =
             if has_track_entry_mappings {
-                usize::try_from(
-                    cursor.read_varuint("track payload entry index")?,
+                let first = usize::try_from(
+                    cursor.read_varuint("track first revolution index")?,
                 )
-                .context("track payload entry index exceeds usize")?
+                .context("track first revolution index exceeds usize")?;
+                let count = usize::try_from(
+                    cursor.read_varuint("track revolution count")?,
+                )
+                .context("track revolution count exceeds usize")?;
+                (first, count)
             } else {
-                track_index
+                (track_index, 1)
             };
 
-        if payload_entry_index >= payload_entries.len() {
+        if revolution_count == 0 {
+            bail!("track {track_index} revolution count must be greater than zero");
+        }
+
+        let end = first_revolution_index
+            .checked_add(revolution_count)
+            .context("track revolution range overflows")?;
+
+        if end > payload_entries.len() {
             bail!(
-                "track {track_index} payload entry index {payload_entry_index} is out of range for {} entries",
+                "track {track_index} revolution range [{first_revolution_index}, {end}) is out of range for {} entries",
                 payload_entries.len()
             );
         }
 
         tracks.push(TrackDescriptor {
             title,
-            payload_entry_index,
+            first_revolution_index,
+            revolution_count,
         });
+    }
+
+    let mut track_gaps: Vec<TrackGapDescriptor> = Vec::new();
+
+    if has_track_gaps {
+        let track_gap_count = cursor.read_u16be("track gap count")? as usize;
+        track_gaps.reserve(track_gap_count);
+
+        for gap_index in 0..track_gap_count {
+            let first_revolution_index = u32::try_from(
+                cursor.read_varuint("track gap first revolution index")?,
+            )
+            .context("track gap first revolution index exceeds u32")?;
+            let revolution_count = u32::try_from(
+                cursor.read_varuint("track gap revolution count")?,
+            )
+            .context("track gap revolution count exceeds u32")?;
+            let after_track_index = u32::try_from(
+                cursor.read_varuint("track gap after track index")?,
+            )
+            .context("track gap after track index exceeds u32")?;
+
+            if revolution_count == 0 {
+                bail!("track gap {gap_index} revolution count must be greater than zero");
+            }
+
+            if after_track_index as usize >= tracks.len() {
+                bail!(
+                    "track gap {gap_index} after_track_index {after_track_index} is out of range for {} tracks",
+                    tracks.len()
+                );
+            }
+
+            let end = first_revolution_index
+                .checked_add(revolution_count)
+                .context("track gap revolution range overflows")?;
+
+            if end as usize > payload_entries.len() {
+                bail!(
+                    "track gap {gap_index} revolution range [{first_revolution_index}, {end}) is out of range for {} entries",
+                    payload_entries.len()
+                );
+            }
+
+            if let Some(previous) = track_gaps.last() {
+                if first_revolution_index <= previous.first_revolution_index {
+                    bail!(
+                        "track gap {gap_index} first_revolution_index {first_revolution_index} is not strictly ascending after the previous track gap's {}",
+                        previous.first_revolution_index
+                    );
+                }
+            }
+
+            track_gaps.push(TrackGapDescriptor {
+                first_revolution_index,
+                revolution_count,
+                after_track_index,
+            });
+        }
     }
 
     if cursor.remaining() != 0 {
@@ -1137,6 +1457,7 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
         payload_descriptors,
         payload_entries,
         tracks,
+        track_gaps,
     })
 }
 
@@ -1272,16 +1593,63 @@ pub fn validate_track_listing_metadata(
             bail!("track {index} title must not be empty");
         }
 
-        if track.payload_entry_index >= metadata.payload_entries.len() {
+        let end = track
+            .first_revolution_index
+            .checked_add(track.revolution_count)
+            .context("track revolution range overflows")?;
+
+        if end > metadata.payload_entries.len() {
             bail!(
-                "track {index} payload entry index {} is out of range for {} entries",
-                track.payload_entry_index,
+                "track {index} revolution range is out of range for {} entries",
                 metadata.payload_entries.len()
             );
         }
     }
 
-    Ok(())
+    let is_playable_revolution: Vec<bool> = metadata
+        .payload_entries
+        .iter()
+        .map(|entry| {
+            metadata
+                .payload_descriptors
+                .get(entry.payload_descriptor_index as usize)
+                .map(|descriptor| {
+                    descriptor
+                        .container
+                        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+                        || descriptor
+                            .container
+                            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_MOSS_NANO)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if !is_playable_revolution.iter().any(|&playable| playable) {
+        return Ok(());
+    }
+
+    let ranges: Vec<crate::tracks::TrackRange> = metadata
+        .tracks
+        .iter()
+        .map(|track| crate::tracks::TrackRange {
+            title: track.title.clone(),
+            first_revolution_index: track.first_revolution_index as u64,
+            revolution_count: track.revolution_count as u64,
+        })
+        .collect();
+
+    let gap_ranges: Vec<crate::tracks::TrackGapRange> = metadata
+        .track_gaps
+        .iter()
+        .map(|gap| crate::tracks::TrackGapRange {
+            first_revolution_index: gap.first_revolution_index as u64,
+            revolution_count: gap.revolution_count as u64,
+            after_track_index: gap.after_track_index as usize,
+        })
+        .collect();
+
+    crate::tracks::validate_track_ranges(&ranges, &gap_ranges, &is_playable_revolution)
 }
 
 pub fn inspect_record_stream(
@@ -1319,6 +1687,10 @@ pub fn inspect_record_stream(
                 codec: descriptor.codec.clone(),
                 sample_rate: descriptor.sample_rate,
                 channels: descriptor.channels,
+                block_samples: descriptor.block_samples,
+                output_offset_samples: descriptor.output_offset_samples,
+                output_samples: descriptor.output_samples,
+                codec_metadata_byte_length: descriptor.codec_metadata.as_ref().map(Vec::len),
             })
             .collect(),
         payload_entries: resolved
@@ -1338,257 +1710,26 @@ pub fn inspect_record_stream(
             .map(|(index, track)| TrackInspection {
                 number: index + 1,
                 title: track.title.clone(),
-                payload_entry_index: track.payload_entry_index,
+                first_revolution_index: track.first_revolution_index,
+                revolution_count: track.revolution_count,
             })
             .collect(),
     })
 }
 
-pub fn read_chunk_header(
-    bytes: &[u8],
-    chunk_start: usize,
-) -> Result<ChunkHeader> {
-    read_chunk_header_with_nonce_length(bytes, chunk_start, None)
-}
-
-pub fn read_chunk_header_with_nonce_length(
-    bytes: &[u8],
-    chunk_start: usize,
-    nonce_length: Option<usize>,
-) -> Result<ChunkHeader> {
-    let fixed_end = chunk_start
-        .checked_add(CHUNK_FIXED_HEADER_LENGTH)
-        .context("chunk header length overflow")?;
-
-    if fixed_end > bytes.len() {
-        bail!("truncated chunk header");
-    }
-
-    if nonce_length.is_some_and(|length| {
-        length != CHUNK_ENCRYPTION_NONCE_LENGTH
-    }) {
-        bail!("unsupported chunk encryption nonce length");
-    }
-
-    let index = read_u16be(bytes, chunk_start, "chunk index")?;
-    let chunk_count =
-        read_u16be(bytes, chunk_start + 2, "chunk count")?;
-    let payload_descriptor_index = bytes[chunk_start + 4];
-    let payload_len =
-        read_u32be(bytes, chunk_start + 5, "chunk payload length")?
-            as usize;
-    let crc32 = read_u32be(bytes, chunk_start + 9, "chunk CRC32")?;
-    let signature_start = chunk_start + 13;
-    let signature_end = signature_start + CHUNK_SIGNATURE_LENGTH;
-
-    let mut signature = [0u8; CHUNK_SIGNATURE_LENGTH];
-    signature.copy_from_slice(&bytes[signature_start..signature_end]);
-
-    let nonce_start = nonce_length.map(|_| signature_end);
-    let nonce_end =
-        nonce_start.map(|start| start + CHUNK_ENCRYPTION_NONCE_LENGTH);
-    let payload_start = nonce_end.unwrap_or(signature_end);
-
-    let nonce = match (nonce_start, nonce_end) {
-        (Some(start), Some(end)) => {
-            let slice = bytes
-                .get(start..end)
-                .context("truncated chunk nonce")?;
-            let mut value = [0u8; CHUNK_ENCRYPTION_NONCE_LENGTH];
-            value.copy_from_slice(slice);
-            Some(value)
-        }
-        _ => None,
-    };
-
-    let payload_end = payload_start
-        .checked_add(payload_len)
-        .context("chunk payload length overflow")?;
-
-    if payload_end > bytes.len() {
-        bail!("truncated chunk payload");
-    }
-
-    Ok(ChunkHeader {
-        index,
-        chunk_count,
-        payload_descriptor_index,
-        payload_len,
-        crc32,
-        signature,
-        nonce,
-        chunk_start,
-        signature_start,
-        signature_end,
-        nonce_start,
-        nonce_end,
-        payload_start,
-        payload_end,
-    })
-}
-
-pub fn chunk_signature_preimage(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    payload: &[u8],
-    crc32: u32,
-) -> Result<Vec<u8>> {
-    chunk_signature_preimage_with_descriptor_index(
-        metadata_bytes,
-        index,
-        chunk_count,
-        DEFAULT_PAYLOAD_DESCRIPTOR_INDEX,
-        payload,
-        crc32,
-    )
-}
-
-pub fn chunk_signature_preimage_with_descriptor_index(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    descriptor_index: u8,
-    payload: &[u8],
-    crc32: u32,
-) -> Result<Vec<u8>> {
-    let metadata_len =
-        u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
-    let payload_len =
-        u32::try_from(payload.len()).context("payload exceeds u32")?;
-
-    let mut out = Vec::with_capacity(
-        CHUNK_SIGNATURE_DOMAIN.len()
-            + metadata_bytes.len()
-            + payload.len()
-            + 17,
-    );
-
-    out.extend_from_slice(CHUNK_SIGNATURE_DOMAIN);
-    push_u32be(&mut out, metadata_len);
-    out.extend_from_slice(metadata_bytes);
-    push_u16be(&mut out, index);
-    push_u16be(&mut out, chunk_count);
-    out.push(descriptor_index);
-    push_u32be(&mut out, payload_len);
-    push_u32be(&mut out, crc32);
-    out.extend_from_slice(payload);
-
-    Ok(out)
-}
-
-pub fn chunk_signature_preimage_with_nonce_and_descriptor_index(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    descriptor_index: u8,
-    nonce: &[u8; CHUNK_ENCRYPTION_NONCE_LENGTH],
-    payload: &[u8],
-    crc32: u32,
-) -> Result<Vec<u8>> {
-    let metadata_len =
-        u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
-    let payload_len =
-        u32::try_from(payload.len()).context("payload exceeds u32")?;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(CHUNK_SIGNATURE_WITH_NONCE_DOMAIN);
-    push_u32be(&mut out, metadata_len);
-    out.extend_from_slice(metadata_bytes);
-    push_u16be(&mut out, index);
-    push_u16be(&mut out, chunk_count);
-    out.push(descriptor_index);
-    push_u32be(&mut out, CHUNK_ENCRYPTION_NONCE_LENGTH as u32);
-    out.extend_from_slice(nonce);
-    push_u32be(&mut out, payload_len);
-    push_u32be(&mut out, crc32);
-    out.extend_from_slice(payload);
-
-    Ok(out)
-}
-
-pub fn chunk_signature_preimage_with_nonce(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    nonce: &[u8; CHUNK_ENCRYPTION_NONCE_LENGTH],
-    payload: &[u8],
-    crc32: u32,
-) -> Result<Vec<u8>> {
-    chunk_signature_preimage_with_nonce_and_descriptor_index(
-        metadata_bytes,
-        index,
-        chunk_count,
-        DEFAULT_PAYLOAD_DESCRIPTOR_INDEX,
-        nonce,
-        payload,
-        crc32,
-    )
-}
-
-fn chunk_signature_preimage_for_chunk(
-    metadata_bytes: &[u8],
-    chunk: &Chunk,
-) -> Result<Vec<u8>> {
-    match chunk.nonce.as_ref() {
-        Some(nonce) => {
-            chunk_signature_preimage_with_nonce_and_descriptor_index(
-                metadata_bytes,
-                chunk.index,
-                chunk.chunk_count,
-                chunk.payload_descriptor_index,
-                nonce,
-                &chunk.payload,
-                chunk.crc32,
-            )
-        }
-        None => chunk_signature_preimage_with_descriptor_index(
-            metadata_bytes,
-            chunk.index,
-            chunk.chunk_count,
-            chunk.payload_descriptor_index,
-            &chunk.payload,
-            chunk.crc32,
-        ),
-    }
-}
-
-pub fn chunk_encryption_aad_with_descriptor_index(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    descriptor_index: u8,
-    nonce: &[u8; CHUNK_ENCRYPTION_NONCE_LENGTH],
-) -> Result<Vec<u8>> {
+/// AAD for chunk encryption (final compact format): just a domain separator
+/// over the exact BRS1 metadata bytes. There is no per-chunk index, count,
+/// or descriptor index to bind, since none of those are stored on the wire.
+pub fn chunk_encryption_aad(metadata_bytes: &[u8]) -> Result<Vec<u8>> {
     let metadata_len =
         u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
 
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(CHUNK_ENCRYPTION_DOMAIN.len() + 4 + metadata_bytes.len());
     out.extend_from_slice(CHUNK_ENCRYPTION_DOMAIN);
     push_u32be(&mut out, metadata_len);
     out.extend_from_slice(metadata_bytes);
-    push_u16be(&mut out, index);
-    push_u16be(&mut out, chunk_count);
-    out.push(descriptor_index);
-    push_u32be(&mut out, CHUNK_ENCRYPTION_NONCE_LENGTH as u32);
-    out.extend_from_slice(nonce);
 
     Ok(out)
-}
-
-pub fn chunk_encryption_aad(
-    metadata_bytes: &[u8],
-    index: u16,
-    chunk_count: u16,
-    nonce: &[u8; CHUNK_ENCRYPTION_NONCE_LENGTH],
-) -> Result<Vec<u8>> {
-    chunk_encryption_aad_with_descriptor_index(
-        metadata_bytes,
-        index,
-        chunk_count,
-        DEFAULT_PAYLOAD_DESCRIPTOR_INDEX,
-        nonce,
-    )
 }
 
 pub fn decrypt_chunk_payload_chacha20poly1305(
@@ -1616,6 +1757,8 @@ pub fn decrypt_record_stream_payloads_chacha20poly1305(
         bail!("record stream is not encrypted");
     }
 
+    let aad = chunk_encryption_aad(&document.metadata_bytes)?;
+
     document
         .chunks
         .iter()
@@ -1624,13 +1767,6 @@ pub fn decrypt_record_stream_payloads_chacha20poly1305(
                 .nonce
                 .as_ref()
                 .context("encrypted chunk is missing nonce")?;
-            let aad = chunk_encryption_aad_with_descriptor_index(
-                &document.metadata_bytes,
-                chunk.index,
-                chunk.chunk_count,
-                chunk.payload_descriptor_index,
-                nonce,
-            )?;
 
             decrypt_chunk_payload_chacha20poly1305(
                 key,
@@ -1665,6 +1801,9 @@ pub fn decrypt_chunk_stream_payload_bytes_chacha20poly1305(
     decrypt_record_stream_payload_bytes_chacha20poly1305(document, key)
 }
 
+/// Verify that no chunk's bytes cross a payload-entry boundary. Skipped for
+/// encrypted streams, since ciphertext lengths (plaintext + AEAD tag) don't
+/// line up with the declared plaintext entry lengths.
 fn validate_chunk_descriptors_against_entries(
     metadata: &RecordStreamMetadata,
     chunks: &[Chunk],
@@ -1681,12 +1820,12 @@ fn validate_chunk_descriptors_against_entries(
 
     let mut chunk_offset = 0usize;
 
-    for chunk in chunks {
+    for (position, chunk) in chunks.iter().enumerate() {
         let chunk_end = chunk_offset
             .checked_add(chunk.payload.len())
             .context("chunk payload offset overflow")?;
 
-        let entry = resolved
+        resolved
             .iter()
             .find(|entry| {
                 let entry_end = entry.byte_offset + entry.byte_length;
@@ -1694,20 +1833,9 @@ fn validate_chunk_descriptors_against_entries(
             })
             .with_context(|| {
                 format!(
-                    "chunk {} crosses payload-entry boundaries or lies outside the declared entries",
-                    chunk.index
+                    "chunk {position} crosses payload-entry boundaries or lies outside the declared entries"
                 )
             })?;
-
-        if chunk.payload_descriptor_index != entry.payload_descriptor_index {
-            bail!(
-                "chunk {} descriptor index {} does not match payload entry {} descriptor index {}",
-                chunk.index,
-                chunk.payload_descriptor_index,
-                entry.index,
-                entry.payload_descriptor_index
-            );
-        }
 
         chunk_offset = chunk_end;
     }
@@ -1724,73 +1852,28 @@ pub fn parse_record_stream(bytes: &[u8]) -> Result<RecordStream> {
     payload_descriptor_count_from_metadata(&metadata)?;
     validate_track_listing_metadata(&metadata)?;
 
-    let nonce_length = chunk_nonce_length_from_metadata(&metadata)?;
-    let mut offset = header_end;
-    let mut chunks = Vec::new();
-    let mut declared_count = None;
+    let encrypted = metadata.encrypted;
+    let chunk_ranges = chunk::parse_chunk_section(bytes, header_end, encrypted)?;
 
-    while offset < bytes.len() {
-        let header =
-            read_chunk_header_with_nonce_length(bytes, offset, nonce_length)?;
+    if chunk_ranges.is_empty() {
+        bail!("record stream contains no chunks");
+    }
 
-        if header.chunk_count == 0 {
-            bail!("chunk count must not be zero");
-        }
+    let mut chunks = Vec::with_capacity(chunk_ranges.len());
 
-        validate_payload_descriptor_index(
-            metadata.payload_descriptors.len(),
-            header.payload_descriptor_index,
-        )?;
-
-        if let Some(count) = declared_count {
-            if count != header.chunk_count {
-                bail!("chunk count changed inside stream");
-            }
-        } else {
-            declared_count = Some(header.chunk_count);
-        }
-
-        let expected_index = u16::try_from(chunks.len())
-            .context("chunk index exceeds u16 range")?;
-
-        if header.index != expected_index {
-            bail!(
-                "chunk index mismatch: expected {expected_index}, got {}",
-                header.index
-            );
-        }
-
-        let payload =
-            bytes[header.payload_start..header.payload_end].to_vec();
-
-        if crc32_ieee(&payload) != header.crc32 {
-            bail!("chunk CRC32 mismatch at chunk {}", header.index);
+    for range in &chunk_ranges {
+        if !chunk::verify_chunk_crc32(bytes, range) {
+            bail!("chunk CRC32 mismatch");
         }
 
         chunks.push(Chunk {
-            index: header.index,
-            chunk_count: header.chunk_count,
-            payload_descriptor_index: header.payload_descriptor_index,
-            payload,
-            crc32: header.crc32,
-            signature: header.signature,
-            nonce: header.nonce,
+            payload: bytes[range.payload_start..range.payload_end].to_vec(),
+            crc32: range.crc32,
+            nonce: range.nonce,
         });
-
-        offset = header.payload_end;
     }
 
-    let declared_count =
-        declared_count.context("record stream contains no chunks")?;
-
-    if chunks.len() != declared_count as usize {
-        bail!(
-            "chunk count mismatch: expected {declared_count}, got {}",
-            chunks.len()
-        );
-    }
-
-    let plaintext_payload_length = if metadata.encrypted {
+    let plaintext_payload_length = if encrypted {
         None
     } else {
         Some(chunks.iter().map(|chunk| chunk.payload.len()).sum())
@@ -1801,6 +1884,33 @@ pub fn parse_record_stream(bytes: &[u8]) -> Result<RecordStream> {
         &chunks,
         plaintext_payload_length,
     )?;
+
+    if !metadata.encrypted {
+        let payload_bytes = chunks
+            .iter()
+            .flat_map(|chunk| chunk.payload.iter().copied())
+            .collect::<Vec<_>>();
+
+        let resolved = validate_payload_entries_metadata(
+            &metadata,
+            Some(payload_bytes.len()),
+        )?;
+
+        for entry in resolved {
+            let descriptor = &metadata.payload_descriptors
+                [entry.payload_descriptor_index as usize];
+            let end = entry
+                .byte_offset
+                .checked_add(entry.byte_length)
+                .context("payload entry range overflow")?;
+
+            validate_payload_entry_bytes(
+                descriptor,
+                &payload_bytes[entry.byte_offset..end],
+            )
+            .with_context(|| format!("payload entry {} is invalid", entry.index))?;
+        }
+    }
 
     Ok(RecordStream {
         metadata,
@@ -1821,55 +1931,14 @@ pub fn validate_chunk_stream(bytes: &[u8]) -> Result<()> {
     validate_record_stream(bytes)
 }
 
-pub fn chunk_all_ranges(bytes: &[u8]) -> Result<Vec<ChunkRanges>> {
+pub fn chunk_all_ranges(bytes: &[u8]) -> Result<Vec<chunk::ChunkRanges>> {
     let header_end = record_stream_header_end(bytes)?;
     let metadata = record_stream_metadata(bytes)?;
-    let nonce_length = chunk_nonce_length_from_metadata(&metadata)?;
-    let mut offset = header_end;
-    let mut ranges = Vec::new();
-    let mut count = None;
 
-    while offset < bytes.len() {
-        let header =
-            read_chunk_header_with_nonce_length(bytes, offset, nonce_length)?;
+    let ranges = chunk::parse_chunk_section(bytes, header_end, metadata.encrypted)?;
 
-        validate_payload_descriptor_index(
-            metadata.payload_descriptors.len(),
-            header.payload_descriptor_index,
-        )?;
-
-        if let Some(expected) = count {
-            if expected != header.chunk_count {
-                bail!("chunk count changed inside stream");
-            }
-        } else {
-            count = Some(header.chunk_count);
-        }
-
-        let expected_index = u16::try_from(ranges.len())
-            .context("chunk index exceeds u16 range")?;
-
-        if header.index != expected_index {
-            bail!("chunk index mismatch");
-        }
-
-        ranges.push(ChunkRanges {
-            chunk: offset..header.payload_end,
-            payload: header.payload_start..header.payload_end,
-            signature: header.signature_start..header.signature_end,
-            nonce: header
-                .nonce_start
-                .zip(header.nonce_end)
-                .map(|(start, end)| start..end),
-        });
-
-        offset = header.payload_end;
-    }
-
-    let expected = count.context("record stream contains no chunks")?;
-
-    if ranges.len() != expected as usize {
-        bail!("chunk count mismatch");
+    if ranges.is_empty() {
+        bail!("record stream contains no chunks");
     }
 
     Ok(ranges)
@@ -1878,23 +1947,14 @@ pub fn chunk_all_ranges(bytes: &[u8]) -> Result<Vec<ChunkRanges>> {
 pub fn chunk_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
     Ok(chunk_all_ranges(bytes)?
         .into_iter()
-        .map(|ranges| ranges.chunk)
+        .map(|ranges| ranges.chunk_start..ranges.chunk_end)
         .collect())
 }
 
 pub fn chunk_payload_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
     Ok(chunk_all_ranges(bytes)?
         .into_iter()
-        .map(|ranges| ranges.payload)
-        .collect())
-}
-
-pub fn chunk_signature_ranges(
-    bytes: &[u8],
-) -> Result<Vec<Range<usize>>> {
-    Ok(chunk_all_ranges(bytes)?
-        .into_iter()
-        .map(|ranges| ranges.signature)
+        .map(|ranges| ranges.payload_start..ranges.payload_end)
         .collect())
 }
 
@@ -1914,29 +1974,326 @@ pub fn chunk_stream_payload_bytes(document: &ChunkStream) -> Vec<u8> {
     record_stream_payload_bytes(document)
 }
 
-pub fn verify_chunk_signatures(
-    document: &RecordStream,
-    mut verify: impl FnMut(
-        &[u8],
-        &[u8; CHUNK_SIGNATURE_LENGTH],
-    ) -> Result<()>,
-) -> Result<()> {
-    for chunk in &document.chunks {
-        let preimage =
-            chunk_signature_preimage_for_chunk(&document.metadata_bytes, chunk)?;
+/// Kind of an ordered programme region in the pre-decode programme map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ProgrammeRegionKind {
+    /// A musical track, identified by its 1-based number and title.
+    Track { number: usize, title: String },
+    /// An inter-track GAP, recorded against the preceding musical track number
+    /// (0 when the programme opens with a gap).
+    Gap { after_track_number: usize },
+}
 
-        verify(&preimage, &chunk.signature)
-            .with_context(|| {
-                format!("chunk signature failed at index {}", chunk.index)
-            })?;
+/// One ordered region of the programme with exact PCM sample boundaries,
+/// recoverable without neural/PCM decoding.
+///
+/// `radial_start_normalized`/`radial_end_normalized` are the actual radial
+/// positions of the region's payload pixels along the rendered Archimedean
+/// spiral: `0.0` is the outer edge of the programme playback groove and `1.0`
+/// the inner edge. They are derived from the equal-area spiral that the renderer
+/// fills (each carrier pixel is one unit of annulus area, traversed outer→inner),
+/// so they are true radial progress — not the encoded-byte fraction.
+///
+/// `byte_fraction_start`/`byte_fraction_end` are the raw carrier-byte fractions,
+/// retained only as a diagnostic; they must not be used as a radial coordinate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgrammeRegion {
+    #[serde(flatten)]
+    pub kind: ProgrammeRegionKind,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub sample_count: u64,
+    pub radial_start_normalized: f64,
+    pub radial_end_normalized: f64,
+    pub byte_fraction_start: f64,
+    pub byte_fraction_end: f64,
+}
+
+/// The complete pre-decode programme map: exact musical/GAP sample boundaries
+/// and total duration in samples, derived from BRS1 metadata plus payload bytes
+/// without decoding any codec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgrammeMap {
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub total_samples: u64,
+    pub regions: Vec<ProgrammeRegion>,
+}
+
+/// Exact per-channel PCM sample count represented by one payload entry,
+/// without neural/PCM decoding.
+///
+/// ECDC entries are programme-time revolution units. Their compressed bytes are
+/// packed continuously into the raster groove and do not correspond to one
+/// geometric spiral turn. The shared descriptor's `output_samples` is therefore
+/// the authoritative logical duration of an ECDC entry. The headerless entry
+/// body is still parsed here so malformed framing is rejected.
+///
+/// GAP entries carry their own exact sample count in the GAP1 header.
+fn entry_sample_count(descriptor: &PayloadDescriptor, bytes: &[u8]) -> Result<u64> {
+    if descriptor
+        .container
+        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+    {
+        let samples = gap::decode_gap_header(bytes)?.sample_count;
+        if samples == 0 {
+            bail!("GAP payload declares zero samples");
+        }
+        return Ok(samples);
     }
 
-    Ok(())
+    if descriptor
+        .container
+        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+    {
+        // This currently provides the canonical headerless-frame structural
+        // parse. Its returned sample count is deliberately ignored: logical
+        // programme duration comes from output_samples, not compressed frame
+        // count or codec metadata field `fl`.
+        ecdc::headerless_entry_sample_count(bytes, descriptor)
+            .context("invalid headerless ECDC payload entry")?;
+
+        let output_samples = descriptor
+            .output_samples
+            .filter(|samples| *samples > 0)
+            .context("ECDC payload descriptor is missing positive output_samples")?;
+        return Ok(u64::from(output_samples));
+    }
+
+    if descriptor
+        .container
+        .eq_ignore_ascii_case(PAYLOAD_CONTAINER_MOSS_NANO)
+    {
+        let output_samples = descriptor
+            .output_samples
+            .filter(|samples| *samples > 0)
+            .context("programme payload descriptor is missing positive output_samples")?;
+        return Ok(u64::from(output_samples));
+    }
+
+    bail!(
+        "cannot determine sample count for container `{}`",
+        descriptor.container
+    )
+}
+
+/// Build the ordered pre-decode programme map from a parsed record stream.
+///
+/// Consecutive musical payload entries covered by the same track collapse into
+/// one track region; each GAP entry becomes its own region. Sample boundaries
+/// are exact and cumulative, so `total_samples` divided by the sample rate is
+/// the authoritative programme duration.
+/// Map a normalized carrier-pixel fraction (0 at the outer edge, 1 at the inner
+/// edge of the payload annulus) to a normalized radial position along the
+/// rendered Archimedean spiral. The renderer fills the annulus uniformly — one
+/// carrier pixel per unit area, traversed outer→inner — so equal pixel fractions
+/// correspond to equal swept area, and `r(f) = sqrt(r_out² − f·(r_out² − r_in²))`.
+fn spiral_radial_normalized(pixel_fraction: f64, inner_radius: f64, outer_radius: f64) -> f64 {
+    let span = outer_radius * outer_radius - inner_radius * inner_radius;
+    if !(span > 0.0) || outer_radius <= inner_radius {
+        return pixel_fraction.clamp(0.0, 1.0);
+    }
+    let f = pixel_fraction.clamp(0.0, 1.0);
+    let radius = (outer_radius * outer_radius - f * span).max(0.0).sqrt();
+    ((outer_radius - radius) / (outer_radius - inner_radius)).clamp(0.0, 1.0)
+}
+
+pub fn build_programme_map(
+    document: &RecordStream,
+    record_profile: Option<&str>,
+) -> Result<ProgrammeMap> {
+    let metadata = &document.metadata;
+    let resolved = resolve_payload_entries(
+        &metadata.payload_entries,
+        metadata.payload_descriptors.len(),
+    )?;
+    let payload_bytes = record_stream_payload_bytes(document);
+
+    // Map each payload-entry index to the 1-based programme track that covers
+    // it, or None when it is a track gap or an auxiliary entry outside both.
+    let mut track_of_entry = vec![None; metadata.payload_entries.len()];
+    for (track_index, track) in metadata.tracks.iter().enumerate() {
+        let end = track
+            .first_revolution_index
+            .checked_add(track.revolution_count)
+            .context("track revolution range overflows")?;
+        for entry_index in track.first_revolution_index..end {
+            if entry_index < track_of_entry.len() {
+                track_of_entry[entry_index] = Some(track_index + 1);
+            }
+        }
+    }
+
+    // Map each payload-entry index to the 1-based track number its explicit
+    // track gap follows. A gap's bytes are ordinary payload (commonly ECDC
+    // ambient near-silence); classification comes from this metadata, not
+    // from sniffing the descriptor's container.
+    let mut gap_after_track_of_entry = vec![None; metadata.payload_entries.len()];
+    for (gap_index, gap) in metadata.track_gaps.iter().enumerate() {
+        let after_track_index = gap.after_track_index as usize;
+        if after_track_index >= metadata.tracks.len() {
+            bail!(
+                "track gap {gap_index} after_track_index {after_track_index} is out of range for {} tracks",
+                metadata.tracks.len()
+            );
+        }
+        let first_revolution_index = gap.first_revolution_index as usize;
+        let end = first_revolution_index
+            .checked_add(gap.revolution_count as usize)
+            .context("track gap revolution range overflows")?;
+        for entry_index in first_revolution_index..end {
+            if entry_index >= track_of_entry.len() {
+                continue;
+            }
+            if track_of_entry[entry_index].is_some() {
+                bail!(
+                    "payload entry {entry_index} is covered by both a track and track gap {gap_index}"
+                );
+            }
+            if gap_after_track_of_entry[entry_index].is_some() {
+                bail!("payload entry {entry_index} is covered by more than one track gap");
+            }
+            gap_after_track_of_entry[entry_index] = Some(after_track_index + 1);
+        }
+    }
+
+    let sample_rate = metadata
+        .payload_descriptors
+        .iter()
+        .find_map(|d| d.sample_rate)
+        .context("record stream has no sample rate")?;
+    let channels = metadata
+        .payload_descriptors
+        .iter()
+        .find_map(|d| d.channels)
+        .context("record stream has no channel count")?;
+
+    // Byte fraction == carrier-pixel fraction (3 bytes/pixel). The true radial
+    // position comes from the equal-area spiral the renderer fills; without a
+    // known profile we degrade to the linear pixel fraction.
+    let total_payload_bytes = payload_bytes.len().max(1) as f64;
+    let byte_fraction_of = |byte_offset: usize| (byte_offset as f64 / total_payload_bytes).clamp(0.0, 1.0);
+    let radii = match record_profile {
+        Some(profile) => {
+            let geometry = describe_record_profile(profile)?;
+            Some((
+                f64::from(geometry.payload_inner_radius),
+                f64::from(geometry.payload_outer_radius),
+            ))
+        }
+        None => None,
+    };
+    let radial_of = |byte_offset: usize| {
+        let f = byte_fraction_of(byte_offset);
+        match radii {
+            Some((inner, outer)) => spiral_radial_normalized(f, inner, outer),
+            None => f,
+        }
+    };
+
+    let mut regions: Vec<ProgrammeRegion> = Vec::new();
+    let mut cursor_sample = 0u64;
+
+    for entry in &resolved {
+        let descriptor = &metadata.payload_descriptors[entry.payload_descriptor_index as usize];
+        let end = entry
+            .byte_offset
+            .checked_add(entry.byte_length)
+            .context("payload entry range overflow")?;
+        let entry_bytes = payload_bytes
+            .get(entry.byte_offset..end)
+            .context("payload entry byte range is out of bounds")?;
+        let samples = entry_sample_count(descriptor, entry_bytes)
+            .with_context(|| format!("invalid payload entry {}", entry.index))?;
+        if samples == 0 {
+            bail!("payload entry {} resolved to zero logical samples", entry.index);
+        }
+        let start_sample = cursor_sample;
+        let end_sample = cursor_sample
+            .checked_add(samples)
+            .context("programme sample position overflow")?;
+        cursor_sample = end_sample;
+        let byte_fraction_start = byte_fraction_of(entry.byte_offset);
+        let byte_fraction_end = byte_fraction_of(end);
+        let radial_start_normalized = radial_of(entry.byte_offset);
+        let radial_end_normalized = radial_of(end);
+
+        match track_of_entry[entry.index] {
+            Some(track_number) => {
+                // Extend the current track region when it is the same track.
+                if let Some(ProgrammeRegion {
+                    kind: ProgrammeRegionKind::Track { number, .. },
+                    end_sample: region_end,
+                    sample_count,
+                    radial_end_normalized: region_radial_end,
+                    byte_fraction_end: region_byte_end,
+                    ..
+                }) = regions.last_mut()
+                {
+                    if *number == track_number {
+                        *region_end = end_sample;
+                        *sample_count = sample_count
+                            .checked_add(samples)
+                            .context("track region sample count overflow")?;
+                        *region_radial_end = radial_end_normalized;
+                        *region_byte_end = byte_fraction_end;
+                        continue;
+                    }
+                }
+                let title = metadata.tracks[track_number - 1].title.clone();
+                regions.push(ProgrammeRegion {
+                    kind: ProgrammeRegionKind::Track {
+                        number: track_number,
+                        title,
+                    },
+                    start_sample,
+                    end_sample,
+                    sample_count: samples,
+                    radial_start_normalized,
+                    radial_end_normalized,
+                    byte_fraction_start,
+                    byte_fraction_end,
+                });
+            }
+            None => {
+                let after_track_number = gap_after_track_of_entry[entry.index].with_context(|| {
+                    format!(
+                        "payload entry {} is not covered by any track or track gap",
+                        entry.index
+                    )
+                })?;
+                regions.push(ProgrammeRegion {
+                    kind: ProgrammeRegionKind::Gap { after_track_number },
+                    start_sample,
+                    end_sample,
+                    sample_count: samples,
+                    radial_start_normalized,
+                    radial_end_normalized,
+                    byte_fraction_start,
+                    byte_fraction_end,
+                });
+            }
+        }
+    }
+
+    Ok(ProgrammeMap {
+        sample_rate,
+        channels,
+        total_samples: cursor_sample,
+        regions,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push_u16be(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
 
     fn push_varuint(out: &mut Vec<u8>, mut value: u64) {
         loop {
@@ -1960,7 +2317,9 @@ mod tests {
         out.push(RECORD_STREAM_METADATA_VERSION);
         out.push(0);
         out.push(1);
-        out.push(CONTAINER_RAW);
+        out.push(CONTAINER_EXTENSION);
+        push_u16be(&mut out, 4);
+        out.extend_from_slice(b"TEST");
         out.push(0);
         push_u16be(&mut out, 2);
         push_varuint(&mut out, 9);
@@ -1977,14 +2336,151 @@ mod tests {
     fn compact_binary_metadata_decodes() {
         let metadata = decode_record_stream_metadata(&test_metadata()).unwrap();
 
-        assert_eq!(metadata.version, 1);
+        assert_eq!(metadata.version, RECORD_STREAM_METADATA_VERSION);
         assert!(!metadata.encrypted);
         assert_eq!(metadata.payload_descriptors.len(), 1);
+        assert_eq!(metadata.payload_descriptors[0].container, "TEST");
         assert_eq!(metadata.payload_entries.len(), 2);
         assert_eq!(metadata.payload_entries[0].byte_length, 9);
         assert_eq!(metadata.payload_entries[1].byte_length, 16);
         assert_eq!(metadata.tracks[0].title, "One");
-        assert_eq!(metadata.tracks[1].payload_entry_index, 1);
+        assert_eq!(metadata.tracks[1].first_revolution_index, 1);
+        assert_eq!(metadata.tracks[1].revolution_count, 1);
+    }
+
+    /// Three entries, two single-entry tracks at positions 0 and 2 (explicit
+    /// mappings, since the default position-equals-index mapping can't skip
+    /// entry 1), and one track gap at entry 1 after track 0.
+    fn test_metadata_with_track_gap() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(RECORD_STREAM_METADATA_VERSION);
+        out.push(METADATA_FLAG_TRACK_ENTRY_MAPPINGS | METADATA_FLAG_TRACK_GAPS);
+        out.push(1);
+        out.push(CONTAINER_EXTENSION);
+        push_u16be(&mut out, 4);
+        out.extend_from_slice(b"TEST");
+        out.push(0);
+        push_u16be(&mut out, 3);
+        push_varuint(&mut out, 9);
+        push_varuint(&mut out, 9);
+        push_varuint(&mut out, 9);
+        push_u16be(&mut out, 2);
+        push_u16be(&mut out, 1);
+        out.extend_from_slice(b"A");
+        push_varuint(&mut out, 0);
+        push_varuint(&mut out, 1);
+        push_u16be(&mut out, 1);
+        out.extend_from_slice(b"B");
+        push_varuint(&mut out, 2);
+        push_varuint(&mut out, 1);
+        push_u16be(&mut out, 1); // track gap count
+        push_varuint(&mut out, 1); // first_revolution_index
+        push_varuint(&mut out, 1); // revolution_count
+        push_varuint(&mut out, 0); // after_track_index
+        out
+    }
+
+    #[test]
+    fn track_gap_section_decodes_canonically() {
+        let metadata = decode_record_stream_metadata(&test_metadata_with_track_gap()).unwrap();
+
+        assert_eq!(metadata.track_gaps.len(), 1);
+        assert_eq!(metadata.track_gaps[0].first_revolution_index, 1);
+        assert_eq!(metadata.track_gaps[0].revolution_count, 1);
+        assert_eq!(metadata.track_gaps[0].after_track_index, 0);
+    }
+
+    #[test]
+    fn track_gap_section_absent_without_flag_yields_no_gaps() {
+        // test_metadata() sets no flags at all, so there is no track-gap
+        // section on the wire and none is read.
+        let metadata = decode_record_stream_metadata(&test_metadata()).unwrap();
+        assert!(metadata.track_gaps.is_empty());
+    }
+
+    #[test]
+    fn track_gap_zero_revolution_count_is_rejected() {
+        let mut bytes = test_metadata_with_track_gap();
+        // Overwrite the gap's revolution_count varuint (the second of the
+        // three trailing single-byte varuints) with zero.
+        let len = bytes.len();
+        bytes[len - 2] = 0;
+        assert!(decode_record_stream_metadata(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("revolution count must be greater than zero"));
+    }
+
+    #[test]
+    fn track_gap_invalid_after_track_index_is_rejected() {
+        let mut bytes = test_metadata_with_track_gap();
+        // Overwrite after_track_index (last byte) with an out-of-range track index.
+        let len = bytes.len();
+        bytes[len - 1] = 9;
+        assert!(decode_record_stream_metadata(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("after_track_index"));
+    }
+
+    #[test]
+    fn out_of_order_track_gaps_are_rejected() {
+        let mut out = Vec::new();
+        out.push(RECORD_STREAM_METADATA_VERSION);
+        out.push(METADATA_FLAG_TRACK_ENTRY_MAPPINGS | METADATA_FLAG_TRACK_GAPS);
+        out.push(1);
+        out.push(CONTAINER_EXTENSION);
+        push_u16be(&mut out, 4);
+        out.extend_from_slice(b"TEST");
+        out.push(0);
+        push_u16be(&mut out, 4);
+        push_varuint(&mut out, 9);
+        push_varuint(&mut out, 9);
+        push_varuint(&mut out, 9);
+        push_varuint(&mut out, 9);
+        push_u16be(&mut out, 1);
+        push_u16be(&mut out, 1);
+        out.extend_from_slice(b"A");
+        push_varuint(&mut out, 0);
+        push_varuint(&mut out, 1);
+        push_u16be(&mut out, 2); // track gap count
+        // Second gap's first_revolution_index (2) is not greater than the
+        // first gap's (also 2): rejected as not strictly ascending.
+        push_varuint(&mut out, 2);
+        push_varuint(&mut out, 1);
+        push_varuint(&mut out, 0);
+        push_varuint(&mut out, 2);
+        push_varuint(&mut out, 1);
+        push_varuint(&mut out, 0);
+
+        assert!(decode_record_stream_metadata(&out)
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly ascending"));
+    }
+
+    #[test]
+    fn descriptor_reserved_flags_fail() {
+        let mut metadata = test_metadata();
+        let descriptor_flags_offset = 10;
+        // 0x20 is above DESCRIPTOR_KNOWN_FLAGS (0x1F) and so remains reserved.
+        metadata[descriptor_flags_offset] = 0x20;
+
+        assert!(decode_record_stream_metadata(&metadata)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown flags"));
+    }
+
+    #[test]
+    fn raw_container_code_is_not_current_format() {
+        let mut metadata = test_metadata();
+        metadata[3] = 0;
+
+        assert!(decode_record_stream_metadata(&metadata)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown payload container code 0"));
     }
 
     #[test]
@@ -2009,7 +2505,7 @@ mod tests {
     #[test]
     fn rejects_overlong_varuint() {
         let mut metadata = test_metadata();
-        let entry_length_offset = 7;
+        let entry_length_offset = 13;
         metadata.splice(entry_length_offset..entry_length_offset + 1, [0x89, 0x00]);
 
         assert!(decode_record_stream_metadata(&metadata)
@@ -2040,5 +2536,569 @@ mod tests {
         .unwrap();
 
         assert!(toned > rgb);
+    }
+
+    fn ecdc_descriptor() -> PayloadDescriptor {
+        ecdc::ecdc_payload_descriptor(
+            48_000,
+            2,
+            &ecdc::EcdcCodecMetadata {
+                model: "encodec_48khz".to_owned(),
+                num_codebooks: 8,
+                lm: true,
+                fp_scale: 8192,
+                min_range: 2,
+                bitstream_version: 2,
+                lm_frame_length: 203,
+            },
+        )
+        .unwrap()
+    }
+
+    fn gap_descriptor() -> PayloadDescriptor {
+        PayloadDescriptor::gap(48_000, 2).unwrap()
+    }
+
+    #[test]
+    fn gap_descriptor_passes_validation() {
+        let descriptor = gap_descriptor();
+
+        assert_eq!(descriptor.container, PAYLOAD_CONTAINER_GAP);
+        assert_eq!(descriptor.sample_rate, Some(48_000));
+        assert_eq!(descriptor.channels, Some(2));
+        assert_eq!(descriptor.codec.as_deref(), Some(PAYLOAD_CODEC_GAP));
+        assert!(descriptor.block_samples.is_none());
+        assert!(descriptor.output_offset_samples.is_none());
+        assert!(descriptor.output_samples.is_none());
+        assert!(descriptor.codec_metadata.is_none());
+    }
+
+    fn gap_entry_bytes() -> Vec<u8> {
+        gap::encode_gap_payload(24_000, 256, 0x1234_5678).unwrap()
+    }
+
+    fn headerless_ecdc_test_entry(fill: u8, payload_len: usize) -> Vec<u8> {
+        let payload_len =
+            u32::try_from(payload_len).expect("test ECDC payload length exceeds u32");
+
+        let mut entry = Vec::with_capacity(8 + payload_len as usize);
+        entry.extend_from_slice(&payload_len.to_be_bytes());
+        entry.extend_from_slice(&[0u8; 4]);
+        entry.resize(8 + payload_len as usize, fill);
+        entry
+    }
+
+    #[test]
+    fn programme_map_computes_exact_boundaries_across_gap() {
+        // Two programme-time ECDC revolutions, an explicit track gap (also a
+        // normal ECDC revolution under the same shared descriptor — no GAP
+        // container, no GAP1 payload), then two more track revolutions.
+        let ecdc = ecdc_descriptor();
+        let output_samples = u64::from(ecdc.output_samples.unwrap());
+        let rev = headerless_ecdc_test_entry(0xAA, 10);
+        let rev_len = rev.len();
+
+        let mut payload = Vec::new();
+        for _ in 0..5 {
+            payload.extend_from_slice(&rev);
+        }
+
+        let metadata = RecordStreamMetadata {
+            version: RECORD_STREAM_METADATA_VERSION,
+            encrypted: false,
+            payload_descriptors: vec![ecdc],
+            payload_entries: vec![
+                PayloadEntryDescriptor {
+                    byte_length: rev_len,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: rev_len,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: rev_len,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: rev_len,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: rev_len,
+                    payload_descriptor_index: 0,
+                },
+            ],
+            tracks: vec![
+                TrackDescriptor {
+                    title: "Track A".to_owned(),
+                    first_revolution_index: 0,
+                    revolution_count: 2,
+                },
+                TrackDescriptor {
+                    title: "Track B".to_owned(),
+                    first_revolution_index: 3,
+                    revolution_count: 2,
+                },
+            ],
+            track_gaps: vec![TrackGapDescriptor {
+                first_revolution_index: 2,
+                revolution_count: 1,
+                after_track_index: 0,
+            }],
+        };
+
+        let document = RecordStream {
+            metadata,
+            metadata_bytes: Vec::new(),
+            chunks: vec![Chunk { payload, crc32: 0, nonce: None }],
+        };
+
+        let map = build_programme_map(&document, Some("single45")).unwrap();
+        assert_eq!(map.total_samples, output_samples * 5);
+        assert_eq!(map.regions.len(), 3);
+
+        // Region 0: Track A spanning two revolutions.
+        assert_eq!(
+            map.regions[0].kind,
+            ProgrammeRegionKind::Track { number: 1, title: "Track A".to_owned() }
+        );
+        assert_eq!(map.regions[0].start_sample, 0);
+        assert_eq!(map.regions[0].end_sample, output_samples * 2);
+
+        // Region 1: the explicit track gap after track 1, one revolution.
+        assert_eq!(
+            map.regions[1].kind,
+            ProgrammeRegionKind::Gap { after_track_number: 1 }
+        );
+        assert_eq!(map.regions[1].sample_count, output_samples);
+        assert_eq!(map.regions[1].start_sample, output_samples * 2);
+        assert_eq!(map.regions[1].end_sample, output_samples * 3);
+
+        // Region 2: Track B.
+        assert_eq!(
+            map.regions[2].kind,
+            ProgrammeRegionKind::Track { number: 2, title: "Track B".to_owned() }
+        );
+        assert_eq!(map.regions[2].end_sample, map.total_samples);
+
+        // Radial anchors are real spiral positions: 0 at the outer edge, 1 at the
+        // inner edge, strictly increasing across the programme, and bracketing the
+        // gap. Byte fractions are retained only as a diagnostic.
+        let total_bytes = (rev_len * 5) as f64;
+        assert_eq!(map.regions[0].radial_start_normalized, 0.0);
+        assert!(
+            (map.regions[1].byte_fraction_start
+                - (rev_len * 2) as f64 / total_bytes)
+                .abs()
+                < 1e-12
+        );
+        assert!(map.regions[2].radial_end_normalized > 0.999);
+        // Monotonic non-decreasing radial position across regions.
+        for w in map.regions.windows(2) {
+            assert!(w[1].radial_start_normalized >= w[0].radial_end_normalized - 1e-12);
+        }
+        // Equal-area spiral: radial position is distinct from the raw byte
+        // fraction (outer turns hold more pixels, so near the outer edge the
+        // radius advances more slowly than the byte fraction).
+        assert!(map.regions[1].radial_start_normalized < map.regions[1].byte_fraction_start);
+        assert!(map.regions[1].radial_start_normalized > 0.0);
+    }
+
+    #[test]
+    fn gap_payload_round_trips_through_entry_validation() {
+        let bytes = gap_entry_bytes();
+        let descriptor = gap_descriptor();
+        validate_payload_entry_bytes(&descriptor, &bytes).unwrap();
+        assert_eq!(gap::gap_sample_count(&bytes).unwrap(), 24_000);
+    }
+
+    #[test]
+    fn malformed_gap_entry_is_rejected() {
+        let descriptor = gap_descriptor();
+        // Legacy bare u64be sample counts are no longer valid GAP entries.
+        assert!(validate_payload_entry_bytes(&descriptor, &24_000u64.to_be_bytes()).is_err());
+        // Truncated / corrupted GAP1 bytes are rejected.
+        let mut bytes = gap_entry_bytes();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        assert!(validate_payload_entry_bytes(&descriptor, &bytes).is_err());
+    }
+
+    #[test]
+    fn musical_tracks_may_be_separated_by_an_explicit_track_gap() {
+        // The track-gap entry is an ordinary ECDC payload entry, just like
+        // the track entries: classification comes entirely from explicit
+        // track_gaps metadata, never from inspecting the payload container.
+        let metadata = RecordStreamMetadata {
+            version: RECORD_STREAM_METADATA_VERSION,
+            encrypted: false,
+            payload_descriptors: vec![ecdc_descriptor()],
+            payload_entries: vec![
+                PayloadEntryDescriptor {
+                    byte_length: 11,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 17,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 13,
+                    payload_descriptor_index: 0,
+                },
+            ],
+            tracks: vec![
+                TrackDescriptor {
+                    title: "Side A".to_owned(),
+                    first_revolution_index: 0,
+                    revolution_count: 1,
+                },
+                TrackDescriptor {
+                    title: "Side B".to_owned(),
+                    first_revolution_index: 2,
+                    revolution_count: 1,
+                },
+            ],
+            track_gaps: vec![TrackGapDescriptor {
+                first_revolution_index: 1,
+                revolution_count: 1,
+                after_track_index: 0,
+            }],
+        };
+
+        validate_track_listing_metadata(&metadata).unwrap();
+    }
+
+    #[test]
+    fn an_untracked_entry_without_an_explicit_gap_is_rejected() {
+        // Same shape as the previous test, but with no track_gaps entry:
+        // there is no implicit "uncovered means gap" fallback any more.
+        let metadata = RecordStreamMetadata {
+            version: RECORD_STREAM_METADATA_VERSION,
+            encrypted: false,
+            payload_descriptors: vec![ecdc_descriptor()],
+            payload_entries: vec![
+                PayloadEntryDescriptor {
+                    byte_length: 11,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 17,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 13,
+                    payload_descriptor_index: 0,
+                },
+            ],
+            tracks: vec![
+                TrackDescriptor {
+                    title: "Side A".to_owned(),
+                    first_revolution_index: 0,
+                    revolution_count: 1,
+                },
+                TrackDescriptor {
+                    title: "Side B".to_owned(),
+                    first_revolution_index: 2,
+                    revolution_count: 1,
+                },
+            ],
+            track_gaps: vec![],
+        };
+
+        let err = validate_track_listing_metadata(&metadata).unwrap_err();
+        assert!(err.to_string().contains("not covered by any track or track gap"));
+    }
+
+    #[test]
+    fn track_must_not_cover_an_explicit_track_gap_entry() {
+        // All three entries are ordinary ECDC payload entries under the same
+        // descriptor. What is illegal is a track range and a track-gap range
+        // both claiming the same entry — never a function of container.
+        let metadata = RecordStreamMetadata {
+            version: RECORD_STREAM_METADATA_VERSION,
+            encrypted: false,
+            payload_descriptors: vec![ecdc_descriptor()],
+            payload_entries: vec![
+                PayloadEntryDescriptor {
+                    byte_length: 11,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 17,
+                    payload_descriptor_index: 0,
+                },
+                PayloadEntryDescriptor {
+                    byte_length: 13,
+                    payload_descriptor_index: 0,
+                },
+            ],
+            tracks: vec![TrackDescriptor {
+                title: "Wrong".to_owned(),
+                first_revolution_index: 0,
+                revolution_count: 3,
+            }],
+            track_gaps: vec![TrackGapDescriptor {
+                first_revolution_index: 1,
+                revolution_count: 1,
+                after_track_index: 0,
+            }],
+        };
+
+        assert!(validate_track_listing_metadata(&metadata).is_err());
+    }
+
+    fn encode_descriptor(out: &mut Vec<u8>, descriptor: &PayloadDescriptor) {
+        let (code, extension) = match descriptor.container.as_str() {
+            PAYLOAD_CONTAINER_ECDC => (CONTAINER_ECDC, None),
+            PAYLOAD_CONTAINER_MOSS_NANO => (CONTAINER_MOSS_NANO, None),
+            other => (CONTAINER_EXTENSION, Some(other)),
+        };
+        out.push(code);
+        if let Some(name) = extension {
+            push_u16be(out, name.len() as u16);
+            out.extend_from_slice(name.as_bytes());
+        }
+
+        let mut flags = 0u8;
+        if descriptor.codec.is_some() {
+            flags |= DESCRIPTOR_FLAG_CODEC;
+        }
+        if descriptor.sample_rate.is_some() {
+            flags |= DESCRIPTOR_FLAG_SAMPLE_RATE;
+        }
+        if descriptor.channels.is_some() {
+            flags |= DESCRIPTOR_FLAG_CHANNELS;
+        }
+        if descriptor.block_samples.is_some() {
+            flags |= DESCRIPTOR_FLAG_OUTPUT_GEOMETRY;
+        }
+        if descriptor.codec_metadata.is_some() {
+            flags |= DESCRIPTOR_FLAG_CODEC_METADATA;
+        }
+        out.push(flags);
+
+        if let Some(codec) = &descriptor.codec {
+            push_u16be(out, codec.len() as u16);
+            out.extend_from_slice(codec.as_bytes());
+        }
+        if let Some(sample_rate) = descriptor.sample_rate {
+            out.extend_from_slice(&sample_rate.to_be_bytes());
+        }
+        if let Some(channels) = descriptor.channels {
+            out.push(channels);
+        }
+        if let Some(block_samples) = descriptor.block_samples {
+            out.extend_from_slice(&block_samples.to_be_bytes());
+            out.extend_from_slice(&descriptor.output_offset_samples.unwrap().to_be_bytes());
+            out.extend_from_slice(&descriptor.output_samples.unwrap().to_be_bytes());
+        }
+        if let Some(codec_metadata) = &descriptor.codec_metadata {
+            out.extend_from_slice(&(codec_metadata.len() as u32).to_be_bytes());
+            out.extend_from_slice(codec_metadata);
+        }
+    }
+
+    fn metadata_with_descriptors(descriptors: &[PayloadDescriptor]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(RECORD_STREAM_METADATA_VERSION);
+        out.push(METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES);
+        out.push(descriptors.len() as u8);
+        for descriptor in descriptors {
+            encode_descriptor(&mut out, descriptor);
+        }
+        // Two payload entries, one per descriptor index where possible.
+        push_u16be(&mut out, 2);
+        for index in 0..2u8 {
+            push_varuint(&mut out, 8);
+            out.push(index.min(descriptors.len() as u8 - 1));
+        }
+        push_u16be(&mut out, 1);
+        push_u16be(&mut out, 3);
+        out.extend_from_slice(b"One");
+        out
+    }
+
+    #[test]
+    fn ecdc_profile_descriptor_values() {
+        let descriptor = ecdc_descriptor();
+        assert_eq!(descriptor.block_samples, Some(64_960));
+        assert_eq!(descriptor.output_offset_samples, Some(480));
+        assert_eq!(descriptor.output_samples, Some(64_000));
+        assert_eq!(ecdc::ECDC_BLOCK_SAMPLES, 64_960);
+        assert_eq!(ecdc::ECDC_OUTPUT_OFFSET_SAMPLES, 480);
+        assert_eq!(ecdc::ECDC_OUTPUT_SAMPLES, 64_000);
+        // Trailing discarded samples are derived, not stored.
+        assert_eq!(
+            descriptor.block_samples.unwrap()
+                - descriptor.output_offset_samples.unwrap()
+                - descriptor.output_samples.unwrap(),
+            480
+        );
+    }
+
+    #[test]
+    fn descriptor_with_all_fields_round_trips() {
+        let descriptor = ecdc_descriptor();
+        let bytes = metadata_with_descriptors(&[descriptor.clone()]);
+        let metadata = decode_record_stream_metadata(&bytes).unwrap();
+        assert_eq!(metadata.payload_descriptors[0], descriptor);
+        assert_eq!(metadata.payload_entries[0].payload_descriptor_index, 0);
+    }
+
+    #[test]
+    fn descriptor_without_optional_geometry_round_trips() {
+        let descriptor = PayloadDescriptor::from_container(PAYLOAD_CONTAINER_ECDC);
+        let bytes = metadata_with_descriptors(&[descriptor.clone()]);
+        let metadata = decode_record_stream_metadata(&bytes).unwrap();
+        assert_eq!(metadata.payload_descriptors[0], descriptor);
+        assert!(metadata.payload_descriptors[0].block_samples.is_none());
+        assert!(metadata.payload_descriptors[0].codec_metadata.is_none());
+    }
+
+    #[test]
+    fn multiple_entries_reference_shared_descriptor() {
+        let bytes = metadata_with_descriptors(&[ecdc_descriptor()]);
+        let metadata = decode_record_stream_metadata(&bytes).unwrap();
+        assert_eq!(metadata.payload_descriptors.len(), 1);
+        assert_eq!(metadata.payload_entries.len(), 2);
+        for entry in &metadata.payload_entries {
+            assert_eq!(entry.payload_descriptor_index, 0);
+        }
+    }
+
+    #[test]
+    fn truncated_codec_metadata_is_rejected() {
+        let mut bytes = metadata_with_descriptors(&[ecdc_descriptor()]);
+        bytes.truncate(bytes.len() - 4);
+        assert!(decode_record_stream_metadata(&bytes).is_err());
+    }
+
+    #[test]
+    fn oversized_codec_metadata_length_is_rejected() {
+        let descriptor = ecdc_descriptor();
+        let mut out = Vec::new();
+        out.push(RECORD_STREAM_METADATA_VERSION);
+        out.push(0);
+        out.push(1);
+        // ECDC descriptor with only the codec-metadata flag, but a bogus huge length.
+        out.push(CONTAINER_ECDC);
+        out.push(DESCRIPTOR_FLAG_CODEC_METADATA);
+        out.extend_from_slice(&((MAX_CODEC_METADATA_BYTES as u32) + 1).to_be_bytes());
+        out.extend_from_slice(descriptor.codec_metadata.as_ref().unwrap());
+        let err = decode_record_stream_metadata(&out).unwrap_err().to_string();
+        assert!(err.contains("exceeds limit"));
+    }
+
+    #[test]
+    fn valid_geometry_passes_validation() {
+        validate_payload_descriptor(&ecdc_descriptor()).unwrap();
+    }
+
+    #[test]
+    fn zero_block_length_is_rejected() {
+        let mut descriptor = ecdc_descriptor();
+        descriptor.block_samples = Some(0);
+        assert!(validate_payload_descriptor(&descriptor).is_err());
+    }
+
+    #[test]
+    fn zero_output_length_is_rejected() {
+        let mut descriptor = ecdc_descriptor();
+        descriptor.output_samples = Some(0);
+        assert!(validate_payload_descriptor(&descriptor).is_err());
+    }
+
+    #[test]
+    fn offset_plus_output_exceeding_block_is_rejected() {
+        let mut descriptor = ecdc_descriptor();
+        descriptor.output_offset_samples = Some(1_000);
+        descriptor.output_samples = Some(64_000);
+        // 1000 + 64000 = 65000 > 64960
+        assert!(validate_payload_descriptor(&descriptor).is_err());
+    }
+
+    #[test]
+    fn offset_plus_output_overflow_is_rejected() {
+        let mut descriptor = ecdc_descriptor();
+        descriptor.block_samples = Some(u32::MAX);
+        descriptor.output_offset_samples = Some(u32::MAX);
+        descriptor.output_samples = Some(u32::MAX);
+        assert!(validate_payload_descriptor(&descriptor).is_err());
+    }
+
+    #[test]
+    fn partial_geometry_presence_is_rejected() {
+        let mut descriptor = ecdc_descriptor();
+        descriptor.output_samples = None;
+        assert!(validate_payload_descriptor(&descriptor).is_err());
+    }
+
+    #[test]
+    fn absent_geometry_is_accepted() {
+        validate_payload_descriptor(&PayloadDescriptor::from_container("TEST")).unwrap();
+    }
+
+    #[test]
+    fn codec_metadata_valid_json_accepted() {
+        validate_codec_metadata(br#"{"m":"encodec_48khz","nc":8}"#).unwrap();
+    }
+
+    #[test]
+    fn codec_metadata_malformed_json_rejected() {
+        assert!(validate_codec_metadata(br#"{"m":"#).is_err());
+        // Empty bytes are not valid JSON, so empty codec metadata is rejected.
+        assert!(validate_codec_metadata(b"").is_err());
+    }
+
+    #[test]
+    fn codec_metadata_non_utf8_rejected() {
+        assert!(validate_codec_metadata(&[0xff, 0xfe, 0x00]).is_err());
+    }
+
+    #[test]
+    fn codec_metadata_duplicate_geometry_key_rejected() {
+        assert!(validate_codec_metadata(br#"{"block_samples":64960}"#).is_err());
+        assert!(validate_codec_metadata(br#"{"output_samples":64000}"#).is_err());
+    }
+
+    #[test]
+    fn shared_descriptor_equality_detects_mismatch() {
+        let a = ecdc_descriptor();
+        validate_shared_payload_descriptor(&a, &a.clone()).unwrap();
+
+        let mut b = a.clone();
+        b.channels = Some(1);
+        let err = validate_shared_payload_descriptor(&a, &b).unwrap_err();
+        assert!(err.to_string().contains("channels"));
+
+        let mut c = a.clone();
+        c.codec_metadata = Some(b"{}".to_vec());
+        let err = validate_shared_payload_descriptor(&a, &c).unwrap_err();
+        assert!(err.to_string().contains("codec_metadata"));
+    }
+
+    #[test]
+    fn ecdc_codec_metadata_is_deterministic_and_has_no_geometry() {
+        let meta = ecdc::EcdcCodecMetadata {
+            model: "encodec_48khz".to_owned(),
+            num_codebooks: 8,
+            lm: true,
+            fp_scale: 8192,
+            min_range: 2,
+            bitstream_version: 2,
+            lm_frame_length: 203,
+        };
+        let a = ecdc::ecdc_codec_metadata_json(&meta).unwrap();
+        let b = ecdc::ecdc_codec_metadata_json(&meta).unwrap();
+        assert_eq!(a, b);
+        let text = std::str::from_utf8(&a).unwrap();
+        assert!(!text.contains("block_samples"));
+        assert!(!text.contains("output_offset_samples"));
+        assert!(!text.contains("output_samples"));
+        // Compact JSON: no spaces between tokens.
+        assert!(!text.contains(": "));
+        validate_codec_metadata(&a).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 //! record-test — verbose Bitneedle PNG, BRD1, BRS1 and payload inspector.
 //!
 //! Usage:
-//!   record-test <record.png> [bundle.json] [manifest]
+//!   record-test [--verbose] <record.png> [bundle.json] [manifest]
 //!
 //! `manifest` is optional because BRD1 now embeds only a binary
 //! SignedReleaseReference. Supplying the external manifest allows the tool to
@@ -18,11 +18,23 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut verbose = false;
+    let positional = std::env::args()
+        .skip(1)
+        .filter(|arg| {
+            if arg == "--verbose" || arg == "-v" {
+                verbose = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut args = positional.into_iter();
 
     let png_path = args
         .next()
-        .context("usage: record-test <record.png> [bundle.json] [manifest]")?;
+        .context("usage: record-test [--verbose] <record.png> [bundle.json] [manifest]")?;
     let bundle_path = args.next();
     let manifest_path = args.next();
 
@@ -45,6 +57,7 @@ fn run() -> Result<()> {
     let mut options = InspectionOptions::verbose_defaults();
     options.png_name = Some(&png_path);
     options.bundle_metadata = bundle_metadata.as_ref();
+    options.verbose_payload_entries = verbose;
 
     if let (Some(path), Some(bytes)) =
         (manifest_path.as_deref(), manifest_bytes.as_deref())

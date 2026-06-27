@@ -135,6 +135,19 @@ impl BitneedleId {
     pub fn ulid(&self) -> &str {
         &self.value[self.value.len() - ULID_LEN..]
     }
+
+    /// The raw 16-byte ULID value, as stored in binary wire formats.
+    pub fn ulid_bytes(&self) -> [u8; 16] {
+        decode_ulid_bytes(self.ulid()).expect("BitneedleId always holds a canonical ULID")
+    }
+
+    pub fn from_ulid_bytes(kind: BitneedleIdKind, bytes: [u8; 16]) -> Self {
+        let ulid = encode_ulid_bytes(bytes);
+        Self {
+            kind,
+            value: format!("{}_{}", kind.prefix(), ulid),
+        }
+    }
 }
 
 impl fmt::Display for BitneedleId {
@@ -194,6 +207,14 @@ macro_rules! typed_id {
 
             pub fn into_inner(self) -> BitneedleId {
                 self.0
+            }
+
+            pub fn ulid_bytes(&self) -> [u8; 16] {
+                self.0.ulid_bytes()
+            }
+
+            pub fn from_ulid_bytes(bytes: [u8; 16]) -> Self {
+                Self(BitneedleId::from_ulid_bytes($kind, bytes))
             }
         }
 
@@ -268,6 +289,19 @@ fn canonical_ulid(value: &str) -> Result<String> {
         out.push(c);
     }
     Ok(out)
+}
+
+fn decode_ulid_bytes(value: &str) -> Result<[u8; 16]> {
+    let canonical = canonical_ulid(value)?;
+    let mut bits: u128 = 0;
+    for c in canonical.bytes() {
+        let digit = CROCKFORD
+            .iter()
+            .position(|&x| x == c)
+            .ok_or_else(|| anyhow::anyhow!("ULID contains a non-canonical Crockford Base32 character"))?;
+        bits = (bits << 5) | digit as u128;
+    }
+    Ok(bits.to_be_bytes())
 }
 
 fn encode_ulid_bytes(bytes: [u8; 16]) -> String {
