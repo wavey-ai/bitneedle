@@ -26,13 +26,6 @@ one-track case of the same multitrack-capable format.
 
 This document also specifies an optional BSC1 Bitneedle Sidecar container
 carried through pair-sign modulation of pixels in non-payload visual regions.
-The BSC1 carrier is independent of the removed groove-patternisation system:
-the main payload groove is no longer patternised or reversibly transformed.
-
-Earlier experimental BCS2, JSON-BRS1, BPLP, ECLP, BTS1, BNPM, and unwrapped
-single-payload forms are not conforming to this revision. Draft 02 also updates
-the BRD1 identity and issuance fields to match the deployed YL issuance
-pipeline.
 
 ## Status of This Memo
 
@@ -46,6 +39,30 @@ Certain aspects of Bitneedle records, encoding, decoding, rendering, caching,
 and playback are patent pending. This specification is published for
 interoperability and implementation clarity. No express or implied patent
 licence is granted by this document.
+
+## Contents
+
+    1. Introduction
+    2. Conventions and Terminology
+    3. Conformance
+    4. Raster Container
+    5. Record Geometry
+    6. Spiral Tracing
+    7. BRD1 Record Descriptor
+    8. Main Payload Pixel Mapping
+    9. BRS1 Record Stream
+   10. Single-Track and Multitrack Semantics
+   11. Signed Releases
+   12. BSC1 Bitneedle Sidecar
+   13. Complete Decoding Procedure
+   14. Exact-Digital Requirements
+   15. Extension Points
+   16. Interoperability and Disclosure Boundary
+   17. Security Considerations
+   18. Privacy Considerations
+   19. IANA Considerations
+    A. Binary Examples
+    B. Reference API Shape
 
 ## 1. Introduction
 
@@ -200,9 +217,6 @@ A conforming encoder MUST:
   when the chunk is signed; and
 * use the same entry model for single-track and multitrack records.
 
-A conforming encoder MUST NOT emit JSON BRS1 metadata, BNPM, BPLP, ECLP,
-BTS1, or a newly encoded legacy stream.
-
 ### 3.2 Decoders
 
 A conforming decoder MUST:
@@ -258,10 +272,12 @@ unless another registered carrier, such as BSC1, assigns them meaning.
 
 ### 5.1 Registered Profiles
 
-| Profile | Spindle | Label | Payload inner | Payload outer | Outer edge | Lead band |
-|---------|--------:|------:|--------------:|--------------:|-----------:|----------:|
-| single45 | 63 | 151 | 169 | 280 | 287 | 6 |
-| lp       | 7  | 95  | 109 | 280 | 287 | 6 |
+    +----------+---------+-------+---------------+---------------+------------+-----------+
+    | Profile  | Spindle | Label | Payload inner | Payload outer | Outer edge | Lead band |
+    +----------+---------+-------+---------------+---------------+------------+-----------+
+    | single45 | 63      | 151   | 169           | 280           | 287        | 6         |
+    | lp       | 7       | 95    | 109           | 280           | 287        | 6         |
+    +----------+---------+-------+---------------+---------------+------------+-----------+
 
 The header metadata band lies between radii 280 and 286. The trailer metadata
 band lies between the label radius and payload inner radius.
@@ -296,50 +312,60 @@ Each descriptor byte is encoded as two grayscale pixels:
     first pixel  = 120 + high nibble
     second pixel = 120 + low nibble
 
-R, G, and B MUST be equal. Alpha MUST be non-zero.
+R, G, and B MUST be equal and MUST lie in the inclusive range 120 to 135.
+Canonical encoders MUST write these pixels with non-zero alpha. Decoders recover
+the nibble value from RGB and MUST NOT use alpha to determine descriptor length
+or termination.
 
 ### 7.2 Prefix
 
-| Offset | Size | Type | Meaning |
-|-------:|-----:|------|---------|
-| 0 | 4 | bytes | ASCII BRD1 |
-| 4 | 1 | u8 | version, currently 2 |
-| 5 | 2 | u16be | total descriptor length |
-| 7 | 2 | u16be | segment count |
-| 9 | 2 | u16be | segment-stream length |
-| 11 | 8 | f64be | main-groove b_value |
+    +--------+------+-------+-------------------------+
+    | Offset | Size | Type  | Meaning                 |
+    +--------+------+-------+-------------------------+
+    | 0      | 4    | bytes | ASCII BRD1              |
+    | 4      | 1    | u8    | version, currently 2    |
+    | 5      | 2    | u16be | total descriptor length |
+    | 7      | 2    | u16be | segment count           |
+    | 9      | 2    | u16be | segment-stream length   |
+    | 11     | 8    | f64be | main-groove b_value     |
+    +--------+------+-------+-------------------------+
 
 The total descriptor length includes the 19-byte prefix.
 
 ### 7.3 Segment Framing
 
-| Size | Type | Meaning |
-|-----:|------|---------|
-| 1 | u8 | segment type |
-| 2 | u16be | payload length |
-| N | bytes | payload |
+    +------+-------+----------------+
+    | Size | Type  | Meaning        |
+    +------+-------+----------------+
+    | 1    | u8    | segment type   |
+    | 2    | u16be | payload length |
+    | N    | bytes | payload        |
+    +------+-------+----------------+
 
 A version-2 canonical decoder MUST reject unregistered segment types unless
 an explicitly registered extension rule applies.
 
 ### 7.4 Segment Registry
 
-| Type | Name | Payload | Required |
-|-----:|------|---------|:--------:|
-| 1 | descriptor CRC-32 | u32be | yes |
-| 2 | BRS1 stream length | u64be or u64::MAX | yes |
-| 4 | record profile | non-empty UTF-8 | yes |
-| 5 | title | optional UTF-8 | no |
-| 6 | artist | optional UTF-8 | no |
-| 7 | payload encoding | non-empty UTF-8 | yes |
-| 8 | release ID | exactly 16 raw bytes | no |
-| 9 | catalogue number | optional UTF-8 | no |
-| 10 | label | optional UTF-8 | no |
-| 11 | artwork credit | optional UTF-8 | no |
-| 13 | canonical URL | optional UTF-8 | no |
-| 14 | created-at | u64be milliseconds since Unix epoch | no |
-| 16 | signed-release reference | binary envelope | no |
-| 21 | BSC1 pointer | opaque binary pointer | no |
+    +------+--------------------------+-------------------------------------+-----------------------+
+    | Type | Name                     | Payload                             | Required              |
+    +------+--------------------------+-------------------------------------+-----------------------+
+    | 1    | descriptor CRC-32        | u32be                               | yes                   |
+    | 2    | BRS1 stream length       | non-zero u32be                      | yes                   |
+    | 4    | record profile           | one-byte registered code            | yes                   |
+    | 5    | title                    | optional UTF-8                      | no                    |
+    | 6    | artist                   | optional UTF-8                      | no                    |
+    | 7    | payload encoding         | one-byte registered code            | yes                   |
+    | 8    | release ID               | exactly 16 raw bytes                | no                    |
+    | 9    | catalogue number         | optional UTF-8                      | no                    |
+    | 10   | label                    | optional UTF-8                      | no                    |
+    | 11   | artwork credit           | optional UTF-8                      | no                    |
+    | 13   | canonical URL            | optional UTF-8                      | no                    |
+    | 14   | created-at               | u64be milliseconds since Unix epoch | no                    |
+    | 16   | signed-release reference | version-2 binary envelope           | no                    |
+    | 21   | BSC1 pointer             | opaque binary pointer               | no                    |
+    | 22   | toned carrier map        | versioned binary map                | required for toned-v1 |
+    +------+--------------------------+-------------------------------------+-----------------------+
 
 An optional text segment with a zero-length payload decodes as absent.
 Canonical encoders SHOULD omit absent optional text segments.
@@ -352,6 +378,26 @@ The created-at field is an unsigned 64-bit count of milliseconds since the Unix
 epoch. ISO-8601 strings are presentation forms and MUST NOT be written into the
 binary field.
 
+Registered record-profile codes are:
+
+    +------+----------+
+    | Code | Profile  |
+    +------+----------+
+    | 0    | single45 |
+    | 1    | lp       |
+    +------+----------+
+
+Registered payload-encoding codes are:
+
+    +------+----------+
+    | Code | Encoding |
+    +------+----------+
+    | 0    | rgb      |
+    | 1    | toned-v1 |
+    +------+----------+
+
+A toned-v1 descriptor MUST include exactly one segment 22 carrier map.
+
 ### 7.5 Descriptor CRC-32
 
 Segment 1 contains CRC-32/IEEE over the complete descriptor with the four bytes
@@ -359,110 +405,148 @@ of the CRC payload treated as zero.
 
 ### 7.6 Signed-Release Reference
 
-Segment 16 contains:
+Segment 16 contains the following version-2 envelope:
 
-| Field | Type |
-|-------|------|
-| reference version | u8 |
-| manifest-hash algorithm code | u8 |
-| manifest-hash length | u16be |
-| manifest-hash bytes | N raw bytes |
-| signature algorithm code | u8 |
-| key-ID length | u16be |
-| key-ID bytes | N opaque bytes |
-| signature length | u16be |
-| signature bytes | N raw bytes |
+    +--------+------+--------------------------------+
+    | Offset | Size | Meaning                        |
+    +--------+------+--------------------------------+
+    | 0      | 1    | reference version, value 2     |
+    | 1      | 32   | raw SHA-256 release commitment |
+    | 33     | 2    | key-ID length, u16be           |
+    | 35     | N    | opaque key-ID bytes            |
+    | 35+N   | 64   | Ed25519 signature              |
+    +--------+------+--------------------------------+
 
-Version 2 requirements:
+The envelope requirements are:
 
-* reference version MUST equal 2;
-* the release-commitment digest MUST be exactly 32 bytes;
-* the key ID and signature MUST be non-empty;
-* the signature MUST be 64 bytes for the deployed Ed25519 profile;
-* each variable field MUST fit in its declared length;
-* the external manifest or issuance attestation is not carried by this envelope;
-  and
-* manifest serialization, signing preimage, trust, authorization mode, and
-  revocation policy are defined by external signing and issuance profiles.
+* the reference version MUST equal 2;
+* the release commitment MUST be exactly 32 bytes;
+* the key ID MUST be non-empty and fit in u16 length;
+* the signature MUST be exactly 64 bytes;
+* SHA-256 and Ed25519 are fixed by envelope version 2; and
+* the manifest or issuance document itself is resolved separately.
 
-The deployed YL profile uses:
-
-* a 32-byte SHA-256 release commitment;
-* an opaque UTF-8 key ID;
-* Ed25519 signatures;
-* a canonical URL identifying the issued YL catalogue entry; and
-* an optional BSC1 item containing the full issuance documents.
+The key ID identifies a candidate verification key. It does not make that key
+trusted. Trust, key resolution, revocation, manifest serialization, and signing
+preimage rules belong to the applicable signing or issuance profile.
 
 ### 7.7 BSC1 Pointer
 
 The current BSC1 pointer is 48 bytes:
 
-| Offset | Size | Meaning |
-|-------:|-----:|---------|
-| 0 | 4 | ASCII BSC1 |
-| 4 | 1 | pointer version, 1 |
-| 5 | 1 | carrier scheme ID |
-| 6 | 1 | carrier flags |
-| 7 | 1 | reserved, zero |
-| 8 | 4 | non-zero shuffle seed |
-| 12 | 4 | exact BSC1 byte length |
-| 16 | 32 | raw SHA-256 digest of BSC1 |
+    +--------+------+----------------------------+
+    | Offset | Size | Meaning                    |
+    +--------+------+----------------------------+
+    | 0      | 4    | ASCII BSC1                 |
+    | 4      | 1    | pointer version, 1         |
+    | 5      | 1    | carrier scheme ID          |
+    | 6      | 1    | carrier flags              |
+    | 7      | 1    | reserved, zero             |
+    | 8      | 4    | non-zero shuffle seed      |
+    | 12     | 4    | exact BSC1 byte length     |
+    | 16     | 32   | raw SHA-256 digest of BSC1 |
+    +--------+------+----------------------------+
 
 Carrier flags are 0x01 label, 0x02 intergroove, and 0x04 lead-in/deadwax.
 
 ## 8. Main Payload Pixel Mapping
 
-Registered payload encodings in this revision are rgb and toned-v1.
+BRD1 segment 7 selects the main-payload encoding.
 
-rgb maps BRS1 bytes directly to RGB channels as described below.
+### 8.1 rgb
 
-toned-v1 is the currently deployed exact-digital visual mapping used by issued
-YL records. It is declared by BRD1 segment 7 and MUST be decoded using the
-registered toned-v1 mapping defined by the reference implementation. Both
-encodings remain exact-digital and lossless.
+Encoding code 0 is rgb.
 
-Every three BRS1 bytes map directly to R, G, and B of one payload pixel. Alpha
-MUST be non-zero. Unused channels in the final pixel are zero.
+Every three BRS1 bytes map directly to the R, G, and B channels of one payload
+pixel in that order. The final pixel uses zero in any unused channels.
 
     pixels written = ceil(BRS1 byte length / 3)
 
-The decoder recovers groove-order RGB bytes and truncates them to the exact
-length declared by BRD1.
+The decoder reads groove-order RGB channels and returns exactly the byte length
+declared by BRD1 segment 2.
 
-rgbTone is not part of this revision.
+### 8.2 toned-v1
+
+Encoding code 1 is toned-v1.
+
+toned-v1 uses the segment-22 carrier map to divide the declared BRS1 byte stream
+into one or more ordered tone spans. Each span declares:
+
+    +----------------+--------------------+
+    | Field          | Type               |
+    +----------------+--------------------+
+    | byte length    | canonical varuint  |
+    | base RGB       | 3 bytes            |
+    | luma tolerance | u8                 |
+    | bits per pixel | u8                 |
+    | ordering       | u8 registered code |
+    +----------------+--------------------+
+
+The carrier-map payload begins with:
+
+    +-------------+-----------------------+
+    | Field       | Type                  |
+    +-------------+-----------------------+
+    | map version | u8, value 1           |
+    | span count  | u16be                 |
+    | spans       | repeated span records |
+    +-------------+-----------------------+
+
+Span byte lengths MUST be non-zero and their sum MUST equal the declared BRS1
+stream length. The map MUST contain at least one span.
+
+Ordering code 0 means base-proximity ordering. Ordering code 1 means
+chroma-proximity ordering.
+
+The exact reversible symbol ordering and pixel-selection procedure is part of
+the registered toned-v1 decoder contract. This document defines the wire fields
+needed to identify and validate that mapping but does not describe record
+creation, optimisation, or perceptual-selection methods.
+
+### 8.3 Payload Length
+
+For every registered payload encoding, BRD1 segment 2 is authoritative. A
+decoder MUST recover exactly that number of bytes and MUST reject a record when
+the traced carrier cannot supply the declared length.
 
 ## 9. BRS1 Record Stream
 
 ### 9.1 Top-Level Layout
 
-| Offset | Size | Meaning |
-|-------:|-----:|---------|
-| 0 | 4 | ASCII BRS1 |
-| 4 | 4 | compact metadata length, u32be |
-| 8 | N | compact binary metadata |
-| 8+N | remainder | one or more transport chunks |
+    +--------+-----------+--------------------------------+
+    | Offset | Size      | Meaning                        |
+    +--------+-----------+--------------------------------+
+    | 0      | 4         | ASCII BRS1                     |
+    | 4      | 4         | compact metadata length, u32be |
+    | 8      | N         | compact binary metadata        |
+    | 8+N    | remainder | one or more transport chunks   |
+    +--------+-----------+--------------------------------+
 
 ### 9.2 Compact Metadata Header
 
-| Field | Type | Meaning |
-|-------|------|---------|
-| version | u8 | currently 2 |
-| flags | u8 | metadata feature flags |
-| descriptor count | u8 | 1 to 255 |
-| descriptors | variable | payload descriptors |
-| entry count | u16be | at least 1 |
-| entries | variable | payload-entry declarations |
-| track count | u16be | at least 1 |
-| tracks | variable | track declarations |
+    +------------------+----------+----------------------------+
+    | Field            | Type     | Meaning                    |
+    +------------------+----------+----------------------------+
+    | version          | u8       | currently 2                |
+    | flags            | u8       | metadata feature flags     |
+    | descriptor count | u8       | 1 to 255                   |
+    | descriptors      | variable | payload descriptors        |
+    | entry count      | u16be    | at least 1                 |
+    | entries          | variable | payload-entry declarations |
+    | track count      | u16be    | at least 1                 |
+    | tracks           | variable | track declarations         |
+    +------------------+----------+----------------------------+
 
 Known flags:
 
-| Bit | Name | Effect |
-|----:|------|--------|
-| 0x01 | encrypted | each chunk includes a 12-byte nonce |
-| 0x02 | entry descriptor indexes | each entry stores a u8 descriptor index |
-| 0x04 | track range mappings | each track stores a first-revolution index and revolution count |
-| 0x08 | track gaps | a track-gap table follows the track table |
+    +------+--------------------------+-----------------------------------------------------------------+
+    | Bit  | Name                     | Effect                                                          |
+    +------+--------------------------+-----------------------------------------------------------------+
+    | 0x01 | encrypted                | each chunk includes a 12-byte nonce                             |
+    | 0x02 | entry descriptor indexes | each entry stores a u8 descriptor index                         |
+    | 0x04 | track range mappings     | each track stores a first-revolution index and revolution count |
+    | 0x08 | track gaps               | a track-gap table follows the track table                       |
+    +------+--------------------------+-----------------------------------------------------------------+
 
 Unknown metadata flags MUST be rejected.
 
@@ -470,30 +554,36 @@ Unknown metadata flags MUST be rejected.
 
 Each descriptor begins:
 
-| Field | Type |
-|-------|------|
-| container code | u8 |
-| descriptor flags | u8 |
+    +------------------+------+
+    | Field            | Type |
+    +------------------+------+
+    | container code   | u8   |
+    | descriptor flags | u8   |
+    +------------------+------+
 
 Container codes:
 
-| Code | Container |
-|-----:|-----------|
-| 0 | RAW |
-| 1 | ECDC |
-| 2 | MOSSNANO |
-| 255 | extension name follows as a wire string |
+    +------+-----------------------------------------+
+    | Code | Container                               |
+    +------+-----------------------------------------+
+    | 0    | RAW                                     |
+    | 1    | ECDC                                    |
+    | 2    | MOSSNANO                                |
+    | 255  | extension name follows as a wire string |
+    +------+-----------------------------------------+
 
 An extension container name is encoded as u16be byte length followed by
 non-empty UTF-8.
 
 Descriptor flags:
 
-| Bit | Field |
-|----:|-------|
-| 0x01 | codec wire string |
-| 0x02 | sample rate u32be |
-| 0x04 | channels u8 |
+    +------+-------------------+
+    | Bit  | Field             |
+    +------+-------------------+
+    | 0x01 | codec wire string |
+    | 0x02 | sample rate u32be |
+    | 0x04 | channels u8       |
+    +------+-------------------+
 
 Sample rate and channel count, when present, MUST be greater than zero. Unknown
 descriptor flags MUST be rejected.
@@ -502,10 +592,12 @@ descriptor flags MUST be rejected.
 
 Each payload entry contains:
 
-| Field | Type |
-|-------|------|
-| byte length | canonical varuint |
-| descriptor index | optional u8 when metadata flag 0x02 is set |
+    +------------------+--------------------------------------------+
+    | Field            | Type                                       |
+    +------------------+--------------------------------------------+
+    | byte length      | canonical varuint                          |
+    | descriptor index | optional u8 when metadata flag 0x02 is set |
+    +------------------+--------------------------------------------+
 
 Byte length MUST be greater than zero. When descriptor indexes are omitted,
 index zero is implied.
@@ -524,11 +616,13 @@ Entries therefore form one contiguous logical payload.
 
 Each track contains:
 
-| Field | Type |
-|-------|------|
-| title | u16be length plus non-empty UTF-8 |
-| first revolution index | optional canonical varuint when flag 0x04 is set |
-| revolution count | optional canonical varuint when flag 0x04 is set |
+    +------------------------+--------------------------------------------------+
+    | Field                  | Type                                             |
+    +------------------------+--------------------------------------------------+
+    | title                  | u16be length plus non-empty UTF-8                |
+    | first revolution index | optional canonical varuint when flag 0x04 is set |
+    | revolution count       | optional canonical varuint when flag 0x04 is set |
+    +------------------------+--------------------------------------------------+
 
 When range mappings are omitted, track i covers exactly payload entry i.
 
@@ -548,18 +642,22 @@ entries.
 
 When metadata flag 0x08 is set, the track table is followed by:
 
-| Field | Type |
-|-------|------|
-| track-gap count | u16be |
-| track-gap declarations | repeated as below |
+    +------------------------+-------------------+
+    | Field                  | Type              |
+    +------------------------+-------------------+
+    | track-gap count        | u16be             |
+    | track-gap declarations | repeated as below |
+    +------------------------+-------------------+
 
 Each track-gap declaration contains:
 
-| Field | Type |
-|-------|------|
-| first revolution index | canonical varuint |
-| revolution count | canonical varuint |
-| after-track index | canonical varuint |
+    +------------------------+-------------------+
+    | Field                  | Type              |
+    +------------------------+-------------------+
+    | first revolution index | canonical varuint |
+    | revolution count       | canonical varuint |
+    | after-track index      | canonical varuint |
+    +------------------------+-------------------+
 
 A track gap has the following public semantics:
 
@@ -570,7 +668,7 @@ A track gap has the following public semantics:
 * it MUST NOT appear as a user-visible track;
 * its payload entries use ordinary payload descriptors and ordinary transport
   chunks;
-* no GAP, GAP1, or other special gap container is defined;
+* gap entries use the same payload-descriptor and transport-chunk model as track entries;
 * declarations MUST be ordered by strictly increasing first revolution index;
 * gap ranges MUST NOT overlap tracks or other gap ranges; and
 * every payload entry MUST be covered exactly once by either a track range or a
@@ -591,23 +689,27 @@ chunk is signed.
 
 Unencrypted chunk:
 
-| Offset | Size | Meaning |
-|-------:|-----:|---------|
-| 0 | 2 | chunk index, u16be |
-| 2 | 2 | total chunk count, u16be |
-| 4 | 1 | payload descriptor index |
-| 5 | 4 | stored payload length, u32be |
-| 9 | 4 | CRC-32 of stored payload |
-| 13 | 64 | signature slot |
-| 77 | N | stored payload |
+    +--------+------+------------------------------+
+    | Offset | Size | Meaning                      |
+    +--------+------+------------------------------+
+    | 0      | 2    | chunk index, u16be           |
+    | 2      | 2    | total chunk count, u16be     |
+    | 4      | 1    | payload descriptor index     |
+    | 5      | 4    | stored payload length, u32be |
+    | 9      | 4    | CRC-32 of stored payload     |
+    | 13     | 64   | signature slot               |
+    | 77     | N    | stored payload               |
+    +--------+------+------------------------------+
 
 Encrypted chunk:
 
-| Offset | Size | Meaning |
-|-------:|-----:|---------|
-| 0 | 77 | fields above through signature |
-| 77 | 12 | ChaCha20-Poly1305 nonce |
-| 89 | N | ciphertext including authentication tag |
+    +--------+------+-----------------------------------------+
+    | Offset | Size | Meaning                                 |
+    +--------+------+-----------------------------------------+
+    | 0      | 77   | fields above through signature          |
+    | 77     | 12   | ChaCha20-Poly1305 nonce                 |
+    | 89     | N    | ciphertext including authentication tag |
+    +--------+------+-----------------------------------------+
 
 Signature semantics:
 
@@ -768,18 +870,18 @@ A key is not trusted merely because its identifier appears in the image.
 ### 12.1 Independence from BRS1
 
 BSC1 is auxiliary. It MUST NOT be concatenated with or substituted for BRS1.
-Its pair-sign carrier remains valid even though main-groove patternisation has
-been removed.
 
 ### 12.2 Carrier Regions
 
 The registered carrier regions are:
 
-| Flag | Name |
-|-----:|------|
-| 0x01 | label |
-| 0x02 | intergroove |
-| 0x04 | leadInDeadwax |
+    +------+---------------+
+    | Flag | Name          |
+    +------+---------------+
+    | 0x01 | label         |
+    | 0x02 | intergroove   |
+    | 0x04 | leadInDeadwax |
+    +------+---------------+
 
 The default carrier set is label plus intergroove.
 
@@ -801,51 +903,59 @@ pairs.
 
 ### 12.4 BSC1 Container Header
 
-| Offset | Size | Meaning |
-|-------:|-----:|---------|
-| 0 | 4 | ASCII BSC1 |
-| 4 | 1 | version, currently 1 |
-| 5 | 1 | flags, currently zero |
-| 6 | 2 | item count, u16be |
-| 8 | 4 | total byte length, u32be |
+    +--------+------+--------------------------+
+    | Offset | Size | Meaning                  |
+    +--------+------+--------------------------+
+    | 0      | 4    | ASCII BSC1               |
+    | 4      | 1    | version, currently 1     |
+    | 5      | 1    | flags, currently zero    |
+    | 6      | 2    | item count, u16be        |
+    | 8      | 4    | total byte length, u32be |
+    +--------+------+--------------------------+
 
 ### 12.5 Item Header
 
-| Field | Size |
-|-------|-----:|
-| item type | 1 |
-| codec | 1 |
-| flags | 1 |
-| reserved | 1 |
-| raw byte length | 4 |
-| stored byte length | 4 |
-| name length | 2 |
-| MIME length | 2 |
-| name UTF-8 | variable |
-| MIME UTF-8 | variable |
-| stored data | variable |
+    +--------------------+----------+
+    | Field              | Size     |
+    +--------------------+----------+
+    | item type          | 1        |
+    | codec              | 1        |
+    | flags              | 1        |
+    | reserved           | 1        |
+    | raw byte length    | 4        |
+    | stored byte length | 4        |
+    | name length        | 2        |
+    | MIME length        | 2        |
+    | name UTF-8         | variable |
+    | MIME UTF-8         | variable |
+    | stored data        | variable |
+    +--------------------+----------+
 
 The reserved byte and item flags MUST be zero in version 1.
 
 Item types:
 
-| Code | Type |
-|-----:|------|
-| 0 | opaque bytes |
-| 1 | UTF-8 text |
-| 2 | image |
-| 3 | JSON |
+    +------+--------------+
+    | Code | Type         |
+    +------+--------------+
+    | 0    | opaque bytes |
+    | 1    | UTF-8 text   |
+    | 2    | image        |
+    | 3    | JSON         |
+    +------+--------------+
 
 Codes 4 through 31 are reserved. Higher values are private extensions.
 
 Codecs:
 
-| Code | Codec |
-|-----:|-------|
-| 0 | raw |
-| 1 | Brotli |
-| 2 | Zstandard |
-| 3 | AVIF |
+    +------+-----------+
+    | Code | Codec     |
+    +------+-----------+
+    | 0    | raw       |
+    | 1    | Brotli    |
+    | 2    | Zstandard |
+    | 3    | AVIF      |
+    +------+-----------+
 
 Codes 4 through 31 are reserved. Higher values are private extensions.
 
@@ -904,27 +1014,7 @@ Encoded samples MUST be preserved exactly. Scaling, resampling, filtering,
 lossy recompression, colour correction, and alpha destruction invalidate the
 format.
 
-## 15. Unsupported Earlier Forms
-
-The following forms are outside this revision and are rejected by the canonical
-reference implementation:
-
-    BCS2
-    JSON-based BRS1 metadata
-    BPLP
-    ECLP
-    unwrapped single-payload streams
-    BTS1
-    rgbTone
-    BNPM groove patternisation
-    arbitrary-JSON BRD1 segments
-    inline JSON signed manifests
-    JSON receipt and authorization envelopes
-
-Conversion from an earlier experiment creates new canonical bytes and requires
-new hashes and signatures.
-
-## 16. Extension Points
+## 15. Extension Points
 
 Future revisions may define:
 
@@ -939,9 +1029,9 @@ Future revisions may define:
 * BSC1 carrier schemes;
 * BSC1 item types and codecs.
 
-An extension MUST NOT silently reinterpret an existing version-1 field.
+An extension MUST NOT silently reinterpret an existing registered field.
 
-## 17. Interoperability and Disclosure Boundary
+## 16. Interoperability and Disclosure Boundary
 
 This document defines the minimum observable wire semantics required for
 independent parsing, validation, indexing, and playback.
@@ -964,7 +1054,7 @@ Conformance depends on the resulting bytes and declared programme layout, not
 on the method used to produce them. Nothing in this section grants a patent
 licence or expands the licence notice in this document.
 
-## 18. Security Considerations
+## 17. Security Considerations
 
 All decoded metadata, payloads, URLs, sidecars, compressed data, and codec
 containers are untrusted.
@@ -987,13 +1077,13 @@ Implementations SHOULD:
 CRC-32 detects accidental corruption but is not a cryptographic authenticity
 mechanism.
 
-## 19. Privacy Considerations
+## 18. Privacy Considerations
 
 BRD1 and BSC1 may contain identifiers, timestamps, URLs, credits, images, and
 other intentionally published data. Encoders SHOULD avoid embedding private
 information unintentionally.
 
-## 20. IANA Considerations
+## 19. IANA Considerations
 
 This document has no IANA actions.
 
@@ -1078,50 +1168,3 @@ The public parser exposes typed structures equivalent to:
 Inspection tools MAY serialize these typed values as pretty JSON for human or
 machine consumption. Such JSON is presentation output and is not BRS1 wire
 metadata.
-
-## Appendix C. Changes in Draft 02
-
-Draft 02:
-
-* updates the document identifier to draft-bitneedle-picture-record-format-02;
-* specifies BRD1 version 2;
-* defines release ID as a canonical raw 16-byte field;
-* defines created-at as u64 milliseconds since the Unix epoch;
-* specifies signed-release-reference envelope version 2;
-* aligns the release-commitment field with a 32-byte SHA-256 digest;
-* records the deployed Ed25519 signature shape and key-ID handling;
-* recognizes toned-v1 as a registered exact-digital payload encoding;
-* retains rgb as a registered direct-RGB encoding;
-* clarifies that the YL catalogue identity is represented canonically by the
-  canonical URL and may also be repeated in BSC1 issuance documents;
-* clarifies that the full issuance manifest or attestation may be external,
-  registry-resolved, or carried as auxiliary BSC1 JSON;
-* distinguishes the primary BRD1 issuance markers from supplementary BSC1
-  proof material; and
-* aligns terminology with the deployed YL record-issuer pipeline;
-* defines track ranges over consecutive payload entries;
-* defines the metadata track-gap flag and canonical track-gap table;
-* requires complete, non-overlapping classification of the payload-entry
-  timeline as tracks or track gaps;
-* confirms that track-gap entries use ordinary payload descriptors and are not
-  exposed as tracks; and
-* adds an explicit interoperability/disclosure boundary that omits authoring,
-  synthesis, packing, rendering, and optimization methods.
-
-## Appendix D. Changes in Draft 01
-
-Draft 01:
-
-* uses BRD1 plus compact binary BRS1;
-* uses direct RGB payload pixels only;
-* makes payload entries mandatory for single-track and multitrack records;
-* stores entry lengths and derives offsets;
-* stores track titles and entry mappings compactly;
-* requires CRC protection for every chunk;
-* permits chunks to be unsigned through an all-zero fixed signature slot;
-* permits signed chunks through an external fixed-64-byte signing profile;
-* permits optional ChaCha20-Poly1305 encryption;
-* replaces inline signed manifests with a binary signed-release reference;
-* retains BSC1 and its pair-sign sidecar carrier;
-* removes groove patternisation and BNPM; and
-* provides no canonical legacy decoder path.
