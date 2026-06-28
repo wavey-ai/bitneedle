@@ -20,29 +20,30 @@
 //! These identifiers name releases, editions, assets, tracks, revolutions,
 //! receipts, rights objects, sidecars, attestations, and authorisations.
 //!
-//! ## Public YL catalogue numbers
+//! ## Public YL catalogue codes
 //!
-//! Publicly issued picture records may additionally receive a centrally
-//! allocated YL catalogue number:
+//! Publicly issued picture records may additionally receive a random,
+//! non-enumerable YL catalogue code:
 //!
 //! ```text
-//! yl_000241
+//! yl_K7M3P9TX4QC
 //! ```
 //!
 //! Its presentation forms are:
 //!
 //! ```text
-//! Printed catalogue number: YL 000241
-//! Permalink:                https://yl.vin/000241
+//! Label text: YL K7M3P · 9TX4Q · C
+//! Slug:       k7m3p-9tx4q-c
+//! Permalink:  https://yl.vin/k7m3p-9tx4q-c
 //! ```
 //!
-//! A YL catalogue number is allocated by the YL registry and MUST NOT be
-//! generated independently by clients. It normally identifies one immutable
-//! publicly issued record edition.
+//! The compact body is 11 Crockford Base32 symbols:
 //!
-//! IDs and catalogue numbers name objects. They are not content commitments.
-//! Exact content identity belongs in explicitly named hashes such as
-//! `recordCommitment`, `recordSha256`, or `releaseManifestSha256`.
+//! - 10 random data symbols (50 random bits);
+//! - 1 trailing checksum symbol.
+//!
+//! Parsing is case-insensitive, accepts Crockford aliases (`O -> 0`, `I/L -> 1`),
+//! and ignores presentation separators (`-`, space, `.`, `·`, `_`).
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -53,14 +54,11 @@ use std::{
 use thiserror::Error;
 use ulid::Ulid;
 
+#[cfg(feature = "generate")]
+use rand_core::{CryptoRng, OsRng, RngCore};
+
 /// Number of characters in the canonical text representation of a ULID.
 pub const ULID_TEXT_LENGTH: usize = 26;
-
-/// Minimum number of decimal digits in a canonical YL catalogue number.
-///
-/// Values remain naturally extensible beyond six digits. For example,
-/// `1_000_000` is represented canonically as `yl_1000000`.
-pub const YL_CATALOGUE_MIN_DIGITS: usize = 6;
 
 /// Canonical machine-readable YL catalogue prefix.
 pub const YL_CATALOGUE_PREFIX: &str = "yl_";
@@ -68,10 +66,25 @@ pub const YL_CATALOGUE_PREFIX: &str = "yl_";
 /// Public host used for canonical YL record permalinks.
 pub const YL_PERMALINK_HOST: &str = "yl.vin";
 
+/// Crockford Base32 alphabet used by YL catalogue codes.
+pub const YL_CATALOGUE_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Number of random data symbols in a YL catalogue code.
+pub const YL_CATALOGUE_DATA_SYMBOLS: usize = 10;
+
+/// Number of checksum symbols in a YL catalogue code.
+pub const YL_CATALOGUE_CHECKSUM_SYMBOLS: usize = 1;
+
+/// Number of compact symbols in a YL catalogue code.
+pub const YL_CATALOGUE_COMPACT_LENGTH: usize =
+    YL_CATALOGUE_DATA_SYMBOLS + YL_CATALOGUE_CHECKSUM_SYMBOLS;
+
+const YL_CATALOGUE_LABEL_SEPARATOR: &str = " · ";
+const YL_CATALOGUE_CHECKSUM_SEED: u16 = 0x15;
+const YL_CATALOGUE_CHECKSUM_WEIGHTS: [u16; YL_CATALOGUE_DATA_SYMBOLS] =
+    [1, 3, 5, 7, 9, 11, 13, 15, 17, 19];
+
 /// Public Bitneedle identifier kinds.
-///
-/// Application-only workflow identifiers such as uploads, jobs, sessions, and
-/// users deliberately do not belong in this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BitneedleIdKind {
     Release,
@@ -87,7 +100,6 @@ pub enum BitneedleIdKind {
 }
 
 impl BitneedleIdKind {
-    /// Canonical lowercase prefix without the trailing underscore.
     pub const fn prefix(self) -> &'static str {
         match self {
             Self::Release => "rel",
@@ -103,7 +115,6 @@ impl BitneedleIdKind {
         }
     }
 
-    /// Canonical prefix including the trailing underscore.
     pub const fn tagged_prefix(self) -> &'static str {
         match self {
             Self::Release => "rel_",
@@ -119,7 +130,6 @@ impl BitneedleIdKind {
         }
     }
 
-    /// Resolve a canonical prefix without accepting aliases.
     pub fn from_prefix(prefix: &str) -> Option<Self> {
         match prefix {
             "rel" => Some(Self::Release),
@@ -143,8 +153,7 @@ impl fmt::Display for BitneedleIdKind {
     }
 }
 
-/// Error returned when a Bitneedle identifier is malformed or has the wrong
-/// object kind.
+/// Error returned when a Bitneedle identifier is malformed or has the wrong kind.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BitneedleIdError {
     #[error("Bitneedle identifier is empty")]
@@ -170,21 +179,22 @@ pub enum BitneedleIdError {
 
     #[error("invalid ULID: {0}")]
     InvalidUlid(String),
+}
 
-    #[error("YL catalogue number must be greater than zero")]
-    ZeroYlCatalogueNumber,
+/// Parse failure for a YL catalogue code.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum YlCatalogueCodeParseError {
+    #[error("YL catalogue code is empty")]
+    Empty,
 
-    #[error("YL catalogue number is missing the canonical `yl_` prefix")]
-    MissingYlCataloguePrefix,
+    #[error("YL catalogue code must contain exactly {YL_CATALOGUE_COMPACT_LENGTH} symbols after normalization; found {actual}")]
+    InvalidLength { actual: usize },
 
-    #[error("YL catalogue body must contain decimal ASCII digits only")]
-    InvalidYlCatalogueDigits,
+    #[error("invalid catalogue character `{character}` at index {index}")]
+    InvalidCharacter { character: char, index: usize },
 
-    #[error("YL catalogue number is not in canonical zero-padded form")]
-    NonCanonicalYlCatalogueNumber,
-
-    #[error("YL catalogue number is too large")]
-    YlCatalogueNumberOverflow,
+    #[error("YL catalogue code checksum is invalid")]
+    InvalidChecksum,
 }
 
 fn parse_parts(value: &str) -> Result<(BitneedleIdKind, Ulid), BitneedleIdError> {
@@ -206,8 +216,6 @@ fn parse_parts(value: &str) -> Result<(BitneedleIdKind, Ulid), BitneedleIdError>
     let ulid = Ulid::from_string(body)
         .map_err(|error| BitneedleIdError::InvalidUlid(error.to_string()))?;
 
-    // `ulid` accepts some non-canonical textual inputs. Bitneedle emits and
-    // accepts only the canonical uppercase representation.
     if ulid.to_string() != body {
         return Err(BitneedleIdError::NonCanonicalUlid);
     }
@@ -215,11 +223,6 @@ fn parse_parts(value: &str) -> Result<(BitneedleIdKind, Ulid), BitneedleIdError>
     Ok((kind, ulid))
 }
 
-/// A dynamically typed public Bitneedle identifier.
-///
-/// Prefer the concrete wrappers (`ReleaseId`, `EditionId`, and so on) in normal
-/// domain models. Use this type when parsing a field that intentionally accepts
-/// more than one registered identifier kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BitneedleId {
     kind: BitneedleIdKind,
@@ -296,96 +299,150 @@ impl<'de> Deserialize<'de> for BitneedleId {
     }
 }
 
-/// Centrally allocated public catalogue number for a YL picture record.
+/// Random, checksummed public YL catalogue code.
 ///
-/// This is intentionally separate from [`BitneedleId`]. A YL catalogue number
-/// is a short public identifier used on labels, share cards, QR destinations,
-/// and `yl.vin` permalinks.
+/// The compact representation contains 10 random Crockford Base32 symbols
+/// followed by one checksum symbol. The checksum is a fixed weighted modulo-32
+/// checksum over the first 10 symbols with a YL-specific seed:
 ///
-/// It normally maps to one immutable [`EditionId`].
+/// `checksum = (seed + Σ((symbol + 1) * weight[i])) mod 32`
 ///
-/// This type deliberately does not provide `new()`. Catalogue numbers must be
-/// issued transactionally by the YL registry rather than generated by clients.
+/// The weights are the odd sequence `[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]`.
+/// Because every weight is odd, every single-symbol substitution changes the
+/// checksum. Adjacent transpositions are detected for the common cases covered
+/// by the tests below, but like other simple weighted checksums this scheme is
+/// not perfect for every possible transposition pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct YlCatalogueNumber(u64);
+pub struct YlCatalogueCode([u8; YL_CATALOGUE_COMPACT_LENGTH]);
 
-impl YlCatalogueNumber {
-    /// Construct a catalogue number from a registry-allocated sequence value.
-    pub const fn from_sequence(sequence: u64) -> Result<Self, BitneedleIdError> {
-        if sequence == 0 {
-            return Err(BitneedleIdError::ZeroYlCatalogueNumber);
+impl YlCatalogueCode {
+    #[cfg(feature = "generate")]
+    pub fn generate() -> Self {
+        Self::generate_with_rng(&mut OsRng)
+    }
+
+    #[cfg(feature = "generate")]
+    pub fn generate_with_rng<R>(rng: &mut R) -> Self
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut compact = [0u8; YL_CATALOGUE_COMPACT_LENGTH];
+        let mut random = [0u8; YL_CATALOGUE_DATA_SYMBOLS];
+        rng.fill_bytes(&mut random);
+        for (index, byte) in random.iter().enumerate() {
+            compact[index] = byte & 0x1f;
         }
-
-        Ok(Self(sequence))
+        compact[YL_CATALOGUE_DATA_SYMBOLS] =
+            Self::checksum_symbol_value(&compact[..YL_CATALOGUE_DATA_SYMBOLS]);
+        Self(compact)
     }
 
-    /// Return the underlying positive registry sequence.
-    pub const fn sequence(self) -> u64 {
-        self.0
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, YlCatalogueCodeParseError> {
+        value.as_ref().parse()
     }
 
-    /// Canonical URL path segment.
+    pub fn canonical(self) -> String {
+        format!("{YL_CATALOGUE_PREFIX}{}", self.as_compact_str())
+    }
+
     pub fn slug(self) -> String {
-        format!("{:0width$}", self.0, width = YL_CATALOGUE_MIN_DIGITS)
+        let compact = self.as_compact_str().to_ascii_lowercase();
+        format!("{}-{}-{}", &compact[..5], &compact[5..10], &compact[10..11])
     }
 
-    /// Printed catalogue form used on labels and artwork.
     pub fn label(self) -> String {
-        format!("YL {}", self.slug())
+        let compact = self.as_compact_str();
+        format!(
+            "YL {}{}{}{}{}",
+            &compact[..5],
+            YL_CATALOGUE_LABEL_SEPARATOR,
+            &compact[5..10],
+            YL_CATALOGUE_LABEL_SEPARATOR,
+            &compact[10..11],
+        )
     }
 
-    /// Canonical permalink path.
     pub fn permalink_path(self) -> String {
         format!("/{}", self.slug())
     }
 
-    /// Canonical HTTPS permalink.
     pub fn permalink(self) -> String {
         format!("https://{}{}", YL_PERMALINK_HOST, self.permalink_path())
     }
 
-    /// Parse the decimal path segment used by `yl.vin`.
-    ///
-    /// Only canonical path forms are accepted. Values below one million must
-    /// use six digits; larger values must not contain redundant leading zeroes.
-    pub fn from_slug(slug: &str) -> Result<Self, BitneedleIdError> {
-        if slug.is_empty() || !slug.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(BitneedleIdError::InvalidYlCatalogueDigits);
+    pub fn as_compact_str(&self) -> String {
+        String::from_utf8(self.compact_ascii_bytes().to_vec()).expect("catalogue code is ASCII")
+    }
+
+    fn compact_ascii_bytes(&self) -> [u8; YL_CATALOGUE_COMPACT_LENGTH] {
+        let mut ascii = [0u8; YL_CATALOGUE_COMPACT_LENGTH];
+        for (index, symbol) in self.0.iter().enumerate() {
+            ascii[index] = encode_symbol(*symbol);
         }
+        ascii
+    }
 
-        let sequence = slug
-            .parse::<u64>()
-            .map_err(|_| BitneedleIdError::YlCatalogueNumberOverflow)?;
-
-        let number = Self::from_sequence(sequence)?;
-
-        if number.slug() != slug {
-            return Err(BitneedleIdError::NonCanonicalYlCatalogueNumber);
+    fn checksum_symbol_value(data_symbols: &[u8]) -> u8 {
+        let mut checksum = YL_CATALOGUE_CHECKSUM_SEED;
+        for (index, value) in data_symbols.iter().copied().enumerate() {
+            checksum =
+                (checksum + (u16::from(value) + 1) * YL_CATALOGUE_CHECKSUM_WEIGHTS[index]) % 32;
         }
+        checksum as u8
+    }
 
-        Ok(number)
+    fn from_symbol_values(
+        values: [u8; YL_CATALOGUE_COMPACT_LENGTH],
+    ) -> Result<Self, YlCatalogueCodeParseError> {
+        let expected = Self::checksum_symbol_value(&values[..YL_CATALOGUE_DATA_SYMBOLS]);
+        if values[YL_CATALOGUE_DATA_SYMBOLS] != expected {
+            return Err(YlCatalogueCodeParseError::InvalidChecksum);
+        }
+        Ok(Self(values))
     }
 }
 
-impl fmt::Display for YlCatalogueNumber {
+impl fmt::Display for YlCatalogueCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{YL_CATALOGUE_PREFIX}{}", self.slug())
+        formatter.write_str(&self.canonical())
     }
 }
 
-impl FromStr for YlCatalogueNumber {
-    type Err = BitneedleIdError;
+impl FromStr for YlCatalogueCode {
+    type Err = YlCatalogueCodeParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let body = value
-            .strip_prefix(YL_CATALOGUE_PREFIX)
-            .ok_or(BitneedleIdError::MissingYlCataloguePrefix)?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(YlCatalogueCodeParseError::Empty);
+        }
 
-        Self::from_slug(body)
+        let body = strip_catalogue_prefix(trimmed);
+        let mut symbols = Vec::with_capacity(YL_CATALOGUE_COMPACT_LENGTH);
+
+        for (index, character) in body.char_indices() {
+            if is_catalogue_separator(character) {
+                continue;
+            }
+            let symbol = decode_symbol(character)
+                .ok_or(YlCatalogueCodeParseError::InvalidCharacter { character, index })?;
+            symbols.push(symbol);
+        }
+
+        if symbols.len() != YL_CATALOGUE_COMPACT_LENGTH {
+            return Err(YlCatalogueCodeParseError::InvalidLength {
+                actual: symbols.len(),
+            });
+        }
+
+        let compact: [u8; YL_CATALOGUE_COMPACT_LENGTH] = symbols
+            .try_into()
+            .expect("catalogue symbol count already validated");
+        Self::from_symbol_values(compact)
     }
 }
 
-impl Serialize for YlCatalogueNumber {
+impl Serialize for YlCatalogueCode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -394,7 +451,7 @@ impl Serialize for YlCatalogueNumber {
     }
 }
 
-impl<'de> Deserialize<'de> for YlCatalogueNumber {
+impl<'de> Deserialize<'de> for YlCatalogueCode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -402,6 +459,62 @@ impl<'de> Deserialize<'de> for YlCatalogueNumber {
         let value = String::deserialize(deserializer)?;
         value.parse().map_err(de::Error::custom)
     }
+}
+
+fn strip_catalogue_prefix(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].eq_ignore_ascii_case(&b'y')
+        && bytes[1].eq_ignore_ascii_case(&b'l')
+        && bytes
+            .get(2)
+            .copied()
+            .map(|byte| is_catalogue_separator(byte as char))
+            .unwrap_or(true)
+    {
+        &value[2..]
+    } else {
+        value
+    }
+}
+
+fn is_catalogue_separator(character: char) -> bool {
+    matches!(character, '-' | ' ' | '.' | '·' | '_')
+}
+
+fn decode_symbol(character: char) -> Option<u8> {
+    match character {
+        '0' | 'O' | 'o' => Some(0),
+        '1' | 'I' | 'i' | 'L' | 'l' => Some(1),
+        '2'..='9' => Some((character as u8) - b'0'),
+        'A' | 'a' => Some(10),
+        'B' | 'b' => Some(11),
+        'C' | 'c' => Some(12),
+        'D' | 'd' => Some(13),
+        'E' | 'e' => Some(14),
+        'F' | 'f' => Some(15),
+        'G' | 'g' => Some(16),
+        'H' | 'h' => Some(17),
+        'J' | 'j' => Some(18),
+        'K' | 'k' => Some(19),
+        'M' | 'm' => Some(20),
+        'N' | 'n' => Some(21),
+        'P' | 'p' => Some(22),
+        'Q' | 'q' => Some(23),
+        'R' | 'r' => Some(24),
+        'S' | 's' => Some(25),
+        'T' | 't' => Some(26),
+        'V' | 'v' => Some(27),
+        'W' | 'w' => Some(28),
+        'X' | 'x' => Some(29),
+        'Y' | 'y' => Some(30),
+        'Z' | 'z' => Some(31),
+        _ => None,
+    }
+}
+
+fn encode_symbol(value: u8) -> u8 {
+    YL_CATALOGUE_ALPHABET.as_bytes()[usize::from(value)]
 }
 
 macro_rules! define_typed_id {
@@ -446,12 +559,7 @@ macro_rules! define_typed_id {
 
         impl fmt::Display for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(
-                    formatter,
-                    "{}{}",
-                    BitneedleIdKind::$kind.tagged_prefix(),
-                    self.0
-                )
+                write!(formatter, "{}{}", BitneedleIdKind::$kind.tagged_prefix(), self.0)
             }
         }
 
@@ -509,227 +617,132 @@ macro_rules! define_typed_id {
     };
 }
 
-define_typed_id!(
-    /// Stable identity of a logical release.
-    ReleaseId,
-    Release
-);
-
-define_typed_id!(
-    /// Stable identity of a release edition.
-    EditionId,
-    Edition
-);
-
-define_typed_id!(
-    /// Stable identity of a reusable public asset.
-    AssetId,
-    Asset
-);
-
-define_typed_id!(
-    /// Identity of a track that is addressable outside one record's local track array.
-    TrackId,
-    Track
-);
-
-define_typed_id!(
-    /// Identity of an independently addressable or licensable revolution.
-    RevolutionId,
-    Revolution
-);
-
-define_typed_id!(
-    /// Identity of a persisted registration or issuance receipt.
-    ReceiptId,
-    Receipt
-);
-
-define_typed_id!(
-    /// Identity of a persisted rights object.
-    RightsId,
-    Rights
-);
-
-define_typed_id!(
-    /// Identity of an independently addressable Bitneedle sidecar object.
-    SidecarId,
-    Sidecar
-);
-
-define_typed_id!(
-    /// Identity of a persisted issuance or platform attestation.
-    AttestationId,
-    Attestation
-);
-
-define_typed_id!(
-    /// Identity of a persisted creator or account authorisation.
-    AuthorizationId,
-    Authorization
-);
+define_typed_id!(ReleaseId, Release);
+define_typed_id!(EditionId, Edition);
+define_typed_id!(AssetId, Asset);
+define_typed_id!(TrackId, Track);
+define_typed_id!(RevolutionId, Revolution);
+define_typed_id!(ReceiptId, Receipt);
+define_typed_id!(RightsId, Rights);
+define_typed_id!(SidecarId, Sidecar);
+define_typed_id!(AttestationId, Attestation);
+define_typed_id!(AuthorizationId, Authorization);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const RELEASE: &str = "rel_01JXWQ7H6K8V4Z2T9M3N5C1BPA";
-    const EDITION: &str = "edn_01JXWQ8CM2R6F4KD9H7T3Y5VNE";
+    fn code_from_payload(payload: &str) -> String {
+        let mut compact = [0u8; YL_CATALOGUE_COMPACT_LENGTH];
+        for (index, character) in payload.chars().enumerate() {
+            compact[index] = decode_symbol(character).unwrap();
+        }
+        compact[YL_CATALOGUE_DATA_SYMBOLS] =
+            YlCatalogueCode::checksum_symbol_value(&compact[..YL_CATALOGUE_DATA_SYMBOLS]);
+        let code = YlCatalogueCode::from_symbol_values(compact).unwrap();
+        code.as_compact_str().to_string()
+    }
 
     #[test]
-    fn parses_and_formats_release_id() {
-        let id: ReleaseId = RELEASE.parse().unwrap();
-        assert_eq!(id.to_string(), RELEASE);
-        assert_eq!(ReleaseId::kind(), BitneedleIdKind::Release);
+    fn fixed_vectors_are_stable() {
+        assert_eq!(code_from_payload("0000000000"), "0000000000S");
+        assert_eq!(code_from_payload("ABCDEFGHJK"), "ABCDEFGHJK8");
+        assert_eq!(code_from_payload("K7M3P9TX4Q"), "K7M3P9TX4Q1");
+    }
+
+    #[test]
+    fn formatting_is_stable() {
+        let code: YlCatalogueCode = "yl_K7M3P9TX4Q1".parse().unwrap();
+        assert_eq!(code.as_compact_str(), "K7M3P9TX4Q1");
+        assert_eq!(code.canonical(), "yl_K7M3P9TX4Q1");
+        assert_eq!(code.slug(), "k7m3p-9tx4q-1");
+        assert_eq!(code.label(), "YL K7M3P · 9TX4Q · 1");
+        assert_eq!(code.permalink_path(), "/k7m3p-9tx4q-1");
+        assert_eq!(code.permalink(), "https://yl.vin/k7m3p-9tx4q-1");
+        assert_eq!(code.to_string(), "yl_K7M3P9TX4Q1");
+        assert_eq!(serde_json::to_string(&code).unwrap(), "\"yl_K7M3P9TX4Q1\"");
+    }
+
+    #[test]
+    fn parsing_accepts_presentation_forms_and_aliases() {
+        let expected: YlCatalogueCode = "yl_K7M3P9TX4Q1".parse().unwrap();
+        for input in [
+            "yl_K7M3P9TX4Q1",
+            "YL K7M3P · 9TX4Q · 1",
+            "k7m3p-9tx4q-1",
+            "K7M3P9TX4Q1",
+            "yl.k7m3p.9tx4q.1",
+            "yl_k7m3p9tx4q1",
+        ] {
+            assert_eq!(input.parse::<YlCatalogueCode>().unwrap(), expected);
+        }
+
+        assert_eq!(
+            "yl_K7M3P9TX4QI".parse::<YlCatalogueCode>().unwrap(),
+            expected
+        );
+        assert_eq!(
+            "yl_OOOOOOOOOOS".parse::<YlCatalogueCode>().unwrap(),
+            "yl_0000000000S".parse::<YlCatalogueCode>().unwrap()
+        );
+    }
+
+    #[test]
+    fn parsing_rejects_bad_inputs() {
+        assert_eq!(
+            "".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::Empty
+        );
+        assert_eq!(
+            "yl_K7M3P9TX4Q".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::InvalidLength { actual: 10 }
+        );
+        assert_eq!(
+            "yl_K7M3P9TX4Q44".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::InvalidLength { actual: 12 }
+        );
+        assert!(matches!(
+            "yl_K7M3P9TX4Q*".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::InvalidCharacter { character: '*', .. }
+        ));
+        assert_eq!(
+            "yl_K7M3P9TX4Q4".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::InvalidChecksum
+        );
+        assert_eq!(
+            "yl_K7M3P9TX5Q1".parse::<YlCatalogueCode>().unwrap_err(),
+            YlCatalogueCodeParseError::InvalidChecksum
+        );
+    }
+
+    #[test]
+    fn checksum_detects_common_adjacent_transpositions() {
+        let original = "K7M3P9TX4Q1".parse::<YlCatalogueCode>().unwrap();
+        for swapped in [
+            "7KM3P9TX4Q1",
+            "KM73P9TX4Q1",
+            "K7MP39TX4Q1",
+            "K7M3PT9X4Q1",
+            "K7M3P94XTQ1",
+        ] {
+            assert_eq!(
+                swapped.parse::<YlCatalogueCode>().unwrap_err(),
+                YlCatalogueCodeParseError::InvalidChecksum,
+                "swap should be detected against {}",
+                original.as_compact_str()
+            );
+        }
     }
 
     #[cfg(feature = "generate")]
     #[test]
-    fn generated_ids_have_the_expected_prefix() {
-        assert!(ReleaseId::new().to_string().starts_with("rel_"));
-        assert!(EditionId::new().to_string().starts_with("edn_"));
-        assert!(AssetId::new().to_string().starts_with("ast_"));
-        assert!(TrackId::new().to_string().starts_with("trk_"));
-        assert!(RevolutionId::new().to_string().starts_with("rev_"));
-        assert!(ReceiptId::new().to_string().starts_with("rcp_"));
-        assert!(RightsId::new().to_string().starts_with("rgt_"));
-        assert!(SidecarId::new().to_string().starts_with("bsc_"));
-        assert!(AttestationId::new().to_string().starts_with("att_"));
-        assert!(AuthorizationId::new().to_string().starts_with("aut_"));
-    }
-
-    #[test]
-    fn rejects_wrong_kind() {
-        let error = EDITION.parse::<ReleaseId>().unwrap_err();
-        assert!(matches!(
-            error,
-            BitneedleIdError::WrongKind {
-                expected: "rel",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn rejects_lowercase_ulid_body() {
-        let value = RELEASE.to_ascii_lowercase();
-        assert_eq!(
-            value.parse::<ReleaseId>().unwrap_err(),
-            BitneedleIdError::NonCanonicalUlid
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_prefix() {
-        let value = "upl_01JXWQ7H6K8V4Z2T9M3N5C1BPA";
-        assert_eq!(
-            value.parse::<BitneedleId>().unwrap_err(),
-            BitneedleIdError::UnknownPrefix("upl".to_owned())
-        );
-    }
-
-    #[test]
-    fn dynamic_id_round_trips_to_typed_id() {
-        let dynamic: BitneedleId = RELEASE.parse().unwrap();
-        assert_eq!(dynamic.kind(), BitneedleIdKind::Release);
-
-        let typed = ReleaseId::try_from(dynamic).unwrap();
-        assert_eq!(typed.to_string(), RELEASE);
-    }
-
-    #[test]
-    fn serde_uses_the_prefixed_canonical_string() {
-        let id: ReleaseId = RELEASE.parse().unwrap();
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, format!("\"{RELEASE}\""));
-
-        let decoded: ReleaseId = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, id);
-    }
-
-    #[test]
-    fn timestamp_is_available_but_not_identity_proof() {
-        let id: ReleaseId = RELEASE.parse().unwrap();
-        assert!(id.timestamp() >= UNIX_EPOCH);
-    }
-    #[test]
-    fn yl_catalogue_number_has_distinct_machine_label_and_permalink_forms() {
-        let number = YlCatalogueNumber::from_sequence(241).unwrap();
-
-        assert_eq!(number.sequence(), 241);
-        assert_eq!(number.to_string(), "yl_000241");
-        assert_eq!(number.slug(), "000241");
-        assert_eq!(number.label(), "YL 000241");
-        assert_eq!(number.permalink_path(), "/000241");
-        assert_eq!(number.permalink(), "https://yl.vin/000241");
-    }
-
-    #[test]
-    fn yl_catalogue_number_round_trips_from_canonical_text() {
-        let number: YlCatalogueNumber = "yl_000241".parse().unwrap();
-
-        assert_eq!(number.sequence(), 241);
-        assert_eq!(number.to_string(), "yl_000241");
-    }
-
-    #[test]
-    fn yl_catalogue_number_round_trips_from_permalink_slug() {
-        let number = YlCatalogueNumber::from_slug("000241").unwrap();
-
-        assert_eq!(number.to_string(), "yl_000241");
-    }
-
-    #[test]
-    fn yl_catalogue_number_expands_beyond_six_digits() {
-        let number = YlCatalogueNumber::from_sequence(1_000_000).unwrap();
-
-        assert_eq!(number.to_string(), "yl_1000000");
-        assert_eq!(number.slug(), "1000000");
-        assert_eq!(number.label(), "YL 1000000");
-    }
-
-    #[test]
-    fn yl_catalogue_number_rejects_zero() {
-        assert_eq!(
-            YlCatalogueNumber::from_sequence(0).unwrap_err(),
-            BitneedleIdError::ZeroYlCatalogueNumber
-        );
-
-        assert_eq!(
-            "yl_000000".parse::<YlCatalogueNumber>().unwrap_err(),
-            BitneedleIdError::ZeroYlCatalogueNumber
-        );
-    }
-
-    #[test]
-    fn yl_catalogue_number_rejects_noncanonical_padding() {
-        assert_eq!(
-            "yl_241".parse::<YlCatalogueNumber>().unwrap_err(),
-            BitneedleIdError::NonCanonicalYlCatalogueNumber
-        );
-
-        assert_eq!(
-            "yl_0000241".parse::<YlCatalogueNumber>().unwrap_err(),
-            BitneedleIdError::NonCanonicalYlCatalogueNumber
-        );
-    }
-
-    #[test]
-    fn yl_catalogue_number_rejects_non_decimal_characters() {
-        assert_eq!(
-            "yl_00A241".parse::<YlCatalogueNumber>().unwrap_err(),
-            BitneedleIdError::InvalidYlCatalogueDigits
-        );
-    }
-
-    #[test]
-    fn yl_catalogue_number_serde_uses_canonical_machine_text() {
-        let number = YlCatalogueNumber::from_sequence(241).unwrap();
-
-        let json = serde_json::to_string(&number).unwrap();
-        assert_eq!(json, "\"yl_000241\"");
-
-        let decoded: YlCatalogueNumber = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, number);
+    fn generation_produces_valid_canonical_codes() {
+        let code = YlCatalogueCode::generate();
+        assert_eq!(code.as_compact_str().len(), YL_CATALOGUE_COMPACT_LENGTH);
+        assert!(code
+            .as_compact_str()
+            .chars()
+            .all(|character| YL_CATALOGUE_ALPHABET.contains(character)));
+        assert_eq!(code.canonical().parse::<YlCatalogueCode>().unwrap(), code);
     }
 }

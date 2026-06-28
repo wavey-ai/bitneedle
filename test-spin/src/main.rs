@@ -38,8 +38,7 @@ fn run() -> Result<()> {
     let bundle_path = args.next();
     let manifest_path = args.next();
 
-    let png = std::fs::read(&png_path)
-        .with_context(|| format!("failed to read {png_path}"))?;
+    let png = std::fs::read(&png_path).with_context(|| format!("failed to read {png_path}"))?;
 
     let bundle_metadata = bundle_path
         .as_deref()
@@ -48,10 +47,7 @@ fn run() -> Result<()> {
 
     let manifest_bytes = manifest_path
         .as_deref()
-        .map(|path| {
-            std::fs::read(path)
-                .with_context(|| format!("failed to read manifest {path}"))
-        })
+        .map(|path| std::fs::read(path).with_context(|| format!("failed to read manifest {path}")))
         .transpose()?;
 
     let mut options = InspectionOptions::verbose_defaults();
@@ -59,13 +55,8 @@ fn run() -> Result<()> {
     options.bundle_metadata = bundle_metadata.as_ref();
     options.verbose_payload_entries = verbose;
 
-    if let (Some(path), Some(bytes)) =
-        (manifest_path.as_deref(), manifest_bytes.as_deref())
-    {
-        options.manifest = Some(ExternalManifest {
-            name: path,
-            bytes,
-        });
+    if let (Some(path), Some(bytes)) = (manifest_path.as_deref(), manifest_bytes.as_deref()) {
+        options.manifest = Some(ExternalManifest { name: path, bytes });
     }
 
     let report = test_spin::inspect_record_png(&png, &options)?;

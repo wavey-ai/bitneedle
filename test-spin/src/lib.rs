@@ -4,16 +4,16 @@
 //! decoded typed structures as labelled human-readable text for diagnostics.
 //! Canonical BRD1 and BRS1 data remains compact binary.
 
-use std::fmt::Write as _;
 use anyhow::{bail, Context, Result};
 use record_core::{
     gap, parse_record_stream, payload_descriptor_count_from_metadata,
-    validate_payload_entries_metadata, validate_track_listing_metadata,
-    RecordStreamMetadata, ResolvedPayloadEntry, CONTAINER_ECDC, CONTAINER_EXTENSION,
-    CONTAINER_MOSS_NANO, PAYLOAD_CONTAINER_ECDC, PAYLOAD_CONTAINER_GAP,
-    RECORD_STREAM_HEADER_LENGTH, RECORD_STREAM_MAGIC,
+    validate_payload_entries_metadata, validate_track_listing_metadata, RecordStreamMetadata,
+    ResolvedPayloadEntry, CONTAINER_ECDC, CONTAINER_EXTENSION, CONTAINER_MOSS_NANO,
+    PAYLOAD_CONTAINER_ECDC, PAYLOAD_CONTAINER_GAP, RECORD_STREAM_HEADER_LENGTH,
+    RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{RecordDescriptor, SignedReleaseReference};
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Default)]
 pub struct InspectionOptions<'a> {
@@ -59,21 +59,14 @@ pub struct ExternalManifest<'a> {
 }
 
 /// Decode and inspect a complete Bitneedle PNG.
-pub fn inspect_record_png(
-    png: &[u8],
-    options: &InspectionOptions<'_>,
-) -> Result<String> {
-    let decoded = record_decode::decode_record_png(png)
-        .context("record_decode::decode_record_png failed")?;
+pub fn inspect_record_png(png: &[u8], options: &InspectionOptions<'_>) -> Result<String> {
+    let decoded =
+        record_decode::decode_record_png(png).context("record_decode::decode_record_png failed")?;
 
     let mut out = String::new();
 
     section(&mut out, "FILE");
-    writeln!(
-        out,
-        "  name:  {}",
-        options.png_name.unwrap_or("<memory>")
-    )?;
+    writeln!(out, "  name:  {}", options.png_name.unwrap_or("<memory>"))?;
     writeln!(out, "  bytes: {}", png.len())?;
 
     if let Some((width, height, bit_depth, color_type)) = png_ihdr(png) {
@@ -85,11 +78,7 @@ pub fn inspect_record_png(
         writeln!(out, "  PNG:   <could not read IHDR>")?;
     }
 
-    writeln!(
-        out,
-        "  decoded record profile: {}",
-        decoded.record_profile
-    )?;
+    writeln!(out, "  decoded record profile: {}", decoded.record_profile)?;
 
     report_descriptor(
         &mut out,
@@ -104,6 +93,19 @@ pub fn inspect_record_png(
         decoded.chunk_stream.pixel_count,
         &decoded.record_profile,
         options,
+    )?;
+    report_signing_state(
+        &mut out,
+        &decoded.descriptor,
+        &decoded.chunk_stream.bytes,
+        options.manifest,
+    )?;
+    report_final_summary(
+        &mut out,
+        png,
+        &decoded.descriptor,
+        &decoded.chunk_stream.bytes,
+        &decoded.record_profile,
     )?;
 
     Ok(out)
@@ -127,56 +129,60 @@ pub fn report_descriptor(
     writeln!(out, "  b_value:              {}", descriptor.b_value())?;
     writeln!(
         out,
-        "  stream byte length:   {:?}",
-        descriptor.stream_byte_length
+        "  stream byte length:   {}",
+        descriptor.stream_byte_length.to_string()
     )?;
-    writeln!(
-        out,
-        "  record profile:       {}",
-        descriptor.record_profile
-    )?;
+    writeln!(out, "  record profile:       {}", descriptor.record_profile)?;
     writeln!(
         out,
         "  payload encoding:     {}",
         descriptor.payload_encoding
     )?;
-    writeln!(out, "  title:                {:?}", descriptor.title)?;
-    writeln!(out, "  artist:               {:?}", descriptor.artist)?;
+    writeln!(out, "  title:                {}", format_optional_text(descriptor.title.as_deref()))?;
+    writeln!(out, "  artist:               {}", format_optional_text(descriptor.artist.as_deref()))?;
     writeln!(
         out,
-        "  release ID:           {:?}",
-        descriptor.release_id
+        "  release ID:           {}",
+        descriptor
+            .release_id
+            .map(record_descriptor::release_id_to_text)
+            .unwrap_or_else(|| "absent".to_owned())
     )?;
     writeln!(
         out,
-        "  catalog number:       {:?}",
-        descriptor.catalog_number
+        "  catalog number:       {}",
+        format_optional_text(descriptor.catalog_number.as_deref())
     )?;
-    writeln!(out, "  label:                {:?}", descriptor.label)?;
+    writeln!(out, "  label:                {}", format_optional_text(descriptor.label.as_deref()))?;
     writeln!(
         out,
-        "  artwork credit:       {:?}",
-        descriptor.artwork_credit
-    )?;
-    writeln!(
-        out,
-        "  canonical URL:        {:?}",
-        descriptor.canonical_url
+        "  artwork credit:       {}",
+        format_optional_text(descriptor.artwork_credit.as_deref())
     )?;
     writeln!(
         out,
-        "  created at:           {:?}",
-        descriptor.created_at
+        "  canonical URL:        {}",
+        format_optional_text(descriptor.canonical_url.as_deref())
+    )?;
+    writeln!(
+        out,
+        "  YL catalogue code:    {}",
+        descriptor
+            .canonical_url
+            .as_deref()
+            .and_then(yl_catalogue_code_from_url)
+            .unwrap_or_else(|| "absent".to_owned())
+    )?;
+    writeln!(
+        out,
+        "  created at:           {}",
+        format_optional_number(descriptor.created_at)
     )?;
 
     match descriptor.bsc_pointer.as_deref() {
         Some(pointer) => {
             writeln!(out, "  BSC pointer bytes:     {}", pointer.len())?;
-            writeln!(
-                out,
-                "{}",
-                indent(&hex_prefix(pointer, max_hex_bytes), 4)
-            )?;
+            writeln!(out, "{}", indent(&hex_prefix(pointer, max_hex_bytes), 4))?;
         }
         None => writeln!(out, "  BSC pointer:           absent")?,
     }
@@ -239,11 +245,7 @@ pub fn report_signed_release_reference(
         )?,
     }
 
-    writeln!(
-        out,
-        "  key ID bytes:            {}",
-        reference.key_id.len()
-    )?;
+    writeln!(out, "  key ID bytes:            {}", reference.key_id.len())?;
     writeln!(
         out,
         "  signature bytes:         {}",
@@ -253,10 +255,7 @@ pub fn report_signed_release_reference(
     writeln!(
         out,
         "{}",
-        indent(
-            &hex_prefix(&reference.signature, max_hex_bytes.min(64)),
-            4
-        )
+        indent(&hex_prefix(&reference.signature, max_hex_bytes.min(64)), 4)
     )?;
 
     Ok(())
@@ -394,8 +393,16 @@ fn report_stream_summary(out: &mut String, parsed: &record_core::RecordStream) -
     let total_entries = parsed.metadata.payload_entries.len();
 
     writeln!(out, "  report mode:               compact-v3")?;
-    writeln!(out, "  tracks:                    {}", parsed.metadata.tracks.len())?;
-    writeln!(out, "  TrackGap ranges:           {}", parsed.metadata.track_gaps.len())?;
+    writeln!(
+        out,
+        "  tracks:                    {}",
+        parsed.metadata.tracks.len()
+    )?;
+    writeln!(
+        out,
+        "  TrackGap ranges:           {}",
+        parsed.metadata.track_gaps.len()
+    )?;
     writeln!(out, "  musical timeline entries:  {musical_revolutions}")?;
     writeln!(out, "  TrackGap timeline entries: {track_gap_entries}")?;
     writeln!(out, "  total timeline entries:    {total_entries}")?;
@@ -412,10 +419,7 @@ fn report_stream_summary(out: &mut String, parsed: &record_core::RecordStream) -
     Ok(())
 }
 
-fn report_metadata_summary(
-    out: &mut String,
-    metadata: &RecordStreamMetadata,
-) -> Result<()> {
+fn report_metadata_summary(out: &mut String, metadata: &RecordStreamMetadata) -> Result<()> {
     section(out, "BRS1 HEADER METADATA");
 
     let descriptor_count = payload_descriptor_count_from_metadata(metadata)?;
@@ -428,7 +432,11 @@ fn report_metadata_summary(
         "  payload entries:           {}",
         metadata.payload_entries.len()
     )?;
-    writeln!(out, "  tracks:                    {}", metadata.tracks.len())?;
+    writeln!(
+        out,
+        "  tracks:                    {}",
+        metadata.tracks.len()
+    )?;
 
     section(out, "BRS1 PAYLOAD DESCRIPTORS");
 
@@ -499,22 +507,14 @@ fn report_metadata_summary(
                             Err(error) => {
                                 writeln!(out, "    codec metadata JSON:    no")?;
                                 writeln!(out, "    codec metadata error:   {error}")?;
-                                writeln!(
-                                    out,
-                                    "{}",
-                                    indent(&hex_prefix(bytes, 384), 6)
-                                )?;
+                                writeln!(out, "{}", indent(&hex_prefix(bytes, 384), 6))?;
                             }
                         }
                     }
                     Err(error) => {
                         writeln!(out, "    codec metadata UTF-8:   no")?;
                         writeln!(out, "    codec metadata error:   {error}")?;
-                        writeln!(
-                            out,
-                            "{}",
-                            indent(&hex_prefix(bytes, 384), 6)
-                        )?;
+                        writeln!(out, "{}", indent(&hex_prefix(bytes, 384), 6))?;
                     }
                 }
             }
@@ -542,9 +542,7 @@ fn report_metadata_summary(
             writeln!(
                 out,
                 "  entry[{index}]: byte_offset={} byte_length={} descriptor_index={}",
-                byte_offset,
-                entry.byte_length,
-                entry.payload_descriptor_index
+                byte_offset, entry.byte_length, entry.payload_descriptor_index
             )?;
             previous_printed_index = Some(index);
         }
@@ -560,9 +558,7 @@ fn report_metadata_summary(
         writeln!(
             out,
             "  track[{index}]: title={:?} first_revolution_index={} revolution_count={}",
-            track.title,
-            track.first_revolution_index,
-            track.revolution_count
+            track.title, track.first_revolution_index, track.revolution_count
         )?;
     }
 
@@ -608,7 +604,11 @@ fn report_chunks(
             "  chunk[{index}]: payload_bytes={} crc32={:08x} nonce={}",
             chunk.payload.len(),
             chunk.crc32,
-            if chunk.nonce.is_some() { "present" } else { "absent" }
+            if chunk.nonce.is_some() {
+                "present"
+            } else {
+                "absent"
+            }
         )?;
     }
 
@@ -696,7 +696,10 @@ fn report_actual_programme_layout(
     let mut sample_cursor_known = true;
     let mut previous_printed_index = None;
 
-    writeln!(out, "  note:                      derived from header tables and payload bodies")?;
+    writeln!(
+        out,
+        "  note:                      derived from header tables and payload bodies"
+    )?;
     writeln!(out, "  record profile:            {record_profile}")?;
     writeln!(out, "  logical payload entries:   {}", entries.len())?;
     writeln!(out, "  transport chunks:          {}", parsed.chunks.len())?;
@@ -730,21 +733,26 @@ fn report_actual_programme_layout(
 
         let should_print = display_indices.binary_search(&entry.index).is_ok();
 
-        let sample_count_result: Result<(u64, &'static str)> =
-            if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP) {
-                gap::decode_gap_header(entry_bytes)
-                    .map(|header| (header.sample_count, "GAP1 header"))
-                    .context("failed to read GAP1 sample count")
-            } else if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
-                record_core::ecdc::headerless_entry_sample_count(entry_bytes, descriptor)
-                    .map(|samples| (samples, "headerless ECDC entry"))
-                    .context("failed to read exact headerless ECDC sample count")
-            } else {
-                descriptor
-                    .output_samples
-                    .map(|samples| (u64::from(samples), "descriptor outputSamples"))
-                    .context("no exact sample-count rule for this payload entry")
-            };
+        let sample_count_result: Result<(u64, &'static str)> = if descriptor
+            .container
+            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
+        {
+            gap::decode_gap_header(entry_bytes)
+                .map(|header| (header.sample_count, "GAP1 header"))
+                .context("failed to read GAP1 sample count")
+        } else if descriptor
+            .container
+            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+        {
+            record_core::ecdc::headerless_entry_sample_count(entry_bytes, descriptor)
+                .map(|samples| (samples, "headerless ECDC entry"))
+                .context("failed to read exact headerless ECDC sample count")
+        } else {
+            descriptor
+                .output_samples
+                .map(|samples| (u64::from(samples), "descriptor outputSamples"))
+                .context("no exact sample-count rule for this payload entry")
+        };
 
         let covering_chunks = chunk_ranges
             .iter()
@@ -778,7 +786,11 @@ fn report_actual_programme_layout(
                 entry.index,
                 ownership.as_deref().unwrap_or("semantic gap")
             )?;
-            writeln!(out, "    descriptor index:       {}", entry.payload_descriptor_index)?;
+            writeln!(
+                out,
+                "    descriptor index:       {}",
+                entry.payload_descriptor_index
+            )?;
             writeln!(
                 out,
                 "    container / codec:      {} / {}",
@@ -788,15 +800,20 @@ fn report_actual_programme_layout(
             writeln!(
                 out,
                 "    stored byte range:      {}..{} ({} bytes)",
-                entry.byte_offset,
-                entry_end,
-                entry.byte_length
+                entry.byte_offset, entry_end, entry.byte_length
             )?;
 
-            if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
+            if descriptor
+                .container
+                .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+            {
                 writeln!(out, "    payload prefix:         headerless codec body")?;
             } else {
-                writeln!(out, "    payload magic:          {:?}", ascii_magic(entry_bytes))?;
+                writeln!(
+                    out,
+                    "    payload magic:          {:?}",
+                    ascii_magic(entry_bytes)
+                )?;
             }
 
             writeln!(
@@ -813,12 +830,17 @@ fn report_actual_programme_layout(
 
         match sample_count_result {
             Ok((0, source))
-                if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) =>
+                if descriptor
+                    .container
+                    .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) =>
             {
                 sample_cursor_known = false;
                 if should_print {
                     writeln!(out, "    sample count:           invalid zero ({source})")?;
-                    writeln!(out, "    programme samples:      unavailable from this entry onward")?;
+                    writeln!(
+                        out,
+                        "    programme samples:      unavailable from this entry onward"
+                    )?;
                 }
             }
             Ok((samples, source)) => {
@@ -830,7 +852,10 @@ fn report_actual_programme_layout(
                 if should_print {
                     writeln!(out, "    sample count:           {samples} ({source})")?;
                     if sample_cursor_known {
-                        writeln!(out, "    programme samples:      {start_sample}..{end_sample}")?;
+                        writeln!(
+                            out,
+                            "    programme samples:      {start_sample}..{end_sample}"
+                        )?;
                         if let Some(rate) = sample_rate.filter(|value| *value > 0) {
                             writeln!(
                                 out,
@@ -878,32 +903,33 @@ fn report_actual_programme_layout(
     Ok(())
 }
 
-fn collect_spec_checks(
-    parsed: &record_core::RecordStream,
-    record_profile: &str,
-) -> Vec<SpecCheck> {
+fn collect_spec_checks(parsed: &record_core::RecordStream, record_profile: &str) -> Vec<SpecCheck> {
     let mut checks = Vec::new();
 
-    checks.push(if parsed.metadata.version == record_core::RECORD_STREAM_METADATA_VERSION {
-        SpecCheck::pass(
-            "BRS1 metadata version",
-            format!("version {}", parsed.metadata.version),
-        )
-    } else {
-        SpecCheck::fail(
-            "BRS1 metadata version",
-            format!(
-                "expected {}, found {}",
-                record_core::RECORD_STREAM_METADATA_VERSION,
-                parsed.metadata.version
-            ),
-        )
-    });
+    checks.push(
+        if parsed.metadata.version == record_core::RECORD_STREAM_METADATA_VERSION {
+            SpecCheck::pass(
+                "BRS1 metadata version",
+                format!("version {}", parsed.metadata.version),
+            )
+        } else {
+            SpecCheck::fail(
+                "BRS1 metadata version",
+                format!(
+                    "expected {}, found {}",
+                    record_core::RECORD_STREAM_METADATA_VERSION,
+                    parsed.metadata.version
+                ),
+            )
+        },
+    );
 
-    checks.push(match record_core::normalize_record_profile_name(record_profile) {
-        Ok(profile) => SpecCheck::pass("Record profile", profile),
-        Err(error) => SpecCheck::fail("Record profile", format!("{error:#}")),
-    });
+    checks.push(
+        match record_core::normalize_record_profile_name(record_profile) {
+            Ok(profile) => SpecCheck::pass("Record profile", profile),
+            Err(error) => SpecCheck::fail("Record profile", format!("{error:#}")),
+        },
+    );
 
     checks.push(match validate_track_listing_metadata(&parsed.metadata) {
         Ok(()) => SpecCheck::pass(
@@ -914,14 +940,15 @@ fn collect_spec_checks(
     });
 
     let payload = record_core::record_stream_payload_bytes(parsed);
-    let resolved = match validate_payload_entries_metadata(
-        &parsed.metadata,
-        Some(payload.len()),
-    ) {
+    let resolved = match validate_payload_entries_metadata(&parsed.metadata, Some(payload.len())) {
         Ok(entries) => {
             checks.push(SpecCheck::pass(
                 "Payload entry byte coverage",
-                format!("{} entries cover all {} stored payload bytes", entries.len(), payload.len()),
+                format!(
+                    "{} entries cover all {} stored payload bytes",
+                    entries.len(),
+                    payload.len()
+                ),
             ));
             Some(entries)
         }
@@ -1086,9 +1113,7 @@ fn collect_spec_checks(
                         format!("Entry {} GAP1 payload", entry.index),
                         format!(
                             "{} samples, {} bytes, seed 0x{:08x}",
-                            header.sample_count,
-                            header.payload_byte_length,
-                            header.seed
+                            header.sample_count, header.payload_byte_length, header.seed
                         ),
                     ),
                     Err(error) => SpecCheck::fail(
@@ -1102,35 +1127,39 @@ fn collect_spec_checks(
                 .container
                 .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
             {
-                checks.push(match record_core::ecdc::headerless_entry_sample_count(bytes, descriptor) {
-                    Ok(0) => SpecCheck::fail(
-                        format!("Entry {} exact ECDC sample count", entry.index),
-                        "musical ECDC entry resolved to zero samples",
-                    ),
-                    Ok(samples) => SpecCheck::pass(
-                        format!("Entry {} exact ECDC sample count", entry.index),
-                        format!("{samples} samples"),
-                    ),
-                    Err(error) => SpecCheck::fail(
-                        format!("Entry {} exact ECDC sample count", entry.index),
-                        format!("{error:#}"),
-                    ),
-                });
+                checks.push(
+                    match record_core::ecdc::headerless_entry_sample_count(bytes, descriptor) {
+                        Ok(0) => SpecCheck::fail(
+                            format!("Entry {} exact ECDC sample count", entry.index),
+                            "musical ECDC entry resolved to zero samples",
+                        ),
+                        Ok(samples) => SpecCheck::pass(
+                            format!("Entry {} exact ECDC sample count", entry.index),
+                            format!("{samples} samples"),
+                        ),
+                        Err(error) => SpecCheck::fail(
+                            format!("Entry {} exact ECDC sample count", entry.index),
+                            format!("{error:#}"),
+                        ),
+                    },
+                );
             }
         }
     }
 
-    checks.push(match record_core::build_programme_map(parsed, Some(record_profile)) {
-        Ok(map) => SpecCheck::pass(
-            "Pre-decode programme map",
-            format!(
-                "{} samples across {} regions",
-                map.total_samples,
-                map.regions.len()
+    checks.push(
+        match record_core::build_programme_map(parsed, Some(record_profile)) {
+            Ok(map) => SpecCheck::pass(
+                "Pre-decode programme map",
+                format!(
+                    "{} samples across {} regions",
+                    map.total_samples,
+                    map.regions.len()
+                ),
             ),
-        ),
-        Err(error) => SpecCheck::fail("Pre-decode programme map", format!("{error:#}")),
-    });
+            Err(error) => SpecCheck::fail("Pre-decode programme map", format!("{error:#}")),
+        },
+    );
 
     checks
 }
@@ -1140,7 +1169,7 @@ fn report_spec_consistency(
     parsed: &record_core::RecordStream,
     record_profile: &str,
 ) -> Result<()> {
-    section(out, "SPEC CONSISTENCY");
+    section(out, "CHECK RESULTS");
 
     let checks = collect_spec_checks(parsed, record_profile);
     let mut omitted_entry_passes = 0usize;
@@ -1156,45 +1185,299 @@ fn report_spec_consistency(
             continue;
         }
 
-        let status = if check.passed {
-            "\x1b[1;32mPASS\x1b[0m"
-        } else {
-            "\x1b[1;31mFAIL\x1b[0m"
-        };
-
-        writeln!(out, "  [{status}] {}", check.label)?;
-        writeln!(out, "         {}", check.detail)?;
+        writeln!(
+            out,
+            "  {} {}",
+            status_mark(check.passed),
+            check.label
+        )?;
+        writeln!(out, "      {}", check.detail)?;
     }
 
     if omitted_entry_passes > 0 {
         writeln!(
             out,
-            "  {omitted_entry_passes} successful per-entry payload checks omitted"
+            "  {} {omitted_entry_passes} repetitive per-entry checks passed and were omitted",
+            green_tick()
         )?;
     }
 
-    let passed = checks.iter().filter(|check| check.passed).count();
-    let failed = checks.len().saturating_sub(passed);
+    Ok(())
+}
 
-    section(out, "FINAL PASS / FAIL REPORT");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SigningCoverage {
+    IndirectlySignedUnchecked,
+    Unsigned,
+}
 
-    if failed == 0 {
-        writeln!(
-            out,
-            "\x1b[1;32m  PASS — all {passed} format and layout checks passed.\x1b[0m"
-        )?;
+impl SigningCoverage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IndirectlySignedUnchecked => "signed via release commitment (unchecked)",
+            Self::Unsigned => "unsigned",
+        }
+    }
+}
+
+fn report_signing_state(
+    out: &mut String,
+    descriptor: &RecordDescriptor,
+    stream: &[u8],
+    manifest: Option<ExternalManifest<'_>>,
+) -> Result<()> {
+    section(out, "SIGNING STATE");
+    let has_signed_reference = descriptor.signed_release_reference.is_some();
+    let has_canonical_url = descriptor.canonical_url.is_some();
+    let yl_issuance_state = if has_signed_reference && has_canonical_url {
+        "final YL issuance markers present"
+    } else if has_signed_reference || has_canonical_url {
+        "partial YL issuance markers present"
     } else {
-        writeln!(
-            out,
-            "\x1b[1;31m  FAIL — {failed} of {} checks failed; {passed} passed.\x1b[0m",
-            checks.len()
-        )?;
-        writeln!(
-            out,
-            "\x1b[1;33m  The stored PNG was inspected as-is. No standalone ECDC object was reconstructed.\x1b[0m"
-        )?;
-    }
+        "no YL issuance markers present"
+    };
 
+    let signed_reference_state = match descriptor.signed_release_reference.as_ref() {
+        None => "absent".to_owned(),
+        Some(reference) => match reference.validate() {
+            Ok(()) => {
+                "present; structurally valid; cryptographic verification not checked".to_owned()
+            }
+            Err(error) => format!("present; structurally invalid ({error:#})"),
+        },
+    };
+
+    writeln!(out, "  signed release reference: {signed_reference_state}")?;
+    writeln!(out, "  YL issuance state:        {yl_issuance_state}")?;
+    writeln!(
+        out,
+        "  release commitment hash:  {}",
+        if has_signed_reference {
+            "present in signed reference"
+        } else {
+            "absent"
+        }
+    )?;
+    writeln!(
+        out,
+        "  external manifest:        {}",
+        if manifest.is_some() {
+            "present; displayed for inspection only"
+        } else {
+            "absent"
+        }
+    )?;
+    writeln!(
+        out,
+        "  BRS1 stream bytes:        {}",
+        if has_signed_reference {
+            format!(
+                "{}; structural parsing passed ({} bytes)",
+                SigningCoverage::IndirectlySignedUnchecked.as_str(),
+                stream.len()
+            )
+        } else {
+            format!(
+                "{}; structural parsing passed ({} bytes)",
+                SigningCoverage::Unsigned.as_str(),
+                stream.len()
+            )
+        }
+    )?;
+
+    report_field_signing_state(
+        out,
+        "record_profile",
+        descriptor.record_profile.as_str(),
+        if has_signed_reference {
+            SigningCoverage::IndirectlySignedUnchecked
+        } else {
+            SigningCoverage::Unsigned
+        },
+        if has_signed_reference {
+            "valid canonical profile code path; would be covered indirectly by the signed release commitment"
+        } else {
+            "valid canonical profile code path; not signed in this file"
+        },
+    )?;
+    report_field_signing_state(
+        out,
+        "payload_encoding",
+        descriptor.payload_encoding.as_str(),
+        if has_signed_reference {
+            SigningCoverage::IndirectlySignedUnchecked
+        } else {
+            SigningCoverage::Unsigned
+        },
+        if has_signed_reference {
+            "valid canonical payload-encoding code path; would be covered indirectly by the signed release commitment"
+        } else {
+            "valid canonical payload-encoding code path; not signed in this file"
+        },
+    )?;
+    report_optional_text_field_signing_state(
+        out,
+        "title",
+        descriptor.title.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_optional_text_field_signing_state(
+        out,
+        "artist",
+        descriptor.artist.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_release_id_signing_state(out, descriptor.release_id, has_signed_reference)?;
+    report_optional_text_field_signing_state(
+        out,
+        "catalog_number",
+        descriptor.catalog_number.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_optional_text_field_signing_state(
+        out,
+        "label",
+        descriptor.label.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_optional_text_field_signing_state(
+        out,
+        "artwork_credit",
+        descriptor.artwork_credit.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_optional_text_field_signing_state(
+        out,
+        "canonical_url",
+        descriptor.canonical_url.as_deref(),
+        SigningCoverage::Unsigned,
+        "decoded and UTF-8 validated",
+    )?;
+    report_optional_number_field_signing_state(
+        out,
+        "created_at",
+        descriptor.created_at,
+        SigningCoverage::Unsigned,
+        "decoded as descriptor metadata",
+    )?;
+    report_bytes_field_signing_state(
+        out,
+        "bsc_pointer",
+        descriptor.bsc_pointer.as_deref(),
+        SigningCoverage::Unsigned,
+        "opaque bytes only; not validated by test-spin",
+    )?;
+
+    Ok(())
+}
+
+fn report_field_signing_state(
+    out: &mut String,
+    label: &str,
+    value: &str,
+    coverage: SigningCoverage,
+    validity: &str,
+) -> Result<()> {
+    writeln!(
+        out,
+        "  {label}: {} | {} | value={value:?}",
+        coverage.as_str(),
+        validity
+    )?;
+    Ok(())
+}
+
+fn report_optional_text_field_signing_state(
+    out: &mut String,
+    label: &str,
+    value: Option<&str>,
+    coverage: SigningCoverage,
+    validity: &str,
+) -> Result<()> {
+    let presence = match value {
+        Some(value) => format!("present | value={value:?}"),
+        None => "absent".to_owned(),
+    };
+    writeln!(
+        out,
+        "  {label}: {} | {} | {presence}",
+        coverage.as_str(),
+        validity
+    )?;
+    Ok(())
+}
+
+fn report_optional_number_field_signing_state(
+    out: &mut String,
+    label: &str,
+    value: Option<u64>,
+    coverage: SigningCoverage,
+    validity: &str,
+) -> Result<()> {
+    let presence = match value {
+        Some(value) => format!("present | value={value}"),
+        None => "absent".to_owned(),
+    };
+    writeln!(
+        out,
+        "  {label}: {} | {} | {presence}",
+        coverage.as_str(),
+        validity
+    )?;
+    Ok(())
+}
+
+fn report_bytes_field_signing_state(
+    out: &mut String,
+    label: &str,
+    value: Option<&[u8]>,
+    coverage: SigningCoverage,
+    validity: &str,
+) -> Result<()> {
+    let presence = match value {
+        Some(value) => format!("present | {} bytes", value.len()),
+        None => "absent".to_owned(),
+    };
+    writeln!(
+        out,
+        "  {label}: {} | {} | {presence}",
+        coverage.as_str(),
+        validity
+    )?;
+    Ok(())
+}
+
+fn report_release_id_signing_state(
+    out: &mut String,
+    value: Option<[u8; record_descriptor::RELEASE_ID_LENGTH]>,
+    has_signed_reference: bool,
+) -> Result<()> {
+    let presence = match value {
+        Some(bytes) => format!(
+            "present | value={}",
+            record_descriptor::release_id_to_text(bytes)
+        ),
+        None => "absent".to_owned(),
+    };
+    writeln!(
+        out,
+        "  release_id: {} | {} | {presence}",
+        if has_signed_reference {
+            SigningCoverage::IndirectlySignedUnchecked.as_str()
+        } else {
+            SigningCoverage::Unsigned.as_str()
+        },
+        if has_signed_reference {
+            "canonical raw 16-byte BRD1 field; would be covered indirectly by the signed release commitment"
+        } else {
+            "canonical raw 16-byte BRD1 field; not signed in this file"
+        },
+    )?;
     Ok(())
 }
 
@@ -1237,7 +1520,11 @@ fn report_entries(
         writeln!(out, "  entry index:              {}", entry.index)?;
         writeln!(out, "  byte offset:              {}", entry.byte_offset)?;
         writeln!(out, "  byte length:              {}", entry.byte_length)?;
-        writeln!(out, "  descriptor index:         {}", entry.payload_descriptor_index)?;
+        writeln!(
+            out,
+            "  descriptor index:         {}",
+            entry.payload_descriptor_index
+        )?;
 
         let descriptor = parsed
             .metadata
@@ -1245,7 +1532,10 @@ fn report_entries(
             .get(entry.payload_descriptor_index as usize)
             .context("payload descriptor index is out of range")?;
 
-        if descriptor.container.eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC) {
+        if descriptor
+            .container
+            .eq_ignore_ascii_case(PAYLOAD_CONTAINER_ECDC)
+        {
             writeln!(out, "  payload prefix:           headerless codec body")?;
         } else {
             writeln!(out, "  first four bytes:         {:?}", ascii_magic(bytes))?;
@@ -1268,12 +1558,7 @@ fn report_entries(
     Ok(())
 }
 
-
-
-fn payload_entry_bytes<'a>(
-    payload: &'a [u8],
-    entry: &ResolvedPayloadEntry,
-) -> Result<&'a [u8]> {
+fn payload_entry_bytes<'a>(payload: &'a [u8], entry: &ResolvedPayloadEntry) -> Result<&'a [u8]> {
     let end = entry
         .byte_offset
         .checked_add(entry.byte_length)
@@ -1284,10 +1569,7 @@ fn payload_entry_bytes<'a>(
         .context("payload entry range exceeds reconstructed payload")
 }
 
-fn report_gap_payload_body(
-    out: &mut String,
-    entry: &[u8],
-) -> Result<()> {
+fn report_gap_payload_body(out: &mut String, entry: &[u8]) -> Result<()> {
     let header = gap::validate_gap_payload(entry).context("invalid GAP payload")?;
     let filler_bytes = entry.len().saturating_sub(gap::GAP_HEADER_LENGTH);
 
@@ -1305,7 +1587,6 @@ fn report_gap_payload_body(
     Ok(())
 }
 
-
 pub fn load_bundle_metadata(
     path: impl AsRef<std::path::Path>,
 ) -> Result<encodec_rs::metadata::OnnxFrameBundleMetadata> {
@@ -1313,14 +1594,10 @@ pub fn load_bundle_metadata(
     let json = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read bundle JSON {}", path.display()))?;
 
-    serde_json::from_str(&json)
-        .context("failed to deserialize OnnxFrameBundleMetadata")
+    serde_json::from_str(&json).context("failed to deserialize OnnxFrameBundleMetadata")
 }
 
-fn report_json_structure(
-    out: &mut String,
-    value: &serde_json::Value,
-) -> Result<()> {
+fn report_json_structure(out: &mut String, value: &serde_json::Value) -> Result<()> {
     match value {
         serde_json::Value::Object(object) => {
             writeln!(out, "  JSON root:               object")?;
@@ -1329,11 +1606,7 @@ fn report_json_structure(
             if !object.is_empty() {
                 writeln!(out, "  field names:")?;
                 for (name, field_value) in object {
-                    writeln!(
-                        out,
-                        "    {name}: {}",
-                        json_value_kind(field_value)
-                    )?;
+                    writeln!(out, "    {name}: {}", json_value_kind(field_value))?;
                 }
             }
         }
@@ -1342,19 +1615,11 @@ fn report_json_structure(
             writeln!(out, "  array items:             {}", array.len())?;
 
             if let Some(first) = array.first() {
-                writeln!(
-                    out,
-                    "  first item type:         {}",
-                    json_value_kind(first)
-                )?;
+                writeln!(out, "  first item type:         {}", json_value_kind(first))?;
             }
         }
         other => {
-            writeln!(
-                out,
-                "  JSON root:               {}",
-                json_value_kind(other)
-            )?;
+            writeln!(out, "  JSON root:               {}", json_value_kind(other))?;
         }
     }
 
@@ -1372,6 +1637,213 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
+fn report_final_summary(
+    out: &mut String,
+    png: &[u8],
+    descriptor: &RecordDescriptor,
+    stream: &[u8],
+    record_profile: &str,
+) -> Result<()> {
+    let parsed = parse_record_stream(stream)?;
+    let checks = collect_spec_checks(&parsed, record_profile);
+    let passed = checks.iter().filter(|check| check.passed).count();
+    let failed = checks.len().saturating_sub(passed);
+    let signed_reference_valid = descriptor
+        .signed_release_reference
+        .as_ref()
+        .map(|reference| reference.validate())
+        .transpose()
+        .is_ok();
+    let final_issuance_markers = descriptor.signed_release_reference.is_some()
+        && descriptor.canonical_url.is_some()
+        && descriptor.release_id.is_some();
+    let overall_ok = failed == 0 && signed_reference_valid;
+    let track_count = parsed.metadata.tracks.len();
+    let payload_entries = parsed.metadata.payload_entries.len();
+    let transport_chunks = parsed.chunks.len();
+    let release_id = descriptor
+        .release_id
+        .map(record_descriptor::release_id_to_text)
+        .unwrap_or_else(|| "absent".to_owned());
+    let canonical_url = descriptor
+        .canonical_url
+        .as_deref()
+        .unwrap_or("absent");
+    let catalogue_code = descriptor
+        .canonical_url
+        .as_deref()
+        .and_then(yl_catalogue_code_from_url)
+        .unwrap_or_else(|| "absent".to_owned());
+    let signature_key = descriptor
+        .signed_release_reference
+        .as_ref()
+        .and_then(|reference| printable_utf8(&reference.key_id))
+        .unwrap_or("absent");
+
+    section(out, "SUMMARY");
+
+    writeln!(
+        out,
+        "  {} {}",
+        if overall_ok { green_tick() } else { red_cross() },
+        if overall_ok {
+            "VALID BITNEEDLE RECORD"
+        } else {
+            "RECORD HAS FAILURES"
+        }
+    )?;
+    writeln!(
+        out,
+        "  {} format checks: {passed}/{} passed",
+        if failed == 0 { green_tick() } else { red_cross() },
+        checks.len()
+    )?;
+    writeln!(
+        out,
+        "  {} YL issuance: {}",
+        if final_issuance_markers { green_tick() } else { red_cross() },
+        if final_issuance_markers {
+            "final markers present"
+        } else {
+            "incomplete or absent"
+        }
+    )?;
+    writeln!(
+        out,
+        "  {} signed reference: {}",
+        if signed_reference_valid && descriptor.signed_release_reference.is_some() {
+            green_tick()
+        } else {
+            red_cross()
+        },
+        match descriptor.signed_release_reference.as_ref() {
+            Some(_) if signed_reference_valid => "structurally valid; cryptographic verification not performed",
+            Some(_) => "structurally invalid",
+            None => "absent",
+        }
+    )?;
+
+    writeln!(out)?;
+    writeln!(out, "  RECORD")?;
+    writeln!(out, "    title:             {}", descriptor.title.as_deref().unwrap_or("absent"))?;
+    writeln!(out, "    artist:            {}", descriptor.artist.as_deref().unwrap_or("absent"))?;
+    writeln!(out, "    profile:           {}", descriptor.record_profile)?;
+    writeln!(out, "    payload encoding:  {}", descriptor.payload_encoding)?;
+    writeln!(out, "    PNG bytes:         {}", png.len())?;
+    writeln!(out, "    BRS1 bytes:        {}", stream.len())?;
+    writeln!(out, "    tracks:            {track_count}")?;
+    writeln!(out, "    payload entries:   {payload_entries}")?;
+    writeln!(out, "    transport chunks:  {transport_chunks}")?;
+
+    writeln!(out)?;
+    writeln!(out, "  IDENTITY")?;
+    writeln!(out, "    release ID:        {release_id}")?;
+    writeln!(out, "    YL catalogue code: {catalogue_code}")?;
+    writeln!(out, "    canonical URL:     {canonical_url}")?;
+    writeln!(
+        out,
+        "    catalog number:    {}",
+        descriptor.catalog_number.as_deref().unwrap_or("absent")
+    )?;
+    writeln!(
+        out,
+        "    created at (ms):   {}",
+        format_optional_number(descriptor.created_at)
+    )?;
+
+    writeln!(out)?;
+    writeln!(out, "  SIGNATURE")?;
+    writeln!(out, "    key ID:            {signature_key}")?;
+    writeln!(
+        out,
+        "    commitment:        {}",
+        descriptor
+            .signed_release_reference
+            .as_ref()
+            .map(|reference| hex::encode(reference.release_commitment_sha256))
+            .unwrap_or_else(|| "absent".to_owned())
+    )?;
+    writeln!(
+        out,
+        "    signature bytes:   {}",
+        descriptor
+            .signed_release_reference
+            .as_ref()
+            .map(|reference| reference.signature.len().to_string())
+            .unwrap_or_else(|| "absent".to_owned())
+    )?;
+    writeln!(
+        out,
+        "    BSC pointer:       {}",
+        descriptor
+            .bsc_pointer
+            .as_ref()
+            .map(|pointer| format!("present ({} bytes)", pointer.len()))
+            .unwrap_or_else(|| "absent".to_owned())
+    )?;
+
+    if failed > 0 {
+        writeln!(out)?;
+        writeln!(out, "  {} {failed} check(s) failed; see CHECK RESULTS above", red_cross())?;
+    }
+
+    Ok(())
+}
+
+fn format_optional_text(value: Option<&str>) -> String {
+    value
+        .map(|text| format!("{text:?}"))
+        .unwrap_or_else(|| "absent".to_owned())
+}
+
+fn format_optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "absent".to_owned())
+}
+
+fn yl_catalogue_code_from_url(url: &str) -> Option<String> {
+    let slug = url
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()?
+        .trim();
+
+    if slug.is_empty() {
+        return None;
+    }
+
+    let compact = slug
+        .chars()
+        .filter(|character| *character != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+
+    if compact.len() != 11 || !compact.chars().all(|character| character.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    Some(format!("yl_{compact}"))
+}
+
+fn green_tick() -> &'static str {
+    "\x1b[1;32m✓\x1b[0m"
+}
+
+fn red_cross() -> &'static str {
+    "\x1b[1;31m✗\x1b[0m"
+}
+
+fn status_mark(passed: bool) -> &'static str {
+    if passed {
+        green_tick()
+    } else {
+        red_cross()
+    }
+}
+
+
 fn section(out: &mut String, title: &str) {
     let _ = writeln!(out, "\n=== {title} ===");
 }
@@ -1388,9 +1860,10 @@ fn indent(text: &str, spaces: usize) -> String {
 fn printable_utf8(bytes: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(bytes).ok()?;
 
-    if text.chars().any(|character| {
-        character.is_control() && !matches!(character, '\n' | '\r' | '\t')
-    }) {
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
         return None;
     }
 
@@ -1447,10 +1920,7 @@ fn hex_prefix(bytes: &[u8], max: usize) -> String {
 }
 
 fn png_ihdr(png: &[u8]) -> Option<(u32, u32, u8, u8)> {
-    if png.len() < 33
-        || &png[..8] != b"\x89PNG\r\n\x1a\n"
-        || &png[12..16] != b"IHDR"
-    {
+    if png.len() < 33 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" {
         return None;
     }
 
@@ -1550,7 +2020,11 @@ mod programme_summary_tests {
         RecordStream {
             metadata,
             metadata_bytes: Vec::new(),
-            chunks: vec![Chunk { payload, crc32: 0, nonce: None }],
+            chunks: vec![Chunk {
+                payload,
+                crc32: 0,
+                nonce: None,
+            }],
         }
     }
 
@@ -1575,6 +2049,9 @@ mod programme_summary_tests {
         // 3 track regions + 4 gap regions (gap regions are not merged across
         // consecutive entries, unlike same-track regions): 7 total.
         assert_eq!(map.regions.len(), 7);
-        assert_eq!(map.total_samples, 185 * u64::from(record_core::ecdc::ECDC_OUTPUT_SAMPLES));
+        assert_eq!(
+            map.total_samples,
+            185 * u64::from(record_core::ecdc::ECDC_OUTPUT_SAMPLES)
+        );
     }
 }
