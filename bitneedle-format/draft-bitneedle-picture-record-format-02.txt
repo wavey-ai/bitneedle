@@ -221,8 +221,8 @@ A conforming decoder MUST:
 * reject uncovered, overlapping, or multiply classified payload entries; and
 * expose tracks without treating transport chunks or track gaps as tracks.
 
-A decoder MUST NOT treat black RGB as empty. Alpha zero marks the first
-unwritten main-groove pixel.
+A decoder MUST NOT infer payload length from pixel colour or alpha.
+The exact BRS1 byte length declared by BRD1 segment 2 is authoritative.
 
 ### 3.3 Sidecar Decoders
 
@@ -243,9 +243,16 @@ samples at every encoded pixel.
 
 ### 4.2 Alpha Semantics
 
-All written BRD1 and BRS1 pixels MUST have non-zero alpha. Main-payload tracing
-stops at the first sampled pixel whose alpha is zero. Recovered bytes are then
-truncated to the exact BRS1 length declared by BRD1.
+Alpha is part of the exact RGBA carrier but is not a payload terminator.
+
+All pixels required to recover BRD1 and BRS1 MUST preserve the exact alpha
+samples produced by the encoder. A decoder MUST recover exactly the number of
+main-payload bytes declared by BRD1 segment 2. It MUST NOT stop because a
+sampled pixel has alpha zero, and it MUST NOT infer unwritten capacity from
+black, transparent, or otherwise visually uniform pixels.
+
+Pixels outside the declared BRD1 and BRS1 byte ranges have no payload semantics
+unless another registered carrier, such as BSC1, assigns them meaning.
 
 ## 5. Record Geometry
 
@@ -872,8 +879,9 @@ A conforming decoder performs:
 8. Verify BRD1 framing and CRC-32.
 9. Read record profile, payload encoding, and BRS1 length.
 10. Trace the main payload spiral using b_value.
-11. Recover payload bytes using the declared payload encoding until alpha zero.
-12. Truncate to the declared BRS1 length.
+11. Recover exactly the declared number of BRS1 bytes using the selected
+    payload encoding.
+12. Reject the record if the traced payload capacity cannot supply that length.
 13. Verify BRS1 magic and metadata length.
 14. Decode compact binary metadata.
 15. Parse all chunks.
