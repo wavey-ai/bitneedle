@@ -2,8 +2,9 @@
 name = "test-spin"
 version = "0.1.6"
 edition = "2021"
+description = "Bitneedle record inspection/report CLI for testing and verification"
+repository = "https://github.com/wavey-ai/bitneedle"
 license = "Apache-2.0"
-publish = false
 
 [[bin]]
 name = "record-test"
@@ -14,7 +15,7 @@ anyhow = "1"
 hex = "0.4"
 serde_json = "1"
 
-record-core = { path = "../record-core" }
-record-descriptor = { path = "../record-descriptor" }
-record-decode = { path = "../record-decode" }
-encodec-rs = { path = "../../encodec-rs", features = ["ecdc"] }
+record-core = { path = "../record-core", version = "0.1.6" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
+record-decode = { path = "../record-decode", version = "0.1.6" }
+encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"] }
