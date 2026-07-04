@@ -16,7 +16,7 @@ wasm-opt = false
 [dependencies]
 base64 = "0.22.1"
 console_error_panic_hook = "0.1"
-encodec-rs = { path = "../../encodec-rs", default-features = false, features = ["ecdc"] }
+encodec-rs = { path = "../../encodec-rs", version = "0.1.1", default-features = false, features = ["ecdc"] }
 record-core = "0.1.3"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
