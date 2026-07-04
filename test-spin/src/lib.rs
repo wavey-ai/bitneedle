@@ -138,8 +138,16 @@ pub fn report_descriptor(
         "  payload encoding:     {}",
         descriptor.payload_encoding
     )?;
-    writeln!(out, "  title:                {}", format_optional_text(descriptor.title.as_deref()))?;
-    writeln!(out, "  artist:               {}", format_optional_text(descriptor.artist.as_deref()))?;
+    writeln!(
+        out,
+        "  title:                {}",
+        format_optional_text(descriptor.title.as_deref())
+    )?;
+    writeln!(
+        out,
+        "  artist:               {}",
+        format_optional_text(descriptor.artist.as_deref())
+    )?;
     writeln!(
         out,
         "  release ID:           {}",
@@ -153,7 +161,11 @@ pub fn report_descriptor(
         "  catalog number:       {}",
         format_optional_text(descriptor.catalog_number.as_deref())
     )?;
-    writeln!(out, "  label:                {}", format_optional_text(descriptor.label.as_deref()))?;
+    writeln!(
+        out,
+        "  label:                {}",
+        format_optional_text(descriptor.label.as_deref())
+    )?;
     writeln!(
         out,
         "  artwork credit:       {}",
@@ -1185,12 +1197,7 @@ fn report_spec_consistency(
             continue;
         }
 
-        writeln!(
-            out,
-            "  {} {}",
-            status_mark(check.passed),
-            check.label
-        )?;
+        writeln!(out, "  {} {}", status_mark(check.passed), check.label)?;
         writeln!(out, "      {}", check.detail)?;
     }
 
@@ -1665,10 +1672,7 @@ fn report_final_summary(
         .release_id
         .map(record_descriptor::release_id_to_text)
         .unwrap_or_else(|| "absent".to_owned());
-    let canonical_url = descriptor
-        .canonical_url
-        .as_deref()
-        .unwrap_or("absent");
+    let canonical_url = descriptor.canonical_url.as_deref().unwrap_or("absent");
     let catalogue_code = descriptor
         .canonical_url
         .as_deref()
@@ -1685,7 +1689,11 @@ fn report_final_summary(
     writeln!(
         out,
         "  {} {}",
-        if overall_ok { green_tick() } else { red_cross() },
+        if overall_ok {
+            green_tick()
+        } else {
+            red_cross()
+        },
         if overall_ok {
             "VALID BITNEEDLE RECORD"
         } else {
@@ -1695,13 +1703,21 @@ fn report_final_summary(
     writeln!(
         out,
         "  {} format checks: {passed}/{} passed",
-        if failed == 0 { green_tick() } else { red_cross() },
+        if failed == 0 {
+            green_tick()
+        } else {
+            red_cross()
+        },
         checks.len()
     )?;
     writeln!(
         out,
         "  {} YL issuance: {}",
-        if final_issuance_markers { green_tick() } else { red_cross() },
+        if final_issuance_markers {
+            green_tick()
+        } else {
+            red_cross()
+        },
         if final_issuance_markers {
             "final markers present"
         } else {
@@ -1717,7 +1733,8 @@ fn report_final_summary(
             red_cross()
         },
         match descriptor.signed_release_reference.as_ref() {
-            Some(_) if signed_reference_valid => "structurally valid; cryptographic verification not performed",
+            Some(_) if signed_reference_valid =>
+                "structurally valid; cryptographic verification not performed",
             Some(_) => "structurally invalid",
             None => "absent",
         }
@@ -1725,10 +1742,22 @@ fn report_final_summary(
 
     writeln!(out)?;
     writeln!(out, "  RECORD")?;
-    writeln!(out, "    title:             {}", descriptor.title.as_deref().unwrap_or("absent"))?;
-    writeln!(out, "    artist:            {}", descriptor.artist.as_deref().unwrap_or("absent"))?;
+    writeln!(
+        out,
+        "    title:             {}",
+        descriptor.title.as_deref().unwrap_or("absent")
+    )?;
+    writeln!(
+        out,
+        "    artist:            {}",
+        descriptor.artist.as_deref().unwrap_or("absent")
+    )?;
     writeln!(out, "    profile:           {}", descriptor.record_profile)?;
-    writeln!(out, "    payload encoding:  {}", descriptor.payload_encoding)?;
+    writeln!(
+        out,
+        "    payload encoding:  {}",
+        descriptor.payload_encoding
+    )?;
     writeln!(out, "    PNG bytes:         {}", png.len())?;
     writeln!(out, "    BRS1 bytes:        {}", stream.len())?;
     writeln!(out, "    tracks:            {track_count}")?;
@@ -1784,7 +1813,11 @@ fn report_final_summary(
 
     if failed > 0 {
         writeln!(out)?;
-        writeln!(out, "  {} {failed} check(s) failed; see CHECK RESULTS above", red_cross())?;
+        writeln!(
+            out,
+            "  {} {failed} check(s) failed; see CHECK RESULTS above",
+            red_cross()
+        )?;
     }
 
     Ok(())
@@ -1803,12 +1836,7 @@ fn format_optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
 }
 
 fn yl_catalogue_code_from_url(url: &str) -> Option<String> {
-    let slug = url
-        .trim()
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()?
-        .trim();
+    let slug = url.trim().trim_end_matches('/').rsplit('/').next()?.trim();
 
     if slug.is_empty() {
         return None;
@@ -1820,7 +1848,11 @@ fn yl_catalogue_code_from_url(url: &str) -> Option<String> {
         .collect::<String>()
         .to_ascii_uppercase();
 
-    if compact.len() != 11 || !compact.chars().all(|character| character.is_ascii_alphanumeric()) {
+    if compact.len() != 11
+        || !compact
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
         return None;
     }
 
@@ -1842,7 +1874,6 @@ fn status_mark(passed: bool) -> &'static str {
         red_cross()
     }
 }
-
 
 fn section(out: &mut String, title: &str) {
     let _ = writeln!(out, "\n=== {title} ===");

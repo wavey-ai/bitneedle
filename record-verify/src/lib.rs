@@ -20,14 +20,24 @@ pub enum SignedReleaseStatus {
 /// SHA-256 and Ed25519 are fixed by `SIGNED_RELEASE_REFERENCE_VERSION`; the
 /// verifier no longer receives algorithm selector bytes.
 pub trait SignedReleaseVerifier {
-    fn verify(&mut self, release_commitment_sha256: &[u8], key_id: &[u8], signature: &[u8]) -> Result<()>;
+    fn verify(
+        &mut self,
+        release_commitment_sha256: &[u8],
+        key_id: &[u8],
+        signature: &[u8],
+    ) -> Result<()>;
 }
 
 impl<F> SignedReleaseVerifier for F
 where
     F: FnMut(&[u8], &[u8], &[u8]) -> Result<()>,
 {
-    fn verify(&mut self, release_commitment_sha256: &[u8], key_id: &[u8], signature: &[u8]) -> Result<()> {
+    fn verify(
+        &mut self,
+        release_commitment_sha256: &[u8],
+        key_id: &[u8],
+        signature: &[u8],
+    ) -> Result<()> {
         self(release_commitment_sha256, key_id, signature)
     }
 }

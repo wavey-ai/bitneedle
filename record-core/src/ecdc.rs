@@ -85,8 +85,8 @@ pub fn ecdc_payload_descriptor(
 /// `encodec_rs::binary::split_ecdc_header`. The trailing codec payload is not
 /// decoded by `record-core`.
 pub fn split_standalone_ecdc(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
-    let parts = split_ecdc_header::<Value>(bytes)
-        .context("failed to split standalone ECDC header")?;
+    let parts =
+        split_ecdc_header::<Value>(bytes).context("failed to split standalone ECDC header")?;
 
     Ok((parts.header_json, parts.payload))
 }
@@ -103,8 +103,7 @@ fn header_json_into_codec_metadata(header_json: &[u8]) -> Result<(u32, Vec<u8>)>
         .get("al")
         .and_then(Value::as_u64)
         .context("ECDC header is missing numeric \"al\" (audio length)")?;
-    let block_samples =
-        u32::try_from(block_samples).context("ECDC \"al\" exceeds u32")?;
+    let block_samples = u32::try_from(block_samples).context("ECDC \"al\" exceeds u32")?;
 
     object.remove("al");
 
@@ -124,8 +123,7 @@ pub fn ecdc_payload_descriptor_from_header_json(
     channels: u8,
     header_json: &[u8],
 ) -> Result<PayloadDescriptor> {
-    let (block_samples, codec_metadata) =
-        header_json_into_codec_metadata(header_json)?;
+    let (block_samples, codec_metadata) = header_json_into_codec_metadata(header_json)?;
 
     let descriptor = PayloadDescriptor {
         container: PAYLOAD_CONTAINER_ECDC.to_owned(),
@@ -152,18 +150,15 @@ pub fn standalone_ecdc_to_payload(
     channels: u8,
     ecdc_bytes: &[u8],
 ) -> Result<(PayloadDescriptor, Vec<u8>)> {
-    let parts = split_ecdc_header::<Value>(ecdc_bytes)
-        .context("failed to split standalone ECDC stream")?;
+    let parts =
+        split_ecdc_header::<Value>(ecdc_bytes).context("failed to split standalone ECDC stream")?;
 
     if parts.payload.is_empty() {
         bail!("standalone ECDC stream contains no codec payload bytes");
     }
 
-    let descriptor = ecdc_payload_descriptor_from_header_json(
-        sample_rate,
-        channels,
-        parts.header_json,
-    )?;
+    let descriptor =
+        ecdc_payload_descriptor_from_header_json(sample_rate, channels, parts.header_json)?;
 
     Ok((descriptor, parts.payload.to_vec()))
 }
@@ -191,16 +186,14 @@ pub fn payload_to_standalone_ecdc(
         .block_samples
         .context("ECDC descriptor has no block_samples")?;
 
-    let mut object: serde_json::Map<String, Value> =
-        serde_json::from_slice(codec_metadata)
-            .context("ECDC codec metadata is not a JSON object")?;
+    let mut object: serde_json::Map<String, Value> = serde_json::from_slice(codec_metadata)
+        .context("ECDC codec metadata is not a JSON object")?;
     object.insert("al".to_owned(), Value::from(block_samples));
 
     let header_json = serde_json::to_vec(&Value::Object(object))
         .context("failed to serialize reconstructed ECDC header")?;
 
-    prepend_ecdc_header(&header_json, payload)
-        .context("failed to prepend standalone ECDC header")
+    prepend_ecdc_header(&header_json, payload).context("failed to prepend standalone ECDC header")
 }
 
 /// Validate the BRS1-visible fields of an ECDC payload descriptor.
@@ -242,8 +235,7 @@ pub fn validate_ecdc_descriptor(descriptor: &PayloadDescriptor) -> Result<()> {
         None => bail!("ECDC payload descriptor requires a channel count"),
     }
 
-    crate::validate_payload_descriptor(descriptor)
-        .context("invalid ECDC payload descriptor")?;
+    crate::validate_payload_descriptor(descriptor).context("invalid ECDC payload descriptor")?;
 
     if descriptor.codec_metadata.is_none() {
         bail!("ECDC payload descriptor requires codec metadata");
@@ -312,8 +304,7 @@ mod tests {
 
     #[test]
     fn fixed_descriptor_uses_explicit_output_geometry() {
-        let descriptor =
-            ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
+        let descriptor = ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
 
         assert_eq!(descriptor.block_samples, Some(64_960));
         assert_eq!(descriptor.output_offset_samples, Some(480));
@@ -322,8 +313,7 @@ mod tests {
 
     #[test]
     fn opaque_entry_duration_comes_from_output_samples() {
-        let descriptor =
-            ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
+        let descriptor = ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
 
         let entry = b"opaque bytes owned by encodec-rs";
         assert_eq!(
@@ -334,34 +324,27 @@ mod tests {
 
     #[test]
     fn empty_opaque_entry_is_rejected() {
-        let descriptor =
-            ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
+        let descriptor = ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
 
         assert!(headerless_entry_sample_count(&[], &descriptor).is_err());
     }
 
     #[test]
     fn encodec_rs_splits_and_rebuilds_the_envelope() {
-        let original =
-            standalone_ecdc(64_000, b"opaque codec payload bytes");
+        let original = standalone_ecdc(64_000, b"opaque codec payload bytes");
 
-        let (descriptor, payload) =
-            standalone_ecdc_to_payload(48_000, 2, &original).unwrap();
+        let (descriptor, payload) = standalone_ecdc_to_payload(48_000, 2, &original).unwrap();
 
         assert_eq!(descriptor.block_samples, Some(64_000));
         assert_eq!(descriptor.output_offset_samples, Some(0));
         assert_eq!(descriptor.output_samples, Some(64_000));
         assert_eq!(payload, b"opaque codec payload bytes");
 
-        let rebuilt =
-            payload_to_standalone_ecdc(&descriptor, &payload).unwrap();
+        let rebuilt = payload_to_standalone_ecdc(&descriptor, &payload).unwrap();
         let parts = split_ecdc_header::<Value>(&rebuilt).unwrap();
 
         assert_eq!(
-            parts
-                .metadata
-                .get("al")
-                .and_then(Value::as_u64),
+            parts.metadata.get("al").and_then(Value::as_u64),
             Some(64_000)
         );
         assert_eq!(parts.payload, payload);
@@ -374,13 +357,9 @@ mod tests {
 
     #[test]
     fn opaque_payload_contents_are_not_interpreted() {
-        let original = standalone_ecdc(
-            64_000,
-            &[0xff, 0x00, 0x13, 0x37, 0x01],
-        );
+        let original = standalone_ecdc(64_000, &[0xff, 0x00, 0x13, 0x37, 0x01]);
 
-        let (_, payload) =
-            standalone_ecdc_to_payload(48_000, 2, &original).unwrap();
+        let (_, payload) = standalone_ecdc_to_payload(48_000, 2, &original).unwrap();
 
         assert_eq!(payload, vec![0xff, 0x00, 0x13, 0x37, 0x01]);
     }

@@ -160,7 +160,6 @@ impl TonedConfig {
             ordering: ToneOrdering::default(),
         }
     }
-
 }
 
 /// A palette of colours sharing (within `luma_tolerance` integer steps) the

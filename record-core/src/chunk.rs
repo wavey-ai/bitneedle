@@ -55,7 +55,11 @@ pub fn encode_encrypted_chunk(
 /// Parse every chunk in `bytes[offset..]`, requiring the chunks to consume
 /// `bytes` exactly to its end. Rejects truncated chunks, overlong varuints,
 /// zero-length chunks, and trailing bytes.
-pub fn parse_chunk_section(bytes: &[u8], offset: usize, encrypted: bool) -> Result<Vec<ChunkRanges>> {
+pub fn parse_chunk_section(
+    bytes: &[u8],
+    offset: usize,
+    encrypted: bool,
+) -> Result<Vec<ChunkRanges>> {
     let mut ranges = Vec::new();
     let mut cursor = offset;
 
@@ -131,8 +135,14 @@ mod tests {
 
         let chunks = parse_chunk_section(&bytes, 0, false).unwrap();
         assert_eq!(chunks.len(), 2);
-        assert_eq!(&bytes[chunks[0].payload_start..chunks[0].payload_end], b"first");
-        assert_eq!(&bytes[chunks[1].payload_start..chunks[1].payload_end], b"second");
+        assert_eq!(
+            &bytes[chunks[0].payload_start..chunks[0].payload_end],
+            b"first"
+        );
+        assert_eq!(
+            &bytes[chunks[1].payload_start..chunks[1].payload_end],
+            b"second"
+        );
     }
 
     #[test]

@@ -70,7 +70,10 @@ pub fn validate_track_ranges(
 
     for (track_index, track) in tracks.iter().enumerate() {
         if track.revolution_count == 0 {
-            bail!("track {track_index} (\"{}\") has zero revolution count", track.title);
+            bail!(
+                "track {track_index} (\"{}\") has zero revolution count",
+                track.title
+            );
         }
 
         let end = track
@@ -156,9 +159,7 @@ pub fn validate_track_ranges(
         .enumerate()
     {
         if *playable && owner.is_none() {
-            bail!(
-                "revolution {revolution_index} is not covered by any track or track gap"
-            );
+            bail!("revolution {revolution_index} is not covered by any track or track gap");
         }
     }
 
@@ -230,7 +231,9 @@ mod tests {
         // there is no implicit "uncovered means gap" fallback any more.
         let tracks = [track("Track 1", 0, 1)];
         let err = validate_track_ranges(&tracks, &[], &[true, true]).unwrap_err();
-        assert!(err.to_string().contains("not covered by any track or track gap"));
+        assert!(err
+            .to_string()
+            .contains("not covered by any track or track gap"));
     }
 
     #[test]

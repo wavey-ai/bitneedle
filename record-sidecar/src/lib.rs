@@ -650,7 +650,6 @@ pub fn sidecar_pointer_carriers(flags: u8) -> Result<Vec<SidecarCarrier>> {
     Ok(carriers)
 }
 
-
 pub fn decode_sidecar_header_pointer(payload: &[u8]) -> Result<SidecarHeaderPointer> {
     if payload.len() != SIDECAR_POINTER_LENGTH {
         bail!("sidecar pointer has invalid length {}", payload.len());
@@ -687,9 +686,7 @@ pub fn decode_sidecar_header_pointer(payload: &[u8]) -> Result<SidecarHeaderPoin
     })
 }
 
-pub fn sidecar_pointer_sha256_base64url(
-    pointer: &SidecarHeaderPointer,
-) -> String {
+pub fn sidecar_pointer_sha256_base64url(pointer: &SidecarHeaderPointer) -> String {
     general_purpose::URL_SAFE_NO_PAD.encode(pointer.sha256)
 }
 
@@ -708,7 +705,6 @@ pub fn sidecar_header_pointer_json(pointer: &SidecarHeaderPointer) -> serde_json
         "h": sidecar_pointer_sha256_base64url(pointer),
     })
 }
-
 
 pub fn mulberry32_next(state: &mut u32) -> u32 {
     *state = state.wrapping_add(0x6d2b_79f5);
@@ -739,7 +735,6 @@ pub fn metadata_dither(pixel_index: usize, sequence_index: usize, salt: usize) -
     value ^= value >> 31;
     (value & 0xff) as u8
 }
-
 
 pub fn sidecar_capacity_bytes_for_scheme(scheme: &str, carrier_pairs: usize) -> Result<usize> {
     match normalize_sidecar_scheme(Some(scheme))?.as_str() {
@@ -864,7 +859,6 @@ pub fn decode_pairsign_sidecar_bytes_from_pairs(
     }
     Ok(out)
 }
-
 
 pub fn decode_sidecar_from_pairs(
     rgba: &[u8],

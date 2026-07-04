@@ -141,7 +141,11 @@ mod tests {
         let brs1_sha256: [u8; 32] = Sha256::digest(b"brs1 bytes").into();
         let r0 = revolution_commitment(release_id, 0, ecdc_sha256());
         let r1 = revolution_commitment(release_id, 1, ecdc_sha256());
-        let r1_changed = revolution_commitment(release_id, 1, Sha256::digest(b"different ecdc bytes").into());
+        let r1_changed = revolution_commitment(
+            release_id,
+            1,
+            Sha256::digest(b"different ecdc bytes").into(),
+        );
 
         let a = release_commitment(release_id, 1, 0, brs1_sha256, &[r0, r1]);
         let b = release_commitment(release_id, 1, 0, brs1_sha256, &[r0, r1_changed]);

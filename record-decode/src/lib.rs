@@ -1,11 +1,13 @@
 use anyhow::{bail, Context, Result};
 use bytes2rgb::rgba_to_bytes as track_rgba_to_bytes;
-use bytes2rgb::{decode_toned_spans, TonedConfig, ToneOrdering as BytesToneOrdering, ToneSpan};
+use bytes2rgb::{decode_toned_spans, ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig};
 use record_core::{
     build_header_spiral_indices, build_spiral_mask, build_trailer_spiral_indices,
     known_record_profile_names, normalize_record_profile_name, RECORD_STREAM_MAGIC,
 };
-use record_descriptor::{resolve_tone_spans, RecordDescriptor, ToneOrdering as DescriptorToneOrdering};
+use record_descriptor::{
+    resolve_tone_spans, RecordDescriptor, ToneOrdering as DescriptorToneOrdering,
+};
 
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
 
@@ -75,8 +77,7 @@ fn descriptor_payload_len_from_prefix(prefix: &[u8]) -> Result<usize> {
         bail!("record descriptor magic mismatch");
     }
 
-    let payload_len =
-        u16::from_be_bytes(prefix[5..7].try_into().expect("slice length")) as usize;
+    let payload_len = u16::from_be_bytes(prefix[5..7].try_into().expect("slice length")) as usize;
 
     if payload_len < record_descriptor::RECORD_DESCRIPTOR_PREFIX_LENGTH {
         bail!("record descriptor payload length is invalid");
@@ -134,10 +135,8 @@ fn decode_record_groove_to_track_data(
         bail!("record RGBA length does not match width * height * 4");
     }
 
-    let mask =
-        build_spiral_mask(width, height, b_value, record_profile, None, None, None)?;
-    let mut track_data =
-        Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
+    let mask = build_spiral_mask(width, height, b_value, record_profile, None, None, None)?;
+    let mut track_data = Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
 
     for &pixel_index in &mask.ordered_pixel_indices {
         let rgba_index = pixel_index
@@ -168,11 +167,9 @@ pub fn infer_record_profile_from_png(png_bytes: &[u8]) -> Result<String> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
 
     for &candidate in known_record_profile_names() {
-        if let Ok(descriptor) =
-            decode_record_descriptor_from_rgba(&rgba, width, height, candidate)
+        if let Ok(descriptor) = decode_record_descriptor_from_rgba(&rgba, width, height, candidate)
         {
-            let normalized =
-                normalize_record_profile_name(&descriptor.record_profile)?;
+            let normalized = normalize_record_profile_name(&descriptor.record_profile)?;
 
             if normalized == candidate {
                 return Ok(normalized);
@@ -194,11 +191,9 @@ pub fn decode_record_descriptor_from_png(
         None => infer_record_profile_from_png(png_bytes)?,
     };
 
-    let descriptor =
-        decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
+    let descriptor = decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
 
-    let normalized_descriptor_profile =
-        normalize_record_profile_name(&descriptor.record_profile)?;
+    let normalized_descriptor_profile = normalize_record_profile_name(&descriptor.record_profile)?;
 
     if normalized_descriptor_profile != normalized_profile {
         bail!(
@@ -218,8 +213,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
 ) -> Result<DecodedChunkStream> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
     let normalized_profile = normalize_record_profile_name(record_profile)?;
-    let descriptor =
-        decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
+    let descriptor = decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
     let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
 
     let (track_data, pixel_count) = decode_record_groove_to_track_data(
@@ -253,19 +247,14 @@ pub fn decode_record_png_to_chunk_stream_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
 ) -> Result<DecodedChunkStream> {
-    decode_record_png_to_chunk_stream_for_profile_with_length(
-        png_bytes,
-        record_profile,
-        None,
-    )
+    decode_record_png_to_chunk_stream_for_profile_with_length(png_bytes, record_profile, None)
 }
 
 pub fn decode_record_png_to_chunk_stream_with_length(
     png_bytes: &[u8],
     byte_length: Option<usize>,
 ) -> Result<(String, DecodedChunkStream)> {
-    let (profile, descriptor) =
-        decode_record_descriptor_from_png(png_bytes, None)?;
+    let (profile, descriptor) = decode_record_descriptor_from_png(png_bytes, None)?;
     let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
     let decoded = decode_record_png_to_chunk_stream_for_profile_with_length(
         png_bytes,
@@ -276,21 +265,17 @@ pub fn decode_record_png_to_chunk_stream_with_length(
     Ok((profile, decoded))
 }
 
-pub fn decode_record_png_to_chunk_stream(
-    png_bytes: &[u8],
-) -> Result<(String, DecodedChunkStream)> {
+pub fn decode_record_png_to_chunk_stream(png_bytes: &[u8]) -> Result<(String, DecodedChunkStream)> {
     decode_record_png_to_chunk_stream_with_length(png_bytes, None)
 }
 
 pub fn decode_record_png(png_bytes: &[u8]) -> Result<DecodedRecord> {
-    let (record_profile, descriptor) =
-        decode_record_descriptor_from_png(png_bytes, None)?;
-    let chunk_stream =
-        decode_record_png_to_chunk_stream_for_profile_with_length(
-            png_bytes,
-            &record_profile,
-            Some(descriptor.stream_byte_length),
-        )?;
+    let (record_profile, descriptor) = decode_record_descriptor_from_png(png_bytes, None)?;
+    let chunk_stream = decode_record_png_to_chunk_stream_for_profile_with_length(
+        png_bytes,
+        &record_profile,
+        Some(descriptor.stream_byte_length),
+    )?;
 
     Ok(DecodedRecord {
         record_profile,
