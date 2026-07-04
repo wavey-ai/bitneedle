@@ -155,7 +155,10 @@ pub fn gap_sample_count_from_seconds(duration_seconds: f64, sample_rate: u32) ->
         duration_seconds > 0.0,
         "GAP duration must be greater than zero seconds"
     );
-    ensure!(sample_rate > 0, "record sample rate must be greater than zero");
+    ensure!(
+        sample_rate > 0,
+        "record sample rate must be greater than zero"
+    );
 
     // Canonical rounding rule across all crates: round half up.
     let exact = duration_seconds * f64::from(sample_rate);
@@ -249,100 +252,12 @@ impl XorShift32 {
     }
 }
 
-/// Derive a deterministic GAP seed from stable construction context. Mixing all
-/// available identifiers keeps successive gaps in one record visually distinct
-/// while remaining fully reproducible — no process randomness is involved.
-pub fn derive_gap_seed(
-    record_identity: &[u8],
-    musical_boundary_index: u64,
-    gap_ordinal: u64,
-    record_profile: &str,
-    sample_count: u64,
-) -> u32 {
-    // 64-bit FNV-1a over the canonical construction context, folded to u32.
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut hash = FNV_OFFSET;
-    let mut mix = |bytes: &[u8]| {
-        for &byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    };
-
-    mix(record_identity);
-    mix(&musical_boundary_index.to_be_bytes());
-    mix(&gap_ordinal.to_be_bytes());
-    mix(record_profile.as_bytes());
-    mix(&sample_count.to_be_bytes());
-
-    let folded = (hash ^ (hash >> 32)) as u32;
-    // Keep the seed away from the xorshift zero fixed point.
-    if folded == 0 {
-        0x9E37_79B9
-    } else {
-        folded
-    }
-}
-
-/// Encode a canonical `GAP1` payload of exactly `payload_byte_length` bytes.
-pub fn encode_gap_payload(
-    sample_count: u64,
-    payload_byte_length: usize,
-    seed: u32,
-) -> Result<Vec<u8>> {
-    ensure!(sample_count > 0, "GAP sample count must be greater than zero");
-    ensure!(
-        payload_byte_length >= GAP_HEADER_LENGTH,
-        "GAP payload byte length must be at least the GAP1 header length"
-    );
-
-    let declared = payload_byte_length as u64;
-
-    let mut out = Vec::with_capacity(payload_byte_length);
-    out.extend_from_slice(GAP_MAGIC);
-    out.push(GAP_VERSION);
-    out.push(0); // flags
-    out.extend_from_slice(&[0u8, 0u8]); // reserved
-    out.extend_from_slice(&sample_count.to_be_bytes());
-    out.extend_from_slice(&declared.to_be_bytes());
-    out.extend_from_slice(&seed.to_be_bytes());
-
-    debug_assert_eq!(out.len(), GAP_HEADER_LENGTH);
-
-    let filler_len = payload_byte_length - GAP_HEADER_LENGTH;
-    out.resize(payload_byte_length, 0);
-    XorShift32::new(seed).fill_quiet(&mut out[GAP_HEADER_LENGTH..]);
-    debug_assert_eq!(out.len() - GAP_HEADER_LENGTH, filler_len);
-
-    Ok(out)
-}
-
-/// High-level constructor: build a canonical `GAP1` payload from a duration in
-/// seconds and the per-record sizing context, deriving the sample count, total
-/// byte length, and deterministic seed in one place.
-#[allow(clippy::too_many_arguments)]
-pub fn build_gap_payload(
-    duration_seconds: f64,
-    sample_rate: u32,
-    record_profile: &str,
-    render_context: &GapRenderContext,
-    record_identity: &[u8],
-    musical_boundary_index: u64,
-    gap_ordinal: u64,
-) -> Result<Vec<u8>> {
-    let sample_count = gap_sample_count_from_seconds(duration_seconds, sample_rate)?;
-    let payload_byte_length =
-        gap_payload_byte_length(duration_seconds, record_profile, render_context)?;
-    let seed = derive_gap_seed(
-        record_identity,
-        musical_boundary_index,
-        gap_ordinal,
-        record_profile,
-        sample_count,
-    );
-    encode_gap_payload(sample_count, payload_byte_length, seed)
+/// Fill `out` with the deterministic quiet-tone filler for the given seed.
+/// Exposed so authoring code (see `record-cut`) can produce filler bytes that
+/// this crate's [`validate_gap_payload`] will accept; the keystream itself is
+/// already documented above and carries no additional disclosure.
+pub fn fill_gap_quiet_filler(seed: u32, out: &mut [u8]) {
+    XorShift32::new(seed).fill_quiet(out);
 }
 
 /// Parse and validate the `GAP1` header without re-deriving the filler.
@@ -375,8 +290,7 @@ pub fn decode_gap_header(bytes: &[u8]) -> Result<GapHeader> {
         "GAP sample count must be greater than zero"
     );
 
-    let payload_byte_length =
-        u64::from_be_bytes(bytes[16..24].try_into().expect("length checked"));
+    let payload_byte_length = u64::from_be_bytes(bytes[16..24].try_into().expect("length checked"));
 
     let seed = u32::from_be_bytes(bytes[24..28].try_into().expect("length checked"));
 
@@ -420,22 +334,12 @@ pub fn validate_gap_payload(bytes: &[u8]) -> Result<GapHeader> {
     Ok(header)
 }
 
-/// Mark an already-encoded `GAP1` payload as patternized in place, setting
-/// [`GAP_FLAG_PATTERNIZED`] in its header. The filler bytes are left untouched;
-/// the actual reordering is performed later on the toned pixels, and the chunk
-/// CRC32 is (re)issued over the final bytes. Validates the header first so a
-/// malformed buffer is rejected rather than silently stamped.
-pub fn mark_payload_patternized(payload: &mut [u8]) -> Result<()> {
-    // Ensures magic/version/length are well-formed before mutating.
-    decode_gap_header(payload).context("cannot mark a malformed GAP payload as patternized")?;
-    payload[5] |= GAP_FLAG_PATTERNIZED;
-    Ok(())
-}
-
 /// Read a GAP entry's silence sample count from its payload, validating the
 /// header. Used by pre-decode duration inspection.
 pub fn gap_sample_count(bytes: &[u8]) -> Result<u64> {
-    Ok(decode_gap_header(bytes).context("invalid GAP payload")?.sample_count)
+    Ok(decode_gap_header(bytes)
+        .context("invalid GAP payload")?
+        .sample_count)
 }
 
 #[cfg(test)]
@@ -444,6 +348,37 @@ mod tests {
 
     fn ctx() -> GapRenderContext {
         GapRenderContext::for_profile("single45").unwrap()
+    }
+
+    /// Test-only `GAP1` encoder mirroring `record-cut::gap::encode_gap_payload`,
+    /// kept here so this crate's decode-side tests don't need an authoring
+    /// dependency. Any change to the wire layout must be mirrored there.
+    fn test_encode_gap_payload(
+        sample_count: u64,
+        payload_byte_length: usize,
+        seed: u32,
+    ) -> Vec<u8> {
+        assert!(sample_count > 0);
+        assert!(payload_byte_length >= GAP_HEADER_LENGTH);
+
+        let declared = payload_byte_length as u64;
+        let mut out = Vec::with_capacity(payload_byte_length);
+        out.extend_from_slice(GAP_MAGIC);
+        out.push(GAP_VERSION);
+        out.push(0); // flags
+        out.extend_from_slice(&[0u8, 0u8]); // reserved
+        out.extend_from_slice(&sample_count.to_be_bytes());
+        out.extend_from_slice(&declared.to_be_bytes());
+        out.extend_from_slice(&seed.to_be_bytes());
+
+        out.resize(payload_byte_length, 0);
+        fill_gap_quiet_filler(seed, &mut out[GAP_HEADER_LENGTH..]);
+        out
+    }
+
+    fn test_mark_payload_patternized(payload: &mut [u8]) {
+        decode_gap_header(payload).unwrap();
+        payload[5] |= GAP_FLAG_PATTERNIZED;
     }
 
     #[test]
@@ -495,23 +430,27 @@ mod tests {
         let long = gap_payload_byte_length(1_000.0, "single45", &c).unwrap();
         assert!(half < bytes, "shorter gap is narrower");
         assert!(long > bytes, "longer gap is wider");
-        let cap = (MAX_GAP_REVOLUTIONS * c.pixels_per_revolution * GAP_BYTES_PER_PIXEL).round() as usize;
+        let cap =
+            (MAX_GAP_REVOLUTIONS * c.pixels_per_revolution * GAP_BYTES_PER_PIXEL).round() as usize;
         assert!(long.abs_diff(cap) <= 3, "{long} ~= cap {cap}");
         assert!(half >= GAP_HEADER_LENGTH);
     }
 
     #[test]
     fn gap_filler_is_a_quiet_consistent_tone() {
-        let payload = build_gap_payload(2.0, 48_000, "single45", &ctx(), b"r", 0, 0).unwrap();
+        let payload = test_encode_gap_payload(96_000, 3_000, 0);
         for &byte in &payload[GAP_HEADER_LENGTH..] {
             let delta = (i32::from(byte) - i32::from(GAP_QUIET_TONE)).unsigned_abs();
-            assert!(delta <= u32::from(GAP_QUIET_VARIATION), "byte {byte} within quiet band");
+            assert!(
+                delta <= u32::from(GAP_QUIET_VARIATION),
+                "byte {byte} within quiet band"
+            );
         }
     }
 
     #[test]
     fn encode_decode_round_trip() {
-        let payload = encode_gap_payload(96_000, 3_000, 0xABCD_1234).unwrap();
+        let payload = test_encode_gap_payload(96_000, 3_000, 0xABCD_1234);
         assert_eq!(payload.len(), 3_000);
         assert_eq!(&payload[0..4], GAP_MAGIC);
 
@@ -523,24 +462,24 @@ mod tests {
 
     #[test]
     fn deterministic_filler_is_reproducible() {
-        let a = encode_gap_payload(1_000, 512, 42).unwrap();
-        let b = encode_gap_payload(1_000, 512, 42).unwrap();
+        let a = test_encode_gap_payload(1_000, 512, 42);
+        let b = test_encode_gap_payload(1_000, 512, 42);
         assert_eq!(a, b);
         // Different seed yields different filler.
-        let c = encode_gap_payload(1_000, 512, 43).unwrap();
+        let c = test_encode_gap_payload(1_000, 512, 43);
         assert_ne!(a, c);
     }
 
     #[test]
     fn header_only_payload_has_no_filler() {
-        let payload = encode_gap_payload(10, GAP_HEADER_LENGTH, 7).unwrap();
+        let payload = test_encode_gap_payload(10, GAP_HEADER_LENGTH, 7);
         assert_eq!(payload.len(), GAP_HEADER_LENGTH);
         validate_gap_payload(&payload).unwrap();
     }
 
     #[test]
     fn malformed_magic_is_rejected() {
-        let mut payload = encode_gap_payload(96_000, 64, 1).unwrap();
+        let mut payload = test_encode_gap_payload(96_000, 64, 1);
         payload[0] = b'X';
         assert!(decode_gap_header(&payload).is_err());
         assert!(validate_gap_payload(&payload).is_err());
@@ -548,23 +487,22 @@ mod tests {
 
     #[test]
     fn unsupported_version_is_rejected() {
-        let mut payload = encode_gap_payload(96_000, 64, 1).unwrap();
+        let mut payload = test_encode_gap_payload(96_000, 64, 1);
         payload[4] = 2;
         assert!(decode_gap_header(&payload).is_err());
     }
 
     #[test]
     fn zero_samples_is_rejected() {
-        assert!(encode_gap_payload(0, 64, 1).is_err());
-        // A hand-built header with zero samples also fails validation.
-        let mut payload = encode_gap_payload(1, 64, 1).unwrap();
+        // A hand-built header with zero samples fails validation.
+        let mut payload = test_encode_gap_payload(1, 64, 1);
         payload[8..16].copy_from_slice(&0u64.to_be_bytes());
         assert!(decode_gap_header(&payload).is_err());
     }
 
     #[test]
     fn declared_length_mismatch_is_rejected() {
-        let payload = encode_gap_payload(96_000, 128, 5).unwrap();
+        let payload = test_encode_gap_payload(96_000, 128, 5);
         assert!(validate_gap_payload(&payload[..127]).is_err());
         // Truncating below the header is also rejected.
         assert!(decode_gap_header(&payload[..GAP_HEADER_LENGTH - 1]).is_err());
@@ -572,7 +510,7 @@ mod tests {
 
     #[test]
     fn corrupted_filler_is_rejected() {
-        let mut payload = encode_gap_payload(96_000, 256, 9).unwrap();
+        let mut payload = test_encode_gap_payload(96_000, 256, 9);
         let last = payload.len() - 1;
         payload[last] ^= 0xFF;
         assert!(validate_gap_payload(&payload).is_err());
@@ -584,12 +522,12 @@ mod tests {
     fn patternized_flag_skips_keystream_check_but_keeps_structural_checks() {
         // A patternized entry: reorder the filler so it no longer equals the
         // keystream, then stamp the flag.
-        let mut payload = encode_gap_payload(96_000, 256, 9).unwrap();
+        let mut payload = test_encode_gap_payload(96_000, 256, 9);
         payload[GAP_HEADER_LENGTH..].reverse();
         // Without the flag, the reordered filler is rejected.
         assert!(validate_gap_payload(&payload).is_err());
 
-        mark_payload_patternized(&mut payload).unwrap();
+        test_mark_payload_patternized(&mut payload);
         let header = validate_gap_payload(&payload).unwrap();
         assert!(header.is_patternized());
         assert_eq!(header.flags, GAP_FLAG_PATTERNIZED);
@@ -605,7 +543,7 @@ mod tests {
 
     #[test]
     fn unknown_flag_bits_are_rejected() {
-        let mut payload = encode_gap_payload(96_000, 64, 1).unwrap();
+        let mut payload = test_encode_gap_payload(96_000, 64, 1);
         payload[5] = 0x80; // a bit this version does not understand
         assert!(decode_gap_header(&payload).is_err());
         // The defined patternized bit, by contrast, is accepted.
@@ -614,45 +552,10 @@ mod tests {
     }
 
     #[test]
-    fn mark_payload_patternized_rejects_malformed() {
-        let mut not_a_gap = vec![0u8; GAP_HEADER_LENGTH];
-        assert!(mark_payload_patternized(&mut not_a_gap).is_err());
-    }
-
-    #[test]
-    fn seed_derivation_is_deterministic_and_varies() {
-        let a = derive_gap_seed(b"release-1", 0, 0, "single45", 96_000);
-        let b = derive_gap_seed(b"release-1", 0, 0, "single45", 96_000);
-        assert_eq!(a, b);
-        let c = derive_gap_seed(b"release-1", 1, 1, "single45", 96_000);
-        assert_ne!(a, c);
-        assert_ne!(a, 0);
-    }
-
-    #[test]
-    fn build_gap_payload_validates() {
-        let payload = build_gap_payload(
-            2.0,
-            48_000,
-            "single45",
-            &ctx(),
-            b"release-xyz",
-            0,
-            0,
-        )
-        .unwrap();
-        let header = validate_gap_payload(&payload).unwrap();
-        assert_eq!(header.sample_count, 96_000);
-        // 2.0 s is 1.5 single45 revolutions wide.
-        let expected = gap_payload_byte_length(2.0, "single45", &ctx()).unwrap();
-        assert_eq!(payload.len(), expected);
-    }
-
-    #[test]
     fn filler_never_starts_with_ecdc_magic() {
         // The payload always begins with GAP1, so an entry can never be mistaken
         // for a standalone ECDC stream.
-        let payload = encode_gap_payload(96_000, 3_000, 0x4543_4443 /* "ECDC" */).unwrap();
+        let payload = test_encode_gap_payload(96_000, 3_000, 0x4543_4443 /* "ECDC" */);
         assert_eq!(&payload[0..4], GAP_MAGIC);
         assert_ne!(&payload[0..4], b"ECDC");
     }

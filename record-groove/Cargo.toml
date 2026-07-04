@@ -1,11 +1,11 @@
 [package]
-name = "bytes2rgb"
+name = "record-groove"
 version = "0.1.6"
 edition = "2021"
-description = "colour utilities: byte/RGB conversion, luma, hex colours"
+description = "Bitneedle byte-to-pixel carrier encoding and toned palette primitives"
 repository = "https://github.com/wavey-ai/bitneedle"
 readme = "README.md"
-license = "Apache-2.0"
+license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1"

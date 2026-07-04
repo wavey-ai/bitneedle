@@ -6,10 +6,20 @@ Archimedean spiral data path, and for related picture-record creation,
 authoring, distribution, commercialization, and marketing workflows.
 
 This repository is published to make Bitneedle records inspectable and
-self-sufficient for artists and users. The source code license is the Apache
-License, Version 2.0, in `LICENSE`. Apache-2.0 includes the patent license
-stated in that license for the covered Work. This notice explains Wavey's
-intent for Bitneedle patent rights outside that covered Work.
+self-sufficient for artists and users. This repository contains two kinds of
+components under different licences:
+
+- Decoding, verification, and interoperability crates are licensed under the
+  Apache License, Version 2.0, in `LICENSE`. Apache-2.0 includes the patent
+  license stated in that license for the covered Work.
+- Record-authoring crates (the ones that construct, encode, or render
+  Bitneedle records) are licensed under the Wavey Artist Source Licence, in
+  `LICENSE-ARTIST`, which grants a limited patent permission to Artists and
+  Artist Entities as described in that licence.
+
+See each crate's `Cargo.toml` and `LICENSE` file for its applicable licence.
+This notice explains Wavey's intent for Bitneedle patent rights outside the
+rights expressly granted by those licences.
 
 ## Limited decoder pledge
 
@@ -30,9 +40,11 @@ inspectable and playable without relying on Wavey's hosted services.
 
 ## Rights reserved
 
-Except for Apache-2.0 as applied to this repository's Work and the limited
-decoder pledge above, Wavey reserves all patent rights. No license or covenant
-is granted for activities outside this repository's Work, including:
+Except for Apache-2.0 as applied to this repository's decoding and
+interoperability Work, the limited decoder pledge above, and the limited
+Artist patent permission granted by the Wavey Artist Source Licence, Wavey
+reserves all patent rights. No license or covenant is granted for activities
+outside those expressly granted rights, including:
 
 - encoding audio into Bitneedle picture-record images;
 - creating, authoring, generating, minting, inscribing, issuing, manufacturing,

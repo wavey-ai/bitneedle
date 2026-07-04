@@ -1,8 +1,14 @@
 Bitneedle
 Copyright 2026 Wavey Inc
 
-This repository contains public decoder and interoperability code for Bitneedle
-picture-record objects.
+This repository contains public decoder and interoperability code for
+Bitneedle picture-record objects, and, in separately licensed crates, record-
+authoring code for Artists.
+
+Decoding and interoperability crates are licensed under the Apache License,
+Version 2.0, in LICENSE. Record-authoring crates are licensed under the
+Wavey Artist Source Licence, in LICENSE-ARTIST. See each crate's Cargo.toml
+for its applicable licence.
 
 Certain Bitneedle technologies are patent pending. See PATENTS.md for the
 public patent notice, interoperability pledge, and reserved-rights statement.

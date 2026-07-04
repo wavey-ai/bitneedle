@@ -10,7 +10,12 @@
 //! no base64/hex wire representations, and no record-creation policy.
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::convert::TryInto;
 
 pub const RECORD_DESCRIPTOR_MAGIC: &[u8; 4] = b"BRD1";
 pub const RECORD_DESCRIPTOR_VERSION: u8 = 2;
@@ -24,6 +29,21 @@ pub const SIGNED_RELEASE_REFERENCE_VERSION: u8 = 2;
 pub const SIGNED_RELEASE_REFERENCE_HASH_LENGTH: usize = 32;
 pub const SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH: usize = 64;
 pub const SIGNED_RELEASE_REFERENCE_MAX_KEY_ID_LENGTH: usize = u16::MAX as usize;
+
+pub const CACHE_ENCRYPTION_DESCRIPTOR_VERSION: u8 = 1;
+pub const CACHE_ENCRYPTION_ALGORITHM_XCHACHA20POLY1305: &str = "xchacha20-poly1305";
+pub const CACHE_KEY_DERIVATION_HKDF_SHA256: &str = "hkdf-sha256";
+pub const CACHE_ENCRYPTION_SECRET_LENGTH: usize = 32;
+pub const CACHE_ENCRYPTION_RECORD_BINDING_HASH_LENGTH: usize = 32;
+pub const CACHE_ENCRYPTION_NONCE_LENGTH: usize = 24;
+pub const CACHE_ENCRYPTION_TAG_LENGTH: usize = 16;
+pub const CACHE_ENCRYPTION_ENVELOPE_MAGIC: &[u8; 4] = b"BCE1";
+pub const CACHE_ENCRYPTION_ENVELOPE_VERSION: u8 = 1;
+pub const CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305: u8 = 1;
+pub const CACHE_ENCRYPTION_INFO: &[u8] = b"bitneedle-cache-encryption-v1";
+pub const CACHE_ENCRYPTION_NONCE_INFO: &[u8] = b"bitneedle-cache-encryption-nonce-v1";
+pub const CACHE_ENCRYPTION_AAD_DOMAIN: &[u8] = b"bitneedle-cache-encryption-aad-v1";
+pub const CACHE_ENCRYPTION_NONCE_DOMAIN: &[u8] = b"bitneedle-cache-nonce-v1";
 
 pub const RECORD_PROFILE_SINGLE45_CODE: u8 = 0;
 pub const RECORD_PROFILE_LP_CODE: u8 = 1;
@@ -47,6 +67,9 @@ pub const SEGMENT_CREATED_AT: u8 = 14;
 pub const SEGMENT_SIGNED_RELEASE_REFERENCE: u8 = 16;
 pub const SEGMENT_BSC_POINTER: u8 = 21;
 pub const SEGMENT_TONED_CARRIER_MAP: u8 = 22;
+pub const SEGMENT_CACHE_ENCRYPTION: u8 = 23;
+pub const SEGMENT_COPYRIGHT_YEAR: u8 = 24;
+pub const SEGMENT_COPYRIGHT_HOLDER: u8 = 25;
 
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
@@ -59,6 +82,563 @@ pub const TONED_ORDERING_CHROMA_PROXIMITY: u8 = 1;
 pub const TONED_MIN_BITS_PER_PIXEL: u8 = 1;
 pub const TONED_MAX_BITS_PER_PIXEL: u8 = 24;
 pub const TONED_MAX_SPAN_COUNT: usize = u16::MAX as usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheEncryptionAlgorithm {
+    #[serde(rename = "xchacha20-poly1305")]
+    XChaCha20Poly1305,
+}
+
+impl CacheEncryptionAlgorithm {
+    pub fn wire_code(self) -> u8 {
+        match self {
+            Self::XChaCha20Poly1305 => CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305,
+        }
+    }
+
+    pub fn from_wire_code(code: u8) -> Result<Self> {
+        match code {
+            CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305 => Ok(Self::XChaCha20Poly1305),
+            _ => bail!("unsupported cache encryption algorithm code {code}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheKeyDerivation {
+    #[serde(rename = "hkdf-sha256")]
+    HkdfSha256,
+}
+
+impl CacheKeyDerivation {
+    pub fn wire_code(self) -> u8 {
+        match self {
+            Self::HkdfSha256 => 1,
+        }
+    }
+
+    pub fn from_wire_code(code: u8) -> Result<Self> {
+        match code {
+            1 => Ok(Self::HkdfSha256),
+            _ => bail!("unsupported cache key derivation code {code}"),
+        }
+    }
+}
+
+fn serialize_secret_base64url<S>(secret: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&URL_SAFE_NO_PAD.encode(secret))
+}
+
+fn deserialize_secret_base64url<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = String::deserialize(deserializer)?;
+    URL_SAFE_NO_PAD
+        .decode(text.as_bytes())
+        .map_err(serde::de::Error::custom)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheEncryptionDescriptor {
+    pub version: u8,
+    pub algorithm: CacheEncryptionAlgorithm,
+    pub key_derivation: CacheKeyDerivation,
+    #[serde(
+        serialize_with = "serialize_secret_base64url",
+        deserialize_with = "deserialize_secret_base64url"
+    )]
+    pub secret: Vec<u8>,
+}
+
+impl CacheEncryptionDescriptor {
+    pub fn validate(&self) -> Result<()> {
+        if self.version != CACHE_ENCRYPTION_DESCRIPTOR_VERSION {
+            bail!(
+                "unsupported cache encryption descriptor version: {}",
+                self.version
+            );
+        }
+        match self.algorithm {
+            CacheEncryptionAlgorithm::XChaCha20Poly1305 => {}
+        }
+        match self.key_derivation {
+            CacheKeyDerivation::HkdfSha256 => {}
+        }
+        if self.secret.len() != CACHE_ENCRYPTION_SECRET_LENGTH {
+            bail!(
+                "cache encryption secret must be exactly {} bytes",
+                CACHE_ENCRYPTION_SECRET_LENGTH
+            );
+        }
+        Ok(())
+    }
+
+    pub fn secret(&self) -> &[u8] {
+        self.secret.as_slice()
+    }
+
+    pub fn from_secret_base64url(secret: &str) -> Result<Self> {
+        let secret = URL_SAFE_NO_PAD
+            .decode(secret.as_bytes())
+            .context("cache encryption secret is not valid base64url")?;
+        let descriptor = Self {
+            version: CACHE_ENCRYPTION_DESCRIPTOR_VERSION,
+            algorithm: CacheEncryptionAlgorithm::XChaCha20Poly1305,
+            key_derivation: CacheKeyDerivation::HkdfSha256,
+            secret,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheEncryptionContext {
+    pub protocol_version: u8,
+    pub cache_format_version: u8,
+    pub cache_store_name: String,
+    pub cache_key: String,
+    pub chunk_index: u64,
+    pub packet_offset: u64,
+    pub plaintext_length: usize,
+    pub codec_identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEncryptionEnvelope {
+    pub version: u8,
+    pub algorithm: u8,
+    pub flags: u16,
+    pub record_binding_hash: [u8; CACHE_ENCRYPTION_RECORD_BINDING_HASH_LENGTH],
+    pub chunk_index: u64,
+    pub packet_offset: u64,
+    pub plaintext_length: u32,
+    pub nonce: [u8; CACHE_ENCRYPTION_NONCE_LENGTH],
+    pub ciphertext: Vec<u8>,
+}
+
+impl CacheEncryptionEnvelope {
+    pub const HEADER_LENGTH: usize = 4
+        + 1
+        + 1
+        + 2
+        + CACHE_ENCRYPTION_RECORD_BINDING_HASH_LENGTH
+        + 8
+        + 8
+        + 4
+        + CACHE_ENCRYPTION_NONCE_LENGTH;
+
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < Self::HEADER_LENGTH + CACHE_ENCRYPTION_TAG_LENGTH {
+            bail!("invalid BCE1 envelope: truncated header or ciphertext");
+        }
+        if bytes.get(0..4) != Some(CACHE_ENCRYPTION_ENVELOPE_MAGIC.as_slice()) {
+            bail!("invalid BCE1 envelope: magic mismatch");
+        }
+
+        let version = bytes[4];
+        if version != CACHE_ENCRYPTION_ENVELOPE_VERSION {
+            bail!("unsupported BCE1 envelope version {version}");
+        }
+
+        let algorithm = bytes[5];
+        if algorithm != CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305 {
+            bail!("unsupported BCE1 envelope algorithm {algorithm}");
+        }
+
+        let flags = u16::from_be_bytes(bytes[6..8].try_into().expect("slice length"));
+        let record_binding_hash = bytes[8..40].try_into().expect("slice length");
+        let chunk_index = u64::from_be_bytes(bytes[40..48].try_into().expect("slice length"));
+        let packet_offset = u64::from_be_bytes(bytes[48..56].try_into().expect("slice length"));
+        let plaintext_length = u32::from_be_bytes(bytes[56..60].try_into().expect("slice length"));
+        let nonce = bytes[60..84].try_into().expect("slice length");
+        let ciphertext = bytes[84..].to_vec();
+
+        if plaintext_length == 0 {
+            bail!("invalid BCE1 envelope: empty plaintext length");
+        }
+        if ciphertext.len() != plaintext_length as usize + CACHE_ENCRYPTION_TAG_LENGTH {
+            bail!("invalid BCE1 envelope: ciphertext length mismatch");
+        }
+
+        Ok(Self {
+            version,
+            algorithm,
+            flags,
+            record_binding_hash,
+            chunk_index,
+            packet_offset,
+            plaintext_length,
+            nonce,
+            ciphertext,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        if self.version != CACHE_ENCRYPTION_ENVELOPE_VERSION {
+            bail!("unsupported BCE1 envelope version {}", self.version);
+        }
+        if self.algorithm != CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305 {
+            bail!("unsupported BCE1 envelope algorithm {}", self.algorithm);
+        }
+        if self.plaintext_length == 0 {
+            bail!("invalid BCE1 envelope: empty plaintext length");
+        }
+        if self.ciphertext.len() != self.plaintext_length as usize + CACHE_ENCRYPTION_TAG_LENGTH {
+            bail!("invalid BCE1 envelope: ciphertext length mismatch");
+        }
+
+        let mut out = Vec::with_capacity(Self::HEADER_LENGTH + self.ciphertext.len());
+        out.extend_from_slice(CACHE_ENCRYPTION_ENVELOPE_MAGIC);
+        out.push(self.version);
+        out.push(self.algorithm);
+        out.extend_from_slice(&self.flags.to_be_bytes());
+        out.extend_from_slice(&self.record_binding_hash);
+        out.extend_from_slice(&self.chunk_index.to_be_bytes());
+        out.extend_from_slice(&self.packet_offset.to_be_bytes());
+        out.extend_from_slice(&self.plaintext_length.to_be_bytes());
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&self.ciphertext);
+        Ok(out)
+    }
+}
+
+fn push_u8(out: &mut Vec<u8>, value: u8) {
+    out.push(value);
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+#[allow(dead_code)]
+fn push_len_prefixed_bytes(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    out.push(tag);
+    push_u32(out, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+    out.extend_from_slice(bytes);
+}
+
+fn push_len_prefixed_string(out: &mut Vec<u8>, tag: u8, value: Option<&str>) {
+    out.push(tag);
+    match value {
+        Some(value) => {
+            let bytes = value.as_bytes();
+            push_u32(out, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+            out.extend_from_slice(bytes);
+        }
+        None => push_u32(out, 0),
+    }
+}
+
+fn push_len_prefixed_u8_slice<const N: usize>(out: &mut Vec<u8>, tag: u8, value: Option<&[u8; N]>) {
+    out.push(tag);
+    match value {
+        Some(value) => {
+            push_u32(out, N as u32);
+            out.extend_from_slice(value);
+        }
+        None => push_u32(out, 0),
+    }
+}
+
+fn cache_encryption_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"bitneedle.record-descriptor.cache-identity.v1");
+    push_u8(&mut out, descriptor.version);
+    push_u8(&mut out, u8::from(descriptor.checksum_protected));
+    push_u64(&mut out, descriptor.b_value_bits);
+    push_len_prefixed_string(&mut out, 1, Some(&descriptor.record_profile));
+    push_u64(&mut out, descriptor.stream_byte_length as u64);
+    push_len_prefixed_string(&mut out, 2, Some(&descriptor.payload_encoding));
+    push_len_prefixed_string(&mut out, 3, descriptor.title.as_deref());
+    push_len_prefixed_string(&mut out, 4, descriptor.artist.as_deref());
+    push_len_prefixed_u8_slice(&mut out, 5, descriptor.release_id.as_ref());
+    push_len_prefixed_string(&mut out, 6, descriptor.catalog_number.as_deref());
+    push_len_prefixed_string(&mut out, 7, descriptor.label.as_deref());
+    push_len_prefixed_string(&mut out, 8, descriptor.artwork_credit.as_deref());
+    push_len_prefixed_string(&mut out, 9, descriptor.canonical_url.as_deref());
+    out.push(10);
+    match descriptor.created_at {
+        Some(value) => {
+            push_u32(&mut out, 8);
+            push_u64(&mut out, value);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    out.push(12);
+    match descriptor.bsc_pointer.as_ref() {
+        Some(pointer) => {
+            push_u32(
+                &mut out,
+                u32::try_from(pointer.len()).context("BSC pointer exceeds u32")?,
+            );
+            out.extend_from_slice(pointer);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    out.push(13);
+    push_u32(
+        &mut out,
+        u32::try_from(descriptor.tone_spans.len()).context("tone span count exceeds u32")?,
+    );
+    for span in &descriptor.tone_spans {
+        push_u32(
+            &mut out,
+            u32::try_from(span.byte_length).context("tone span byte length exceeds u32")?,
+        );
+        out.extend_from_slice(&span.base);
+        push_u8(&mut out, span.luma_tolerance);
+        push_u8(&mut out, span.bits_per_pixel);
+        push_u8(&mut out, span.ordering.wire_code());
+    }
+    out.push(14);
+    match descriptor.copyright_year {
+        Some(value) => {
+            push_u32(&mut out, 2);
+            push_u16(&mut out, value);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    push_len_prefixed_string(&mut out, 15, descriptor.copyright_holder.as_deref());
+    Ok(out)
+}
+
+pub fn cache_encryption_record_binding_hash(
+    descriptor: &RecordDescriptor,
+) -> Result<[u8; CACHE_ENCRYPTION_RECORD_BINDING_HASH_LENGTH]> {
+    let identity = cache_encryption_identity_bytes(descriptor)?;
+    Ok(Sha256::digest(identity).into())
+}
+
+pub fn derive_cache_encryption_key(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
+    let cache_encryption = descriptor
+        .cache_encryption
+        .as_ref()
+        .context("record descriptor is missing cache encryption descriptor")?;
+    cache_encryption.validate()?;
+
+    let salt = cache_encryption_record_binding_hash(descriptor)?;
+    Ok(hkdf_sha256_32(
+        &salt,
+        cache_encryption.secret(),
+        CACHE_ENCRYPTION_INFO,
+    ))
+}
+
+/// Subkey used only to derive the per-entry nonce, kept separate from the AEAD
+/// key itself (same salt/secret, distinct HKDF `info` label).
+fn derive_cache_nonce_key(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
+    let cache_encryption = descriptor
+        .cache_encryption
+        .as_ref()
+        .context("record descriptor is missing cache encryption descriptor")?;
+    cache_encryption.validate()?;
+
+    let salt = cache_encryption_record_binding_hash(descriptor)?;
+    Ok(hkdf_sha256_32(
+        &salt,
+        cache_encryption.secret(),
+        CACHE_ENCRYPTION_NONCE_INFO,
+    ))
+}
+
+/// Deterministic nonce: a PRF over the plaintext (hashed) and enough of the
+/// cache context to disambiguate entries, keyed by a subkey derived from the
+/// record's own cache-encryption secret. The same (record, plaintext, context)
+/// always produces the same nonce, so the same triple always produces
+/// byte-identical ciphertext — this is what makes the resulting BCE1 envelope
+/// safe to use as a content-addressed cache key, and what two independent
+/// writers (e.g. press after issuance, then a player's own first decode)
+/// converge on. Nonce reuse under a fixed key only ever happens for identical
+/// plaintext, which is the intended convergent-encryption property here, not a
+/// confidentiality regression: the plaintext (decoded audio) is already fully
+/// recoverable by anyone holding the record image.
+fn derive_cache_nonce(
+    nonce_key: &[u8; 32],
+    context: &CacheEncryptionContext,
+    plaintext: &[u8],
+) -> [u8; CACHE_ENCRYPTION_NONCE_LENGTH] {
+    let plaintext_hash: [u8; 32] = Sha256::digest(plaintext).into();
+    let mut input =
+        Vec::with_capacity(CACHE_ENCRYPTION_NONCE_DOMAIN.len() + 32 + context.cache_key.len() + 20);
+    input.extend_from_slice(CACHE_ENCRYPTION_NONCE_DOMAIN);
+    input.extend_from_slice(&plaintext_hash);
+    push_len_prefixed_string(&mut input, 1, Some(&context.cache_key));
+    push_u64(&mut input, context.chunk_index);
+    push_u64(&mut input, context.packet_offset);
+    let mac = hmac_sha256(nonce_key, &input);
+    let mut nonce = [0u8; CACHE_ENCRYPTION_NONCE_LENGTH];
+    nonce.copy_from_slice(&mac[..CACHE_ENCRYPTION_NONCE_LENGTH]);
+    nonce
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        out.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Hex-encoded record binding hash, exposed so callers (e.g. the JS cache
+/// layer, via the wasm bindings) can fold the exact same record-identity
+/// notion the encryption itself uses into a pre-decode, record-scoped cache
+/// lookup key, without reimplementing the identity hash.
+pub fn cache_encryption_record_binding_hash_hex(descriptor: &RecordDescriptor) -> Result<String> {
+    Ok(hex_encode(&cache_encryption_record_binding_hash(
+        descriptor,
+    )?))
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed: [u8; 32] = Sha256::digest(key).into();
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0u8; BLOCK_SIZE];
+    let mut outer_pad = [0u8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] = key_block[index] ^ 0x36;
+        outer_pad[index] = key_block[index] ^ 0x5c;
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(data);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+fn hkdf_sha256_32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let prk = hmac_sha256(salt, ikm);
+    let mut okm_input = Vec::with_capacity(info.len() + 1);
+    okm_input.extend_from_slice(info);
+    okm_input.push(1);
+    hmac_sha256(&prk, &okm_input)
+}
+
+pub fn cache_encryption_aad(
+    descriptor: &RecordDescriptor,
+    context: &CacheEncryptionContext,
+) -> Result<Vec<u8>> {
+    let binding_hash = cache_encryption_record_binding_hash(descriptor)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(CACHE_ENCRYPTION_AAD_DOMAIN);
+    push_u8(&mut out, context.protocol_version);
+    push_u8(&mut out, context.cache_format_version);
+    out.extend_from_slice(&binding_hash);
+    push_len_prefixed_string(&mut out, 1, Some(&context.cache_store_name));
+    push_len_prefixed_string(&mut out, 2, Some(&context.cache_key));
+    push_u64(&mut out, context.chunk_index);
+    push_u64(&mut out, context.packet_offset);
+    push_u64(
+        &mut out,
+        u64::try_from(context.plaintext_length).context("plaintext length exceeds u64")?,
+    );
+    push_len_prefixed_string(&mut out, 3, Some(&context.codec_identifier));
+    Ok(out)
+}
+
+pub fn encrypt_cache_envelope(
+    descriptor: &RecordDescriptor,
+    context: &CacheEncryptionContext,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    if plaintext.is_empty() {
+        bail!("cache plaintext must not be empty");
+    }
+    if plaintext.len() != context.plaintext_length {
+        bail!("cache plaintext length mismatch");
+    }
+    if !descriptor
+        .cache_encryption
+        .as_ref()
+        .is_some_and(|value| value.validate().is_ok())
+    {
+        return Err(anyhow::anyhow!(
+            "record descriptor is missing a valid cache encryption descriptor"
+        ));
+    }
+
+    let key = derive_cache_encryption_key(descriptor)?;
+    let nonce_key = derive_cache_nonce_key(descriptor)?;
+    let nonce = derive_cache_nonce(&nonce_key, context, plaintext);
+    let aad = cache_encryption_aad(descriptor, context)?;
+    let ciphertext = XChaCha20Poly1305::new(Key::from_slice(&key))
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            AeadPayload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("failed to encrypt cache payload"))?;
+
+    let envelope = CacheEncryptionEnvelope {
+        version: CACHE_ENCRYPTION_ENVELOPE_VERSION,
+        algorithm: CACHE_ENCRYPTION_ENVELOPE_ALGORITHM_XCHACHA20POLY1305,
+        flags: 0,
+        record_binding_hash: cache_encryption_record_binding_hash(descriptor)?,
+        chunk_index: context.chunk_index,
+        packet_offset: context.packet_offset,
+        plaintext_length: u32::try_from(plaintext.len()).context("plaintext length exceeds u32")?,
+        nonce,
+        ciphertext,
+    };
+    envelope.encode()
+}
+
+pub fn decrypt_cache_envelope(
+    descriptor: &RecordDescriptor,
+    context: &CacheEncryptionContext,
+    envelope_bytes: &[u8],
+) -> Result<Vec<u8>> {
+    let envelope = CacheEncryptionEnvelope::parse(envelope_bytes)?;
+    let expected_binding_hash = cache_encryption_record_binding_hash(descriptor)?;
+    if envelope.record_binding_hash != expected_binding_hash {
+        bail!("record binding hash mismatch");
+    }
+    let mut resolved_context = context.clone();
+    resolved_context.chunk_index = envelope.chunk_index;
+    resolved_context.packet_offset = envelope.packet_offset;
+    resolved_context.plaintext_length = envelope.plaintext_length as usize;
+    let key = derive_cache_encryption_key(descriptor)?;
+    let aad = cache_encryption_aad(descriptor, &resolved_context)?;
+    XChaCha20Poly1305::new(Key::from_slice(&key))
+        .decrypt(
+            XNonce::from_slice(&envelope.nonce),
+            AeadPayload {
+                msg: &envelope.ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("cache authentication failed"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +722,44 @@ impl SignedReleaseReference {
     }
 }
 
+pub fn encode_cache_encryption_descriptor(
+    cache_encryption: &CacheEncryptionDescriptor,
+) -> Result<Vec<u8>> {
+    cache_encryption.validate()?;
+    let mut out = Vec::with_capacity(4 + CACHE_ENCRYPTION_SECRET_LENGTH);
+    out.push(cache_encryption.version);
+    out.push(cache_encryption.algorithm.wire_code());
+    out.push(cache_encryption.key_derivation.wire_code());
+    out.push(
+        u8::try_from(cache_encryption.secret.len())
+            .context("cache encryption secret exceeds u8")?,
+    );
+    out.extend_from_slice(cache_encryption.secret());
+    Ok(out)
+}
+
+pub fn decode_cache_encryption_descriptor(bytes: &[u8]) -> Result<CacheEncryptionDescriptor> {
+    if bytes.len() < 4 {
+        bail!("cache encryption descriptor is truncated");
+    }
+    let version = bytes[0];
+    let algorithm = CacheEncryptionAlgorithm::from_wire_code(bytes[1])?;
+    let key_derivation = CacheKeyDerivation::from_wire_code(bytes[2])?;
+    let secret_len = usize::from(bytes[3]);
+    let secret = bytes[4..].to_vec();
+    if secret_len != secret.len() {
+        bail!("cache encryption secret length mismatch");
+    }
+    let descriptor = CacheEncryptionDescriptor {
+        version,
+        algorithm,
+        key_derivation,
+        secret,
+    };
+    descriptor.validate()?;
+    Ok(descriptor)
+}
+
 /// Decoded BRD1 carrier descriptor.
 ///
 /// `record_profile` identifies the canonical Bitneedle carrier profile used to
@@ -165,14 +783,31 @@ pub struct RecordDescriptor {
     pub artwork_credit: Option<String>,
     pub canonical_url: Option<String>,
     pub created_at: Option<u64>,
+    /// Phonographic (℗) copyright year — the P-line year shown in credits.
+    pub copyright_year: Option<u16>,
+    /// Phonographic (℗) copyright holder text (e.g. the artist, optionally with
+    /// a licensing clause). Distinct from `label` (the record label).
+    pub copyright_holder: Option<String>,
     pub signed_release_reference: Option<SignedReleaseReference>,
     pub bsc_pointer: Option<Vec<u8>>,
     pub tone_spans: Vec<ToneSpanDescriptor>,
+    pub cache_encryption: Option<CacheEncryptionDescriptor>,
 }
 
 impl RecordDescriptor {
     pub fn b_value(&self) -> f64 {
         f64::from_bits(self.b_value_bits)
+    }
+
+    pub fn cache_encryption(&self) -> Option<&CacheEncryptionDescriptor> {
+        self.cache_encryption.as_ref()
+    }
+
+    pub fn validate_cache_encryption(&self) -> Result<()> {
+        if let Some(cache_encryption) = self.cache_encryption.as_ref() {
+            cache_encryption.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -316,7 +951,8 @@ pub fn release_id_to_text(bytes: [u8; RELEASE_ID_LENGTH]) -> String {
         chars[index] = CROCKFORD_BASE32[(value & 0x1f) as usize];
         value >>= 5;
     }
-    let mut text = String::with_capacity(RELEASE_ID_TAGGED_PREFIX.len() + RELEASE_ID_ULID_TEXT_LENGTH);
+    let mut text =
+        String::with_capacity(RELEASE_ID_TAGGED_PREFIX.len() + RELEASE_ID_ULID_TEXT_LENGTH);
     text.push_str(RELEASE_ID_TAGGED_PREFIX);
     text.push_str(std::str::from_utf8(&chars).expect("Crockford Base32 alphabet is ASCII"));
     text
@@ -331,14 +967,11 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
     }
 
     let version = bytes[4];
-    let payload_len =
-        u16::from_be_bytes(bytes[5..7].try_into().expect("slice length")) as usize;
-    let segment_count =
-        u16::from_be_bytes(bytes[7..9].try_into().expect("slice length")) as usize;
+    let payload_len = u16::from_be_bytes(bytes[5..7].try_into().expect("slice length")) as usize;
+    let segment_count = u16::from_be_bytes(bytes[7..9].try_into().expect("slice length")) as usize;
     let segment_stream_len =
         u16::from_be_bytes(bytes[9..11].try_into().expect("slice length")) as usize;
-    let b_value_bits =
-        u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
+    let b_value_bits = u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
 
     if payload_len < RECORD_DESCRIPTOR_PREFIX_LENGTH || payload_len > bytes.len() {
         bail!("record descriptor payload length is invalid");
@@ -357,9 +990,7 @@ pub fn validate_tone_span(span: &ToneSpanDescriptor, index: usize) -> Result<()>
     if span.byte_length == 0 {
         bail!("tone span {index} byte length must be greater than zero");
     }
-    if !(TONED_MIN_BITS_PER_PIXEL..=TONED_MAX_BITS_PER_PIXEL)
-        .contains(&span.bits_per_pixel)
-    {
+    if !(TONED_MIN_BITS_PER_PIXEL..=TONED_MAX_BITS_PER_PIXEL).contains(&span.bits_per_pixel) {
         bail!(
             "tone span {index} bits per pixel must be between {} and {}",
             TONED_MIN_BITS_PER_PIXEL,
@@ -390,8 +1021,7 @@ pub fn resolve_tone_spans(
             .byte_length
             .checked_mul(8)
             .context("tone span bit length overflow")?;
-        let pixel_count =
-            bit_length.div_ceil(usize::from(span.bits_per_pixel));
+        let pixel_count = bit_length.div_ceil(usize::from(span.bits_per_pixel));
 
         resolved.push(ResolvedToneSpan {
             index,
@@ -415,9 +1045,7 @@ pub fn resolve_tone_spans(
 
     if let Some(expected) = expected_byte_length {
         if byte_offset != expected {
-            bail!(
-                "tone spans cover {byte_offset} bytes, expected {expected}"
-            );
+            bail!("tone spans cover {byte_offset} bytes, expected {expected}");
         }
     }
 
@@ -451,8 +1079,7 @@ pub fn encode_toned_carrier_map(
     for span in spans {
         push_varuint(
             &mut out,
-            u64::try_from(span.byte_length)
-                .context("tone span byte length exceeds u64")?,
+            u64::try_from(span.byte_length).context("tone span byte length exceeds u64")?,
         );
         out.extend_from_slice(&span.base);
         out.push(span.luma_tolerance);
@@ -480,22 +1107,16 @@ pub fn decode_toned_carrier_map(
 
     let mut spans = Vec::with_capacity(count);
     for index in 0..count {
-        let byte_length = usize::try_from(
-            cursor.read_varuint("tone span byte length")?,
-        )
-        .context("tone span byte length exceeds usize")?;
+        let byte_length = usize::try_from(cursor.read_varuint("tone span byte length")?)
+            .context("tone span byte length exceeds usize")?;
         let base = [
             cursor.read_u8("tone span base red")?,
             cursor.read_u8("tone span base green")?,
             cursor.read_u8("tone span base blue")?,
         ];
-        let luma_tolerance =
-            cursor.read_u8("tone span luma tolerance")?;
-        let bits_per_pixel =
-            cursor.read_u8("tone span bits per pixel")?;
-        let ordering = ToneOrdering::from_wire_code(
-            cursor.read_u8("tone span ordering")?,
-        )?;
+        let luma_tolerance = cursor.read_u8("tone span luma tolerance")?;
+        let bits_per_pixel = cursor.read_u8("tone span bits per pixel")?;
+        let ordering = ToneOrdering::from_wire_code(cursor.read_u8("tone span ordering")?)?;
 
         let span = ToneSpanDescriptor {
             byte_length,
@@ -594,9 +1215,12 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut artwork_credit = None;
     let mut canonical_url = None;
     let mut created_at = None;
+    let mut copyright_year = None;
+    let mut copyright_holder = None;
     let mut signed_release_reference = None;
     let mut bsc_pointer = None;
     let mut tone_spans = None;
+    let mut cache_encryption = None;
 
     while offset < body.len() {
         if parsed_segments >= prefix.segment_count {
@@ -668,11 +1292,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                     "payload encoding",
                 )?
             }
-            SEGMENT_TITLE => assign_once(
-                &mut title,
-                decode_optional_text(payload, "title")?,
-                "title",
-            )?,
+            SEGMENT_TITLE => {
+                assign_once(&mut title, decode_optional_text(payload, "title")?, "title")?
+            }
             SEGMENT_ARTIST => assign_once(
                 &mut artist,
                 decode_optional_text(payload, "artist")?,
@@ -693,11 +1315,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 decode_optional_text(payload, "catalog number")?,
                 "catalog number",
             )?,
-            SEGMENT_LABEL => assign_once(
-                &mut label,
-                decode_optional_text(payload, "label")?,
-                "label",
-            )?,
+            SEGMENT_LABEL => {
+                assign_once(&mut label, decode_optional_text(payload, "label")?, "label")?
+            }
             SEGMENT_ARTWORK_CREDIT => assign_once(
                 &mut artwork_credit,
                 decode_optional_text(payload, "artwork credit")?,
@@ -718,12 +1338,26 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                     "created-at timestamp",
                 )?
             }
+            SEGMENT_COPYRIGHT_YEAR => {
+                if payload.len() != 2 {
+                    bail!("copyright-year segment has invalid length");
+                }
+                assign_once(
+                    &mut copyright_year,
+                    u16::from_be_bytes(payload.try_into().expect("slice length")),
+                    "copyright year",
+                )?
+            }
+            SEGMENT_COPYRIGHT_HOLDER => assign_once(
+                &mut copyright_holder,
+                decode_optional_text(payload, "copyright holder")?,
+                "copyright holder",
+            )?,
             SEGMENT_SIGNED_RELEASE_REFERENCE => {
                 if signed_release_reference.is_some() {
                     bail!("duplicate signed release reference segment");
                 }
-                signed_release_reference =
-                    Some(decode_signed_release_reference(payload)?);
+                signed_release_reference = Some(decode_signed_release_reference(payload)?);
             }
             SEGMENT_BSC_POINTER => {
                 if bsc_pointer.is_some() {
@@ -739,6 +1373,12 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                     bail!("duplicate toned carrier map segment");
                 }
                 tone_spans = Some(decode_toned_carrier_map(payload, None)?);
+            }
+            SEGMENT_CACHE_ENCRYPTION => {
+                if cache_encryption.is_some() {
+                    bail!("duplicate cache encryption segment");
+                }
+                cache_encryption = Some(decode_cache_encryption_descriptor(payload)?);
             }
             _ => bail!("unsupported canonical record descriptor segment type {kind}"),
         }
@@ -769,12 +1409,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         bail!("decoded invalid b_value");
     }
 
-    let record_profile =
-        record_profile.context("record profile segment is missing")?;
-    let stream_byte_length = stream_byte_length
-        .context("stream byte length segment is missing")?;
-    let payload_encoding =
-        payload_encoding.context("payload encoding segment is missing")?;
+    let record_profile = record_profile.context("record profile segment is missing")?;
+    let stream_byte_length = stream_byte_length.context("stream byte length segment is missing")?;
+    let payload_encoding = payload_encoding.context("payload encoding segment is missing")?;
     let tone_spans = tone_spans.unwrap_or_default();
 
     match payload_encoding.as_str() {
@@ -807,9 +1444,12 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         artwork_credit: artwork_credit.flatten(),
         canonical_url: canonical_url.flatten(),
         created_at,
+        copyright_year,
+        copyright_holder: copyright_holder.flatten(),
         signed_release_reference,
         bsc_pointer,
         tone_spans,
+        cache_encryption,
     })
 }
 
@@ -833,11 +1473,7 @@ fn decode_text(payload: &[u8], label: &str) -> Result<String> {
     Ok(value)
 }
 
-fn assign_once<T>(
-    destination: &mut Option<T>,
-    value: T,
-    label: &str,
-) -> Result<()> {
+fn assign_once<T>(destination: &mut Option<T>, value: T, label: &str) -> Result<()> {
     if destination.is_some() {
         bail!("duplicate {label} segment");
     }
@@ -879,7 +1515,9 @@ impl<'a> ByteCursor<'a> {
             .get(self.offset..end)
             .with_context(|| format!("{label} is truncated"))?;
         self.offset = end;
-        Ok(u16::from_be_bytes(bytes.try_into().expect("length checked")))
+        Ok(u16::from_be_bytes(
+            bytes.try_into().expect("length checked"),
+        ))
     }
 
     fn read_varuint(&mut self, label: &str) -> Result<u64> {
@@ -904,9 +1542,7 @@ impl<'a> ByteCursor<'a> {
                 if consumed > 1 {
                     let minimum = 1u64 << (7 * (consumed - 1));
                     if value < minimum {
-                        bail!(
-                            "{label} uses non-canonical overlong varuint encoding"
-                        );
+                        bail!("{label} uses non-canonical overlong varuint encoding");
                     }
                 }
                 return Ok(value);
@@ -938,6 +1574,50 @@ impl<'a> ByteCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    fn test_descriptor(secret: Vec<u8>) -> RecordDescriptor {
+        RecordDescriptor {
+            version: RECORD_DESCRIPTOR_VERSION,
+            checksum_protected: true,
+            b_value_bits: 1.0f64.to_bits(),
+            record_profile: RECORD_PROFILE_SINGLE45.to_string(),
+            stream_byte_length: 4096,
+            payload_encoding: PAYLOAD_ENCODING_RGB.to_string(),
+            title: Some("Title".to_string()),
+            artist: Some("Artist".to_string()),
+            release_id: Some([0x11; RELEASE_ID_LENGTH]),
+            catalog_number: Some("CAT-1".to_string()),
+            label: Some("Label".to_string()),
+            artwork_credit: Some("Credit".to_string()),
+            canonical_url: Some("https://example.invalid/release".to_string()),
+            created_at: Some(1_700_000_000),
+            copyright_year: Some(2006),
+            copyright_holder: Some("Artist".to_string()),
+            signed_release_reference: None,
+            bsc_pointer: Some(vec![1, 2, 3, 4]),
+            tone_spans: Vec::new(),
+            cache_encryption: Some(CacheEncryptionDescriptor {
+                version: CACHE_ENCRYPTION_DESCRIPTOR_VERSION,
+                algorithm: CacheEncryptionAlgorithm::XChaCha20Poly1305,
+                key_derivation: CacheKeyDerivation::HkdfSha256,
+                secret,
+            }),
+        }
+    }
+
+    fn test_context() -> CacheEncryptionContext {
+        CacheEncryptionContext {
+            protocol_version: 1,
+            cache_format_version: 1,
+            cache_store_name: "opus-chunks".to_string(),
+            cache_key: "0123456789abcdef".to_string(),
+            chunk_index: 7,
+            packet_offset: 2048,
+            plaintext_length: 12,
+            codec_identifier: "soundkit_opus_packets".to_string(),
+        }
+    }
 
     #[test]
     fn record_profile_codes_round_trip() {
@@ -976,9 +1656,7 @@ mod tests {
 
     #[test]
     fn release_id_rejects_values_above_the_ulid_range() {
-        assert!(
-            release_id_to_bytes("rel_Z1ARZ3NDEKTSV4RRFFQ69G5FAV").is_err()
-        );
+        assert!(release_id_to_bytes("rel_Z1ARZ3NDEKTSV4RRFFQ69G5FAV").is_err());
     }
 
     #[test]
@@ -1021,10 +1699,8 @@ mod tests {
             },
         ];
 
-        let bytes =
-            encode_toned_carrier_map(&spans, Some(1537)).unwrap();
-        let decoded =
-            decode_toned_carrier_map(&bytes, Some(1537)).unwrap();
+        let bytes = encode_toned_carrier_map(&spans, Some(1537)).unwrap();
+        let decoded = decode_toned_carrier_map(&bytes, Some(1537)).unwrap();
 
         assert_eq!(decoded, spans);
     }
@@ -1074,4 +1750,136 @@ mod tests {
         assert!(decode_toned_carrier_map(&bytes, None).is_err());
     }
 
+    #[test]
+    fn cache_encryption_descriptor_round_trips_through_json() {
+        let descriptor = CacheEncryptionDescriptor {
+            version: CACHE_ENCRYPTION_DESCRIPTOR_VERSION,
+            algorithm: CacheEncryptionAlgorithm::XChaCha20Poly1305,
+            key_derivation: CacheKeyDerivation::HkdfSha256,
+            secret: vec![7u8; CACHE_ENCRYPTION_SECRET_LENGTH],
+        };
+        let json = serde_json::to_string(&descriptor).unwrap();
+        let decoded: CacheEncryptionDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, descriptor);
+    }
+
+    #[test]
+    fn cache_encryption_secret_must_be_32_bytes() {
+        let mut descriptor = CacheEncryptionDescriptor {
+            version: CACHE_ENCRYPTION_DESCRIPTOR_VERSION,
+            algorithm: CacheEncryptionAlgorithm::XChaCha20Poly1305,
+            key_derivation: CacheKeyDerivation::HkdfSha256,
+            secret: vec![0u8; 31],
+        };
+        assert!(descriptor.validate().is_err());
+        descriptor.secret = vec![0u8; 32];
+        assert!(descriptor.validate().is_ok());
+    }
+
+    #[test]
+    fn cache_encryption_descriptor_rejects_malformed_base64url() {
+        let json = r#"{"version":1,"algorithm":"xchacha20-poly1305","keyDerivation":"hkdf-sha256","secret":"not base64"}"#;
+        assert!(serde_json::from_str::<CacheEncryptionDescriptor>(json).is_err());
+    }
+
+    #[test]
+    fn cache_encryption_descriptor_rejects_wrong_secret_length() {
+        let json = format!(
+            r#"{{"version":1,"algorithm":"xchacha20-poly1305","keyDerivation":"hkdf-sha256","secret":"{}"}}"#,
+            URL_SAFE_NO_PAD.encode([1u8; 31])
+        );
+        let parsed: CacheEncryptionDescriptor = serde_json::from_str(&json).unwrap();
+        assert!(parsed.validate().is_err());
+    }
+
+    #[test]
+    fn old_descriptors_without_cache_encryption_still_decode() {
+        let descriptor = test_descriptor(vec![9u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let json = serde_json::to_string(&descriptor).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("cacheEncryption");
+        let decoded: RecordDescriptor = serde_json::from_value(value).unwrap();
+        assert!(decoded.cache_encryption.is_none());
+    }
+
+    #[test]
+    fn cache_encryption_key_derivation_is_stable_and_bindable() {
+        let descriptor = test_descriptor(vec![1u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let key_a = derive_cache_encryption_key(&descriptor).unwrap();
+        let key_b = derive_cache_encryption_key(&descriptor).unwrap();
+        assert_eq!(key_a, key_b);
+
+        let mut other_secret = descriptor.clone();
+        other_secret.cache_encryption.as_mut().unwrap().secret =
+            vec![2u8; CACHE_ENCRYPTION_SECRET_LENGTH];
+        assert_ne!(key_a, derive_cache_encryption_key(&other_secret).unwrap());
+
+        let mut other_record = descriptor.clone();
+        other_record.release_id = Some([0x22; RELEASE_ID_LENGTH]);
+        assert_ne!(key_a, derive_cache_encryption_key(&other_record).unwrap());
+    }
+
+    #[test]
+    fn cache_encryption_envelope_round_trips() {
+        let descriptor = test_descriptor(vec![3u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let context = test_context();
+        let plaintext = b"opus-packets";
+        let envelope = encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+        let decrypted = decrypt_cache_envelope(&descriptor, &context, &envelope).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn cache_encryption_envelope_rejects_tampering() {
+        let descriptor = test_descriptor(vec![5u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let context = test_context();
+        let plaintext = b"opus-packets";
+        let mut envelope = encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+
+        envelope[CacheEncryptionEnvelope::HEADER_LENGTH] ^= 1;
+        assert!(decrypt_cache_envelope(&descriptor, &context, &envelope).is_err());
+
+        let mut nonce_tampered = encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+        nonce_tampered[60] ^= 1;
+        assert!(decrypt_cache_envelope(&descriptor, &context, &nonce_tampered).is_err());
+
+        let mut binding_tampered =
+            encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+        binding_tampered[8] ^= 1;
+        assert!(decrypt_cache_envelope(&descriptor, &context, &binding_tampered).is_err());
+    }
+
+    #[test]
+    fn cache_encryption_nonce_is_deterministic_and_content_bound() {
+        let descriptor = test_descriptor(vec![9u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let context = test_context();
+        let plaintext = b"opus-packets";
+
+        let envelope_a = encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+        let envelope_b = encrypt_cache_envelope(&descriptor, &context, plaintext).unwrap();
+        assert_eq!(
+            envelope_a, envelope_b,
+            "same (record, plaintext, context) must produce byte-identical envelopes"
+        );
+
+        let other_plaintext = b"opus-packet$";
+        assert_eq!(other_plaintext.len(), plaintext.len());
+        let envelope_c = encrypt_cache_envelope(&descriptor, &context, other_plaintext).unwrap();
+        assert_ne!(
+            envelope_a, envelope_c,
+            "different plaintext must not reuse the same nonce/ciphertext"
+        );
+    }
+
+    #[test]
+    fn cache_encryption_record_binding_hash_hex_differs_per_record() {
+        let descriptor_a = test_descriptor(vec![1u8; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let mut descriptor_b = descriptor_a.clone();
+        descriptor_b.release_id = Some([0x33; RELEASE_ID_LENGTH]);
+
+        let hash_a = cache_encryption_record_binding_hash_hex(&descriptor_a).unwrap();
+        let hash_b = cache_encryption_record_binding_hash_hex(&descriptor_b).unwrap();
+        assert_eq!(hash_a.len(), 64);
+        assert_ne!(hash_a, hash_b);
+    }
 }

@@ -1,0 +1,1024 @@
+// Copyright © Wavey, Inc.
+// Licensed under the Wavey Artist Source Licence.
+// Patent pending. All patent rights are reserved except as expressly granted by the licence.
+// Commercial licensing: licence@yl.vin
+
+#![doc = include_str!("../README.md")]
+
+use anyhow::{bail, Result};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+static BALANCED_CACHE: OnceLock<Mutex<HashMap<([u8; 3], u64), TonedConfig>>> = OnceLock::new();
+static PALETTE_CACHE: OnceLock<Mutex<HashMap<TonedConfig, Arc<TonedPalette>>>> = OnceLock::new();
+
+/// Number of RGB pixels needed to carry `byte_length` bytes at 3 bytes per pixel.
+pub fn pixel_count_for_byte_length(byte_length: usize) -> usize {
+    byte_length.div_ceil(3)
+}
+
+/// Recovers the byte stream packed into the RGB channels of an RGBA buffer,
+/// skipping fully transparent pixels. When `byte_length` is given the result
+/// is truncated to that length.
+pub fn rgba_to_bytes(rgba: &[u8], byte_length: Option<usize>) -> Result<Vec<u8>> {
+    if rgba.len() % 4 != 0 {
+        bail!("RGBA length must be divisible by 4");
+    }
+
+    let mut bytes = Vec::with_capacity((rgba.len() / 4) * 3);
+
+    for chunk in rgba.chunks_exact(4) {
+        if chunk[3] == 0 {
+            continue;
+        }
+
+        bytes.extend_from_slice(&chunk[..3]);
+    }
+
+    if let Some(byte_length) = byte_length {
+        if byte_length > bytes.len() {
+            bail!("requested byte length exceeds decoded RGB payload");
+        }
+
+        bytes.truncate(byte_length);
+    }
+
+    Ok(bytes)
+}
+
+/// Packs a byte stream into opaque RGBA pixels, 3 bytes per pixel. The final
+/// pixel is zero-padded when the length is not a multiple of 3.
+pub fn bytes_to_rgba(bytes: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(pixel_count_for_byte_length(bytes.len()) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let mut pixel = [0u8, 0, 0, 255];
+        pixel[..chunk.len()].copy_from_slice(chunk);
+        rgba.extend_from_slice(&pixel);
+    }
+
+    rgba
+}
+
+/// Packs a byte stream into opaque grayscale RGBA pixels, one byte per pixel
+/// with R = G = B = byte.
+pub fn bytes_to_grayscale_rgba(bytes: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(bytes.len() * 4);
+
+    for &byte in bytes {
+        rgba.extend_from_slice(&[byte, byte, byte, 255]);
+    }
+
+    rgba
+}
+
+/// Recovers the byte stream packed into grayscale RGBA pixels, skipping fully
+/// transparent pixels. Fails if an opaque pixel is not grayscale (R = G = B).
+/// When `byte_length` is given the result is truncated to that length.
+pub fn grayscale_rgba_to_bytes(rgba: &[u8], byte_length: Option<usize>) -> Result<Vec<u8>> {
+    if rgba.len() % 4 != 0 {
+        bail!("RGBA length must be divisible by 4");
+    }
+
+    let mut bytes = Vec::with_capacity(rgba.len() / 4);
+
+    for chunk in rgba.chunks_exact(4) {
+        if chunk[3] == 0 {
+            continue;
+        }
+
+        if chunk[0] != chunk[1] || chunk[1] != chunk[2] {
+            bail!("pixel is not grayscale");
+        }
+
+        bytes.push(chunk[0]);
+    }
+
+    if let Some(byte_length) = byte_length {
+        if byte_length > bytes.len() {
+            bail!("requested byte length exceeds decoded grayscale payload");
+        }
+
+        bytes.truncate(byte_length);
+    }
+
+    Ok(bytes)
+}
+
+/// Copies the RGB channels of one pixel to another, leaving alpha untouched.
+pub fn copy_rgb(
+    source: &[u8],
+    source_pixel_index: usize,
+    target: &mut [u8],
+    target_pixel_index: usize,
+) {
+    let source_offset = source_pixel_index * 4;
+    let target_offset = target_pixel_index * 4;
+    target[target_offset] = source[source_offset];
+    target[target_offset + 1] = source[source_offset + 1];
+    target[target_offset + 2] = source[source_offset + 2];
+}
+
+/// Rec. 709 luma of a pixel in an RGBA buffer, in the 0.0–255.0 range.
+pub fn luma_rec709(data: &[u8], pixel_index: usize) -> f64 {
+    let offset = pixel_index * 4;
+    0.2126 * data[offset] as f64
+        + 0.7152 * data[offset + 1] as f64
+        + 0.0722 * data[offset + 2] as f64
+}
+
+fn rec709_luma_of(color: [u8; 3]) -> f64 {
+    0.2126 * color[0] as f64 + 0.7152 * color[1] as f64 + 0.0722 * color[2] as f64
+}
+
+/// Rec. 709 chroma (Cb, Cr) of a colour, signed and centred on 0.
+pub fn chroma_rec709(color: [u8; 3]) -> (f64, f64) {
+    let luma = rec709_luma_of(color);
+    let cb = (color[2] as f64 - luma) / 1.8556;
+    let cr = (color[0] as f64 - luma) / 1.5748;
+    (cb, cr)
+}
+
+fn chroma_distance(a: [u8; 3], b: [u8; 3]) -> f64 {
+    let (a_cb, a_cr) = chroma_rec709(a);
+    let (b_cb, b_cr) = chroma_rec709(b);
+    ((a_cb - b_cb).powi(2) + (a_cr - b_cr).powi(2)).sqrt()
+}
+
+/// How palette colours are ordered (and therefore which `2^bits_per_pixel`
+/// subset of the iso-luma candidates carries the data). Both orderings are
+/// deterministic, so the same config always rebuilds the same palette and the
+/// byte stream decodes exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ToneOrdering {
+    /// Closest RGB distance to the base tone first.
+    #[default]
+    BaseProximity,
+    /// Closest Rec. 709 chroma (Cb/Cr) distance to the base tone first. This
+    /// pulls the palette's average colour toward the base tone's hue instead
+    /// of the iso-luma set's centroid (which skews green at high luma).
+    ChromaProximity,
+}
+
+pub mod span;
+pub use span::{decode_toned_spans, encode_toned_spans, ToneRequest, ToneSpan, TonedRender};
+
+pub mod oklch;
+pub use oklch::{
+    adaptive_gap_tone_lightness, lighten_base_oklch, oklch_lightness, validate_gap_tone_lightness,
+};
+
+/// Configuration for a [`TonedPalette`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TonedConfig {
+    /// Base tone whose luma every pixel preserves (within `luma_tolerance`).
+    pub base: [u8; 3],
+    /// Allowed deviation, in rounded Rec. 709 luma steps, around the base
+    /// tone's luma. `0` keeps brightness exactly flat; larger values unlock
+    /// more colours (capacity) at the cost of brightness drift.
+    pub luma_tolerance: u8,
+    /// Bits encoded per pixel. The palette must contain at least
+    /// `2^bits_per_pixel` iso-luma colours, so this is bounded by
+    /// `luma_tolerance`. Higher means smaller output (fewer pixels).
+    pub bits_per_pixel: u32,
+    /// Which candidate colours make up the palette; see [`ToneOrdering`].
+    pub ordering: ToneOrdering,
+}
+
+impl TonedConfig {
+    /// Configuration from a CSS-style hex base tone (`#RRGGBB`, `#RGB`, or the
+    /// same without `#`).
+    pub fn from_hex(base: &str, luma_tolerance: u8, bits_per_pixel: u32) -> Self {
+        let hex = normalized_hex_color(Some(base));
+        let parse =
+            |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).unwrap_or(0);
+        Self {
+            base: [parse(1..3), parse(3..5), parse(5..7)],
+            luma_tolerance,
+            bits_per_pixel,
+            ordering: ToneOrdering::default(),
+        }
+    }
+
+    /// Picks the luma tolerance that best balances brightness drift against
+    /// colour cast for `base`, given a size budget.
+    ///
+    /// `max_size_factor` caps output size relative to raw 24-bit RGB packing
+    /// (e.g. `1.25` allows 25% more pixels) and fixes `bits_per_pixel` to the
+    /// smallest count that fits the budget. Within that budget, widening the
+    /// luma window adds candidate colours, letting [`ToneOrdering::ChromaProximity`]
+    /// keep only colours whose hue is near the base tone — less colour cast,
+    /// more brightness drift. This searches a tolerance ladder and minimises
+    ///
+    /// `cost = chroma error of the palette's mean colour + luma tolerance / 8`
+    ///
+    /// (both in 0–255-ish perceptual units; colour cast is much more visible
+    /// than brightness grain, hence the down-weighted luma term — it also
+    /// lets dark and very light base tones, whose luma windows clip against
+    /// the gamut edge, widen far enough to find same-hue colours). The result
+    /// is an ordinary
+    /// [`TonedConfig`]: rebuilding a palette from it is deterministic, so
+    /// encode and decode sides agree exactly.
+    pub fn balanced(base: [u8; 3], max_size_factor: f64) -> Result<Self> {
+        if !(max_size_factor >= 1.0) {
+            bail!("max size factor must be at least 1.0");
+        }
+
+        let cache_key = (base, max_size_factor.to_bits());
+        let cache = BALANCED_CACHE.get_or_init(Default::default);
+        if let Some(config) = cache.lock().unwrap().get(&cache_key) {
+            return Ok(*config);
+        }
+
+        let bits_per_pixel = ((24.0 / max_size_factor).ceil() as u32).clamp(1, 24);
+        let needed = 1usize << bits_per_pixel;
+
+        // Enumerate once at the widest tolerance we are willing to consider:
+        // the first ladder rung with ~8x the needed colours (3 extra bits of
+        // selection headroom), beyond which extra tolerance buys little tint.
+        const LADDER: [u8; 12] = [0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 255];
+        let max_tolerance = LADDER
+            .into_iter()
+            .find(|&tol| iso_luma_count(base, tol) >= needed.saturating_mul(8))
+            .unwrap_or(255);
+
+        // Precompute the chroma sort key once per candidate; recomputing it
+        // inside the comparator costs O(n log n) distance evaluations.
+        let base_luma = rec709_luma_of(base).round();
+        let mut candidates: Vec<(f64, f64, [u8; 3])> =
+            TonedPalette::enumerate_iso_luma(base, max_tolerance)
+                .into_iter()
+                .map(|c| {
+                    (
+                        chroma_distance(c, base),
+                        (rec709_luma_of(c) - base_luma).abs(),
+                        c,
+                    )
+                })
+                .collect();
+        candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+
+        let mut best: Option<(f64, u8)> = None;
+        for tol in LADDER.into_iter().filter(|&t| t <= max_tolerance) {
+            let mut sum = [0f64; 3];
+            let mut count = 0usize;
+            for &(_, luma_delta, color) in &candidates {
+                if luma_delta <= tol as f64 + 0.5 {
+                    for (s, &ch) in sum.iter_mut().zip(color.iter()) {
+                        *s += ch as f64;
+                    }
+                    count += 1;
+                    if count == needed {
+                        break;
+                    }
+                }
+            }
+            if count < needed {
+                continue;
+            }
+
+            let n = count as f64;
+            let mean = [
+                (sum[0] / n).round() as u8,
+                (sum[1] / n).round() as u8,
+                (sum[2] / n).round() as u8,
+            ];
+            let cost = chroma_distance(mean, base) + tol as f64 / 8.0;
+            if best.is_none_or(|(best_cost, _)| cost < best_cost) {
+                best = Some((cost, tol));
+            }
+        }
+
+        let Some((_, luma_tolerance)) = best else {
+            bail!(
+                "no luma tolerance up to ±{max_tolerance} yields the {needed} colours \
+                 needed for {bits_per_pixel} bits per pixel"
+            );
+        };
+
+        let config = Self {
+            base,
+            luma_tolerance,
+            bits_per_pixel,
+            ordering: ToneOrdering::ChromaProximity,
+        };
+        cache.lock().unwrap().insert(cache_key, config);
+        Ok(config)
+    }
+}
+
+/// Number of 8-bit RGB colours whose rounded Rec. 709 luma is within
+/// `luma_tolerance` of the base tone's, without materialising them.
+fn iso_luma_count(base: [u8; 3], luma_tolerance: u8) -> usize {
+    let target = rec709_luma_of(base).round();
+    let min = target - luma_tolerance as f64;
+    let max = target + luma_tolerance as f64;
+
+    let mut count = 0usize;
+    for r in 0..=255u16 {
+        for g in 0..=255u16 {
+            let rg = 0.2126 * r as f64 + 0.7152 * g as f64;
+            let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
+            let b_high = ((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16;
+            for b in b_low..=b_high.min(255) {
+                let luma = (rg + 0.0722 * b as f64).round();
+                if luma >= min && luma <= max {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// A palette of colours sharing (within `luma_tolerance` integer steps) the
+/// Rec. 709 luma of a base tone, ordered by closeness to that tone. Data is
+/// carried as chroma drift: each pixel encodes `bits_per_pixel` bits as an
+/// index into the palette, so brightness stays flat while hue/saturation
+/// wander only as far as the requested capacity demands.
+pub struct TonedPalette {
+    config: TonedConfig,
+    colors: Vec<[u8; 3]>,
+    index_of: HashMap<[u8; 3], u32>,
+}
+
+impl TonedPalette {
+    /// Every 8-bit RGB colour whose rounded luma is within `luma_tolerance`
+    /// of the base tone's, in enumeration order (unsorted).
+    fn enumerate_iso_luma(base: [u8; 3], luma_tolerance: u8) -> Vec<[u8; 3]> {
+        let target = rec709_luma_of(base).round();
+        let min = target - luma_tolerance as f64;
+        let max = target + luma_tolerance as f64;
+
+        let mut colors = Vec::new();
+        for r in 0..=255u16 {
+            for g in 0..=255u16 {
+                let rg = 0.2126 * r as f64 + 0.7152 * g as f64;
+                // round(rg + 0.0722 * b) must land in [min, max]
+                let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
+                let b_high = ((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16;
+                for b in b_low..=b_high.min(255) {
+                    let luma = (rg + 0.0722 * b as f64).round();
+                    if luma >= min && luma <= max {
+                        colors.push([r as u8, g as u8, b as u8]);
+                    }
+                }
+            }
+        }
+        colors
+    }
+
+    /// Every 8-bit RGB colour whose rounded luma is within `luma_tolerance`
+    /// of the base tone's, sorted by RGB distance to the base tone.
+    pub fn candidates(base: [u8; 3], luma_tolerance: u8) -> Vec<[u8; 3]> {
+        let mut colors = Self::enumerate_iso_luma(base, luma_tolerance);
+        let distance = |c: &[u8; 3]| -> u32 {
+            c.iter()
+                .zip(base.iter())
+                .map(|(&a, &b)| (a as i32 - b as i32).pow(2) as u32)
+                .sum()
+        };
+        colors.sort_by_key(|c| (distance(c), c[0], c[1], c[2]));
+        colors
+    }
+
+    pub fn new(base: [u8; 3], luma_tolerance: u8, bits_per_pixel: u32) -> Result<Self> {
+        Self::from_config(TonedConfig {
+            base,
+            luma_tolerance,
+            bits_per_pixel,
+            ordering: ToneOrdering::default(),
+        })
+    }
+
+    /// Palette tuned by [`TonedConfig::balanced`]: the best chroma/luminance
+    /// balance for `base` within the given size budget.
+    pub fn balanced(base: [u8; 3], max_size_factor: f64) -> Result<Self> {
+        Self::from_config(TonedConfig::balanced(base, max_size_factor)?)
+    }
+
+    /// Process-wide cached palette for `config`. Palettes are deterministic
+    /// and immutable, so encode, decode and metadata layers share one build
+    /// per config instead of recomputing it.
+    pub fn shared(config: TonedConfig) -> Result<Arc<Self>> {
+        let cache = PALETTE_CACHE.get_or_init(Default::default);
+        if let Some(palette) = cache.lock().unwrap().get(&config) {
+            return Ok(palette.clone());
+        }
+        let palette = Arc::new(Self::from_config(config)?);
+        cache.lock().unwrap().insert(config, palette.clone());
+        Ok(palette)
+    }
+
+    pub fn from_config(config: TonedConfig) -> Result<Self> {
+        let TonedConfig {
+            base,
+            luma_tolerance,
+            bits_per_pixel,
+            ordering,
+        } = config;
+
+        if !(1..=24).contains(&bits_per_pixel) {
+            bail!("bits per pixel must be between 1 and 24");
+        }
+
+        // Key every candidate once, partition the needed prefix with
+        // select_nth (O(n)) and only sort that prefix — identical result to
+        // a full sort + truncate, several times faster at palette sizes.
+        let key = |c: [u8; 3]| -> f64 {
+            match ordering {
+                ToneOrdering::ChromaProximity => chroma_distance(c, base),
+                ToneOrdering::BaseProximity => c
+                    .iter()
+                    .zip(base.iter())
+                    .map(|(&a, &b)| ((a as i32 - b as i32).pow(2)) as f64)
+                    .sum(),
+            }
+        };
+        let mut keyed: Vec<(f64, [u8; 3])> = Self::enumerate_iso_luma(base, luma_tolerance)
+            .into_iter()
+            .map(|c| (key(c), c))
+            .collect();
+
+        let needed = 1usize << bits_per_pixel;
+        if keyed.len() < needed {
+            bail!(
+                "only {} colours share the base tone's luma (±{}); {} bits per pixel needs {}",
+                keyed.len(),
+                luma_tolerance,
+                bits_per_pixel,
+                needed
+            );
+        }
+        let compare =
+            |a: &(f64, [u8; 3]), b: &(f64, [u8; 3])| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if keyed.len() > needed {
+            keyed.select_nth_unstable_by(needed - 1, compare);
+            keyed.truncate(needed);
+        }
+        keyed.sort_unstable_by(compare);
+        let colors: Vec<[u8; 3]> = keyed.into_iter().map(|(_, c)| c).collect();
+
+        let index_of = colors
+            .iter()
+            .enumerate()
+            .map(|(index, &color)| (color, index as u32))
+            .collect();
+
+        Ok(Self {
+            config,
+            colors,
+            index_of,
+        })
+    }
+
+    /// The configuration this palette was built from. Rebuilding from it is
+    /// deterministic, so it is all a decoder needs.
+    pub fn config(&self) -> TonedConfig {
+        self.config
+    }
+
+    pub fn base(&self) -> [u8; 3] {
+        self.config.base
+    }
+
+    pub fn bits_per_pixel(&self) -> u32 {
+        self.config.bits_per_pixel
+    }
+
+    /// Mean colour of the palette — with uniform (compressed/encrypted) data
+    /// this is the tint the rendered image averages to.
+    pub fn mean_color(&self) -> [u8; 3] {
+        let n = self.colors.len().max(1) as f64;
+        let mut sum = [0f64; 3];
+        for color in &self.colors {
+            for (s, &ch) in sum.iter_mut().zip(color.iter()) {
+                *s += ch as f64;
+            }
+        }
+        [
+            (sum[0] / n).round() as u8,
+            (sum[1] / n).round() as u8,
+            (sum[2] / n).round() as u8,
+        ]
+    }
+
+    /// Palette colour at `index`.
+    pub fn color(&self, index: usize) -> [u8; 3] {
+        self.colors[index]
+    }
+
+    /// Palette index of an exact colour, if present.
+    pub fn index_of(&self, color: [u8; 3]) -> Option<u32> {
+        self.index_of.get(&color).copied()
+    }
+
+    /// Number of colours in the palette (`2^bits_per_pixel`).
+    pub fn len(&self) -> usize {
+        self.colors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.colors.is_empty()
+    }
+
+    /// RGB distance from the base tone to the farthest palette entry — how
+    /// far the chroma is allowed to drift.
+    pub fn max_drift(&self) -> f64 {
+        self.colors
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .zip(self.config.base.iter())
+                    .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// Packs a byte stream into opaque toned pixels, `bits_per_pixel` bits
+    /// per pixel. Trailing bits of the final pixel are zero-padded.
+    pub fn bytes_to_rgba(&self, bytes: &[u8]) -> Vec<u8> {
+        let bpp = self.config.bits_per_pixel;
+        let mask = (1u32 << bpp) - 1;
+        let pixel_count = (bytes.len() * 8).div_ceil(bpp as usize);
+        let mut rgba = Vec::with_capacity(pixel_count * 4);
+
+        let mut acc = 0u32;
+        let mut acc_bits = 0u32;
+        let emit = |index: u32, rgba: &mut Vec<u8>| {
+            let color = self.colors[index as usize];
+            rgba.extend_from_slice(&[color[0], color[1], color[2], 255]);
+        };
+
+        for &byte in bytes {
+            acc = (acc << 8) | byte as u32;
+            acc_bits += 8;
+            while acc_bits >= bpp {
+                emit((acc >> (acc_bits - bpp)) & mask, &mut rgba);
+                acc_bits -= bpp;
+                acc &= (1 << acc_bits) - 1;
+            }
+        }
+
+        if acc_bits > 0 {
+            emit((acc << (bpp - acc_bits)) & mask, &mut rgba);
+        }
+
+        rgba
+    }
+
+    /// Recovers the byte stream from toned pixels, skipping fully transparent
+    /// pixels. When `byte_length` is given the result is truncated to that
+    /// length.
+    pub fn rgba_to_bytes(&self, rgba: &[u8], byte_length: Option<usize>) -> Result<Vec<u8>> {
+        if rgba.len() % 4 != 0 {
+            bail!("RGBA length must be divisible by 4");
+        }
+
+        let bpp = self.config.bits_per_pixel;
+        let mut bytes = Vec::with_capacity(rgba.len() / 4 * bpp as usize / 8 + 1);
+        let mut acc = 0u32;
+        let mut acc_bits = 0u32;
+
+        for chunk in rgba.chunks_exact(4) {
+            if chunk[3] == 0 {
+                continue;
+            }
+
+            let Some(&index) = self.index_of.get(&[chunk[0], chunk[1], chunk[2]]) else {
+                bail!(
+                    "pixel #{:02X}{:02X}{:02X} is not in the toned palette",
+                    chunk[0],
+                    chunk[1],
+                    chunk[2]
+                );
+            };
+
+            acc = (acc << bpp) | index;
+            acc_bits += bpp;
+            while acc_bits >= 8 {
+                bytes.push((acc >> (acc_bits - 8)) as u8);
+                acc_bits -= 8;
+                acc &= (1 << acc_bits) - 1;
+            }
+        }
+
+        if let Some(byte_length) = byte_length {
+            if byte_length > bytes.len() {
+                bail!("requested byte length exceeds decoded toned payload");
+            }
+            bytes.truncate(byte_length);
+        }
+
+        Ok(bytes)
+    }
+}
+
+/// Side length of the smallest square that holds `pixel_count` pixels.
+pub fn square_side_for_pixel_count(pixel_count: usize) -> usize {
+    let mut side = (pixel_count as f64).sqrt() as usize;
+    while side * side < pixel_count {
+        side += 1;
+    }
+    side
+}
+
+/// Encodes an RGBA buffer as the smallest square PNG that fits its pixels,
+/// padding the remainder of the square with fully transparent pixels (which
+/// the byte decoders skip).
+pub fn rgba_to_square_png(rgba: &[u8]) -> Result<Vec<u8>> {
+    if rgba.len() % 4 != 0 {
+        bail!("RGBA length must be divisible by 4");
+    }
+
+    let pixel_count = rgba.len() / 4;
+    if pixel_count == 0 {
+        bail!("cannot encode an empty RGBA buffer as PNG");
+    }
+
+    let side = square_side_for_pixel_count(pixel_count);
+    let mut padded = rgba.to_vec();
+    padded.resize(side * side * 4, 0);
+
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, side as u32, side as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&padded)?;
+    writer.finish()?;
+
+    Ok(out)
+}
+
+/// Decodes a PNG produced by [`rgba_to_square_png`] back into its RGBA buffer
+/// (including any transparent padding pixels).
+pub fn square_png_to_rgba(png_bytes: &[u8]) -> Result<Vec<u8>> {
+    let decoder = png::Decoder::new(png_bytes);
+    let mut reader = decoder.read_info()?;
+    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer)?;
+
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        bail!("expected an 8-bit RGBA PNG");
+    }
+
+    buffer.truncate(info.buffer_size());
+    Ok(buffer)
+}
+
+/// Normalizes a CSS-style hex colour (with or without `#`, 3 or 6 digits) to
+/// uppercase `#RRGGBB`, falling back to white on invalid input.
+pub fn normalized_hex_color(value: Option<&str>) -> String {
+    let raw = value.unwrap_or("").trim().trim_start_matches('#');
+    let expanded = if raw.len() == 3 {
+        raw.chars().flat_map(|ch| [ch, ch]).collect::<String>()
+    } else {
+        raw.to_string()
+    };
+    let parsed = u32::from_str_radix(&expanded, 16).unwrap_or(0xff_ffff);
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        (parsed >> 16) & 0xff,
+        (parsed >> 8) & 0xff,
+        parsed & 0xff
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_round_trip_through_rgba() {
+        let bytes = [1u8, 2, 3, 4, 5];
+        let rgba = bytes_to_rgba(&bytes);
+        assert_eq!(rgba.len(), 8);
+        assert_eq!(rgba_to_bytes(&rgba, Some(bytes.len())).unwrap(), bytes);
+    }
+
+    #[test]
+    fn rgba_to_bytes_skips_transparent_pixels() {
+        let rgba = [1, 2, 3, 255, 9, 9, 9, 0, 4, 5, 6, 255];
+        assert_eq!(rgba_to_bytes(&rgba, None).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+        assert!(rgba_to_bytes(&rgba, Some(7)).is_err());
+    }
+
+    #[test]
+    fn bytes_round_trip_through_grayscale_rgba() {
+        let bytes = [0u8, 0x5a, 0xff, 0x12];
+        let rgba = bytes_to_grayscale_rgba(&bytes);
+        assert_eq!(rgba.len(), bytes.len() * 4);
+        assert_eq!(grayscale_rgba_to_bytes(&rgba, None).unwrap(), bytes);
+    }
+
+    #[test]
+    fn grayscale_rgba_to_bytes_rejects_color_and_skips_transparent() {
+        let rgba = [7, 7, 7, 255, 9, 9, 9, 0, 3, 3, 3, 255];
+        assert_eq!(grayscale_rgba_to_bytes(&rgba, None).unwrap(), vec![7, 3]);
+        assert_eq!(grayscale_rgba_to_bytes(&rgba, Some(1)).unwrap(), vec![7]);
+        assert!(grayscale_rgba_to_bytes(&rgba, Some(3)).is_err());
+        assert!(grayscale_rgba_to_bytes(&[1, 2, 3, 255], None).is_err());
+    }
+
+    #[test]
+    fn westside_ecdc_rgb_vs_grayscale_sizes() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.ecdc"
+        ))
+        .unwrap();
+
+        let rgb = bytes_to_rgba(&bytes);
+        let grayscale = bytes_to_grayscale_rgba(&bytes);
+
+        println!("ecdc payload: {} bytes", bytes.len());
+        println!(
+            "rgb colour:   {} pixels, {} bytes RGBA",
+            rgb.len() / 4,
+            rgb.len()
+        );
+        println!(
+            "grayscale:    {} pixels, {} bytes RGBA",
+            grayscale.len() / 4,
+            grayscale.len()
+        );
+
+        assert_eq!(rgb.len() / 4, pixel_count_for_byte_length(bytes.len()));
+        assert_eq!(grayscale.len() / 4, bytes.len());
+        assert_eq!(rgba_to_bytes(&rgb, Some(bytes.len())).unwrap(), bytes);
+        assert_eq!(grayscale_rgba_to_bytes(&grayscale, None).unwrap(), bytes);
+
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/fixtures");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        for (name, rgba) in [("rgb", &rgb), ("grayscale", &grayscale)] {
+            let side = square_side_for_pixel_count(rgba.len() / 4);
+            let png_bytes = rgba_to_square_png(rgba).unwrap();
+            let path = out_dir.join(format!("lori-asha-westside-single45-hq.{name}.png"));
+            std::fs::write(&path, &png_bytes).unwrap();
+            println!(
+                "{name} png:    {side}x{side}, {} bytes -> {}",
+                png_bytes.len(),
+                path.display()
+            );
+
+            let decoded = square_png_to_rgba(&png_bytes).unwrap();
+            assert_eq!(
+                &decoded[..rgba.len()],
+                &rgba[..],
+                "{name} png did not round-trip"
+            );
+            assert!(decoded[rgba.len()..].iter().all(|&b| b == 0));
+        }
+    }
+
+    const PINK: [u8; 3] = [0xff, 0xc0, 0xcb];
+
+    #[test]
+    fn toned_palette_round_trips() {
+        let palette = TonedPalette::new(PINK, 0, 8).unwrap();
+        let bytes = [0u8, 0x5a, 0xff, 0x12, 0x34];
+        let rgba = palette.bytes_to_rgba(&bytes);
+        assert_eq!(rgba.len() / 4, 5); // 40 bits at 8 bits/pixel
+
+        for chunk in rgba.chunks_exact(4) {
+            let luma = rec709_luma_of([chunk[0], chunk[1], chunk[2]]).round();
+            assert_eq!(luma, rec709_luma_of(PINK).round());
+        }
+
+        assert_eq!(
+            palette.rgba_to_bytes(&rgba, Some(bytes.len())).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn westside_ecdc_pink_toned_size() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.ecdc"
+        ))
+        .unwrap();
+
+        // ±16 luma yields ~2.2M iso-tone colours -> 21 bits/pixel (1.14x RGB).
+        let tolerance = 16u8;
+        let target_bits = 21;
+        let palette = TonedPalette::new(PINK, tolerance, target_bits).unwrap();
+
+        println!(
+            "selected: ±{tolerance} luma, {} bits/pixel, max chroma drift {:.1} RGB units",
+            palette.bits_per_pixel(),
+            palette.max_drift()
+        );
+
+        let rgba = palette.bytes_to_rgba(&bytes);
+        let rgb_pixels = pixel_count_for_byte_length(bytes.len());
+        let toned_pixels = rgba.len() / 4;
+        println!(
+            "rgb colour: {rgb_pixels} pixels, pink toned: {toned_pixels} pixels ({:.2}x)",
+            toned_pixels as f64 / rgb_pixels as f64
+        );
+        assert!(
+            toned_pixels * 3 <= rgb_pixels * 4,
+            "more than 1/3 larger than RGB"
+        );
+
+        let png_bytes = rgba_to_square_png(&rgba).unwrap();
+        let side = square_side_for_pixel_count(toned_pixels);
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/fixtures");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let path = out_dir.join("lori-asha-westside-single45-hq.pink-toned.png");
+        std::fs::write(&path, &png_bytes).unwrap();
+        println!(
+            "pink png:   {side}x{side}, {} bytes -> {}",
+            png_bytes.len(),
+            path.display()
+        );
+
+        let decoded = square_png_to_rgba(&png_bytes).unwrap();
+        assert_eq!(
+            palette.rgba_to_bytes(&decoded, Some(bytes.len())).unwrap(),
+            bytes,
+            "pink toned png did not round-trip"
+        );
+    }
+
+    #[test]
+    // Sweeps the full luma-tolerance range building palettes up to ~16M
+    // colours; runs for well over a minute, so it is excluded from the
+    // default suite. Run explicitly with `--ignored` when needed.
+    #[ignore]
+    fn pink_iso_luma_capacity_ceiling() {
+        for tol in [0u8, 2, 4, 8, 16, 32, 64, 128, 255] {
+            let n = TonedPalette::candidates(PINK, tol).len();
+            println!(
+                "±{tol:>3} luma: {n:>8} colours, max {:.1} bits/pixel, size {:.2}x RGB",
+                (n as f64).log2().floor(),
+                24.0 / (n as f64).log2().floor()
+            );
+        }
+    }
+
+    /// Deterministic pseudo-random payload, uniform like compressed/encrypted data.
+    fn test_payload(len: usize) -> Vec<u8> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn balanced_config_trades_luma_for_chroma() {
+        let config = TonedConfig::balanced(PINK, 1.25).unwrap();
+        assert_eq!(config.ordering, ToneOrdering::ChromaProximity);
+        assert_eq!(config.bits_per_pixel, 20); // ceil(24 / 1.25)
+        assert!(
+            config.luma_tolerance > 0,
+            "flat luma cannot fit 2^20 colours"
+        );
+
+        let balanced = TonedPalette::from_config(config).unwrap();
+        let unbalanced = TonedPalette::new(PINK, config.luma_tolerance, 21).unwrap();
+        let err = |p: &TonedPalette| chroma_distance(p.mean_color(), PINK);
+        println!(
+            "balanced: ±{} luma, mean {:?} (chroma err {:.1}); 21-bit base-proximity mean {:?} (chroma err {:.1})",
+            config.luma_tolerance,
+            balanced.mean_color(),
+            err(&balanced),
+            unbalanced.mean_color(),
+            err(&unbalanced)
+        );
+        assert!(
+            err(&balanced) < err(&unbalanced),
+            "balanced palette should sit closer to the base tone's chroma"
+        );
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn chroma_ordered_palette_round_trips_exactly() {
+        let config = TonedConfig {
+            base: PINK,
+            luma_tolerance: 16,
+            bits_per_pixel: 21,
+            ordering: ToneOrdering::ChromaProximity,
+        };
+        let palette = TonedPalette::from_config(config).unwrap();
+        let bytes = test_payload(4093); // prime length -> partial final pixel
+
+        let rgba = palette.bytes_to_rgba(&bytes);
+        assert_eq!(
+            palette.rgba_to_bytes(&rgba, Some(bytes.len())).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn balanced_palette_rebuilt_from_config_decodes_exactly() {
+        let bytes = test_payload(10_007);
+        let encoder = TonedPalette::balanced(PINK, 1.25).unwrap();
+        let rgba = encoder.bytes_to_rgba(&bytes);
+
+        // The decode side only knows the config; rebuilding must yield the
+        // identical palette and recover the byte stream exactly.
+        let decoder = TonedPalette::from_config(encoder.config()).unwrap();
+        assert_eq!(
+            decoder.rgba_to_bytes(&rgba, Some(bytes.len())).unwrap(),
+            bytes
+        );
+
+        // And through PNG encode/decode, including transparent padding.
+        let png_bytes = rgba_to_square_png(&rgba).unwrap();
+        let decoded_rgba = square_png_to_rgba(&png_bytes).unwrap();
+        assert_eq!(
+            decoder
+                .rgba_to_bytes(&decoded_rgba, Some(bytes.len()))
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn balanced_palettes_round_trip_across_bases_and_budgets() {
+        for base in [
+            PINK,
+            [0x20, 0x60, 0xc0],
+            [0x10, 0x10, 0x10],
+            [0xf0, 0xf0, 0xf0],
+        ] {
+            for max_size_factor in [1.2, 1.5, 3.0] {
+                let palette = TonedPalette::balanced(base, max_size_factor).unwrap();
+                assert!(24.0 / palette.bits_per_pixel() as f64 <= max_size_factor + 1e-9);
+
+                let bytes = test_payload(257);
+                let rgba = palette.bytes_to_rgba(&bytes);
+                assert_eq!(
+                    palette.rgba_to_bytes(&rgba, Some(bytes.len())).unwrap(),
+                    bytes,
+                    "round trip failed for base {base:?} at {max_size_factor}x"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // slow: builds large iso-luma palettes; run with --ignored
+    fn westside_ecdc_balanced_pink() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.ecdc"
+        ))
+        .unwrap();
+
+        let palette = TonedPalette::balanced(PINK, 1.25).unwrap();
+        let config = palette.config();
+        println!(
+            "balanced: ±{} luma, {} bits/pixel, mean colour {:?}, max drift {:.1}",
+            config.luma_tolerance,
+            config.bits_per_pixel,
+            palette.mean_color(),
+            palette.max_drift()
+        );
+
+        let rgba = palette.bytes_to_rgba(&bytes);
+        let png_bytes = rgba_to_square_png(&rgba).unwrap();
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/fixtures");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let path = out_dir.join("lori-asha-westside-single45-hq.pink-balanced.png");
+        std::fs::write(&path, &png_bytes).unwrap();
+        let side = square_side_for_pixel_count(rgba.len() / 4);
+        println!(
+            "balanced png: {side}x{side}, {} bytes -> {}",
+            png_bytes.len(),
+            path.display()
+        );
+
+        let decoded = square_png_to_rgba(&png_bytes).unwrap();
+        let decoder = TonedPalette::from_config(config).unwrap();
+        assert_eq!(
+            decoder.rgba_to_bytes(&decoded, Some(bytes.len())).unwrap(),
+            bytes,
+            "balanced pink png did not round-trip"
+        );
+    }
+
+    #[test]
+    fn hex_colors_normalize() {
+        assert_eq!(normalized_hex_color(Some("#abc")), "#AABBCC");
+        assert_eq!(normalized_hex_color(Some("112233")), "#112233");
+        assert_eq!(normalized_hex_color(None), "#FFFFFF");
+        assert_eq!(normalized_hex_color(Some("nope")), "#FFFFFF");
+    }
+}

@@ -1,0 +1,209 @@
+WAVEY ARTIST SOURCE LICENCE
+
+Version 0.1
+
+Copyright © Wavey, Inc.
+
+This software and its source code are made available under the following terms.
+
+This is a source-available licence. It is not an open-source licence.
+
+1. Definitions
+
+"You" means the individual or legal entity exercising permissions under this licence.
+
+"Software" means the software, source code, object code, compiled binaries, WebAssembly modules, documentation, examples, and other materials distributed with this licence.
+
+"Artist" means an individual person who creates, performs, composes, produces, or records music, sound, visual art, or another original creative work.
+
+"Artist Entity" means a company or other entity that is owned and controlled by one or more Artists and exists primarily to manage or release those Artists' own creative work.
+
+"Artist Work" means music, recordings, performances, artwork, metadata, and other creative material created or lawfully controlled by an Artist.
+
+"Artist Record" means a record or other media object created with the Software from Artist Work.
+
+"Commercial Authoring Use" means using the Software or its functionality:
+
+(a) to create records for another person or organisation as a service;
+
+(b) within the operations of a record label, publisher, distributor, platform, agency, manufacturer, technology company, or other business;
+
+(c) in a product, hosted service, API, SDK, application, platform, or commercial workflow;
+
+(d) to provide record-authoring functionality to third parties;
+
+(e) to develop, operate, or support a competing record-authoring technology or service; or
+
+(f) primarily to commercialise the Software or the authoring technology itself.
+
+"Wavey Patent Rights" means patent claims owned or controlled by Wavey, Inc. that would necessarily be infringed by using the Software, with or without permitted modifications, solely for the activities expressly permitted by this licence. Wavey Patent Rights do not include claims infringed only because of functionality newly introduced by a modification.
+
+2. Permission for Artists
+
+Subject to this licence, Wavey, Inc. grants an Artist or Artist Entity a worldwide, non-exclusive, non-transferable, non-sublicensable, royalty-free licence to:
+
+(a) access, copy, compile, run, and modify the Software;
+
+(b) use the Software to create Artist Records from their own Artist Work;
+
+(c) collaborate with other Artists to create Artist Records from their collective Artist Work;
+
+(d) publish, distribute, perform, display, license, and sell those Artist Records; and
+
+(e) receive royalties and other income from those Artist Records.
+
+An Artist does not lose these permissions merely because the Artist earns money from their creative work, operates through an Artist Entity, uses a distributor, or later licenses a completed Artist Record to a record label.
+
+3. Limited Patent Permission
+
+Wavey, Inc. grants an Artist or Artist Entity a limited licence under the Wavey Patent Rights solely to use the Software to create Artist Records as permitted by Section 2.
+
+This patent permission includes the right to publish, distribute, license, and sell completed Artist Records.
+
+It does not include the right to commercially exploit the Software, offer authoring services, operate authoring technology for third parties, or practise the patented authoring methods outside the permissions expressly granted by this licence.
+
+Except for this limited permission, Wavey, Inc. reserves all rights under its patents and patent applications.
+
+No patent rights are granted by implication, estoppel, or otherwise.
+
+4. Non-Commercial Development and Research
+
+Any person or organisation may access, study, copy, compile, run, and modify the Software solely for personal experimentation, education, evaluation, or non-commercial research.
+
+This permission does not allow the sale of services, products, or records created using the Software.
+
+The broader permissions in Section 2 apply only to Artists and Artist Entities.
+
+5. Prohibited Uses
+
+Without a separate written licence from Wavey, Inc., You must not:
+
+(a) make any Commercial Authoring Use of the Software;
+
+(b) use the Software as part of the operations of a record label, publisher, distributor, aggregator, platform, agency, manufacturer, technology company, or other business that is not an Artist Entity;
+
+(c) use the Software to create records for clients, customers, signed artists, or unrelated third parties;
+
+(d) offer access to the Software or its authoring functionality through a website, application, API, hosted service, or other product;
+
+(e) sell, license, rent, sublicense, or commercially distribute the Software or a modified version of it;
+
+(f) use the Software or its source code to build or improve a competing authoring product, format, platform, or service;
+
+(g) remove copyright, licence, attribution, or patent notices;
+
+(h) claim that an output is officially issued, certified, verified, or endorsed by Wavey, Inc., Bitneedle, or YL.VIN without separate permission; or
+
+(i) assist another person or organisation in carrying out a prohibited use.
+
+6. Record Labels
+
+A record label or other music company may receive, distribute, market, license, or sell a completed Artist Record created independently by an Artist.
+
+A record label or music company may not itself:
+
+(a) use or operate the Software;
+
+(b) direct employees or contractors to use the Software;
+
+(c) incorporate the Software into its production workflow;
+
+(d) commission the use of the Software as an authoring service; or
+
+(e) provide the Software to its artists.
+
+Those activities require a separate commercial licence from Wavey, Inc.
+
+A record label or other music company may not avoid these restrictions by requiring, funding, directing, or arranging for an Artist, Artist Entity, employee, contractor, or intermediary to operate the Software on its behalf.
+
+7. Contractors
+
+An Artist may allow an individual technical contractor to use the Software solely on that Artist's behalf for a specific Artist Record, provided that:
+
+(a) the contractor complies with this licence;
+
+(b) the contractor does not offer Bitneedle authoring as a general service;
+
+(c) the contractor does not retain or reuse the Software for another client; and
+
+(d) the Artist remains responsible for the contractor's use.
+
+8. Modifications
+
+Permitted modifications remain subject to this licence.
+
+You may reproduce and distribute the Software, including modified versions, provided that:
+
+(a) the Software and modifications remain subject to this licence;
+
+(b) You include a complete copy of this licence;
+
+(c) You retain all copyright, patent, attribution, and licence notices;
+
+(d) You clearly identify files that You modified; and
+
+(e) distribution does not itself constitute a Commercial Authoring Use.
+
+You may submit modifications to Wavey, Inc., but Wavey, Inc. is not required to accept or use them.
+
+No additional patent permission is granted for functionality introduced by a modification.
+
+9. Ownership
+
+Wavey, Inc. retains all rights in the Software and Wavey Patent Rights.
+
+Artists retain all rights they otherwise hold in their Artist Work and creative contributions to Artist Records.
+
+Using the Software does not transfer ownership of an Artist's music, recording, performance, artwork, or metadata to Wavey, Inc.
+
+10. No Trademark Permission
+
+This licence grants no right to use the names, logos, or trademarks of Wavey, Inc., Bitneedle, or YL.VIN.
+
+Accurate statements that an output is compatible with the publicly documented Bitneedle format are permitted.
+
+11. Patent Notice
+
+The Software may implement technology that is the subject of pending patent applications.
+
+"Patent pending" does not mean that a patent has been granted.
+
+The availability of the Software or its source code does not grant any patent rights beyond the limited patent permission expressly stated in Section 3.
+
+12. Termination
+
+Your permissions under this licence terminate automatically if You breach it.
+
+After termination, You must stop using and delete the Software and all modified copies in Your possession or control.
+
+Termination does not prevent continued distribution or sale of Artist Records lawfully created before the breach, unless those Artist Records were created through the breach.
+
+13. No Warranty
+
+The Software is provided "as is," without warranties or conditions of any kind, to the maximum extent permitted by applicable law.
+
+Wavey, Inc. does not promise that the Software is error-free, secure, suitable for a particular purpose, or free from third-party claims.
+
+Wavey, Inc. does not promise that any pending patent application will be granted or that any granted patent will remain valid.
+
+14. Liability
+
+To the maximum extent permitted by applicable law, Wavey, Inc. will not be liable for indirect, incidental, special, consequential, or punitive loss arising from use of the Software.
+
+Nothing in this licence excludes liability that cannot lawfully be excluded.
+
+15. Separate Commercial Licences
+
+Record labels, platforms, businesses, service providers, and other commercial users may request a separate licence from:
+
+licence@yl.vin
+
+Wavey, Inc. is not required to grant a commercial licence.
+
+16. Entire Licence
+
+Only the permissions expressly stated in this licence are granted.
+
+All other copyright, patent, trademark, and other rights are reserved.
+
+Wavey, Inc. may release later versions of the Software under different terms. A version already received remains governed by the licence supplied with that version.

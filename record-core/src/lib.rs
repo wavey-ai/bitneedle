@@ -84,8 +84,7 @@ pub const MAX_CHUNKS: usize = u16::MAX as usize;
 pub const MAX_PAYLOAD_DESCRIPTORS: usize = u8::MAX as usize;
 pub const DEFAULT_PAYLOAD_DESCRIPTOR_INDEX: u8 = 0;
 
-pub const CHUNK_ENCRYPTION_DOMAIN: &[u8] =
-    b"bitneedle.record-stream.chunk-encryption.v1";
+pub const CHUNK_ENCRYPTION_DOMAIN: &[u8] = b"bitneedle.record-stream.chunk-encryption.v1";
 pub const CHUNK_ENCRYPTION_ALGORITHM_CHACHA20POLY1305: &str = "chacha20poly1305";
 pub const CHUNK_ENCRYPTION_NONCE_LENGTH: usize = 12;
 pub const CHUNK_ENCRYPTION_TAG_LENGTH: usize = 16;
@@ -802,9 +801,8 @@ pub fn build_spiral_mask(
             continue;
         }
 
-        let distance = (((i % width) as f64 - cx).powi(2)
-            + ((i / width) as f64 - cy).powi(2))
-        .sqrt();
+        let distance =
+            (((i % width) as f64 - cx).powi(2) + ((i / width) as f64 - cy).powi(2)).sqrt();
 
         if distance <= inner as f64 {
             continue;
@@ -866,10 +864,7 @@ pub fn concatenate_payload_entries(entries: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-pub fn validate_payload_entry_bytes(
-    descriptor: &PayloadDescriptor,
-    bytes: &[u8],
-) -> Result<()> {
+pub fn validate_payload_entry_bytes(descriptor: &PayloadDescriptor, bytes: &[u8]) -> Result<()> {
     if descriptor
         .container
         .eq_ignore_ascii_case(PAYLOAD_CONTAINER_GAP)
@@ -904,8 +899,7 @@ pub fn record_stream_header_end(bytes: &[u8]) -> Result<usize> {
         bail!("record stream magic is invalid");
     }
 
-    let metadata_len =
-        read_u32be(bytes, 4, "record stream metadata length")? as usize;
+    let metadata_len = read_u32be(bytes, 4, "record stream metadata length")? as usize;
     let end = RECORD_STREAM_HEADER_LENGTH
         .checked_add(metadata_len)
         .context("record stream metadata length overflow")?;
@@ -987,8 +981,8 @@ impl<'a> WireCursor<'a> {
         }
 
         let bytes = self.read_bytes(length, label)?;
-        let value = std::str::from_utf8(bytes)
-            .with_context(|| format!("{label} is not valid UTF-8"))?;
+        let value =
+            std::str::from_utf8(bytes).with_context(|| format!("{label} is not valid UTF-8"))?;
 
         if value.is_empty() {
             bail!("{label} must not be empty");
@@ -1210,14 +1204,11 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
     }
 
     let encrypted = flags & METADATA_FLAG_ENCRYPTED != 0;
-    let has_entry_descriptor_indexes =
-        flags & METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES != 0;
-    let has_track_entry_mappings =
-        flags & METADATA_FLAG_TRACK_ENTRY_MAPPINGS != 0;
+    let has_entry_descriptor_indexes = flags & METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES != 0;
+    let has_track_entry_mappings = flags & METADATA_FLAG_TRACK_ENTRY_MAPPINGS != 0;
     let has_track_gaps = flags & METADATA_FLAG_TRACK_GAPS != 0;
 
-    let descriptor_count =
-        cursor.read_u8("payload descriptor count")? as usize;
+    let descriptor_count = cursor.read_u8("payload descriptor count")? as usize;
 
     if descriptor_count == 0 {
         bail!("payload descriptor count must not be zero");
@@ -1232,8 +1223,7 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
     for descriptor_index in 0..descriptor_count {
         let container_code = cursor.read_u8("payload container code")?;
         let container = container_name(container_code, &mut cursor)?;
-        let descriptor_flags =
-            cursor.read_u8("payload descriptor flags")?;
+        let descriptor_flags = cursor.read_u8("payload descriptor flags")?;
 
         if descriptor_flags & !DESCRIPTOR_KNOWN_FLAGS != 0 {
             bail!("payload descriptor {descriptor_index} contains unknown flags");
@@ -1301,8 +1291,7 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
         payload_descriptors.push(descriptor);
     }
 
-    let entry_count =
-        cursor.read_u16be("payload entry count")? as usize;
+    let entry_count = cursor.read_u16be("payload entry count")? as usize;
 
     if entry_count == 0 {
         bail!("payload entry count must not be zero");
@@ -1311,26 +1300,21 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
     let mut payload_entries = Vec::with_capacity(entry_count);
 
     for entry_index in 0..entry_count {
-        let byte_length_u64 =
-            cursor.read_varuint("payload entry byte length")?;
-        let byte_length = usize::try_from(byte_length_u64)
-            .context("payload entry byte length exceeds usize")?;
+        let byte_length_u64 = cursor.read_varuint("payload entry byte length")?;
+        let byte_length =
+            usize::try_from(byte_length_u64).context("payload entry byte length exceeds usize")?;
 
         if byte_length == 0 {
             bail!("payload entry {entry_index} byte length must be greater than zero");
         }
 
-        let payload_descriptor_index =
-            if has_entry_descriptor_indexes {
-                cursor.read_u8("payload entry descriptor index")?
-            } else {
-                DEFAULT_PAYLOAD_DESCRIPTOR_INDEX
-            };
+        let payload_descriptor_index = if has_entry_descriptor_indexes {
+            cursor.read_u8("payload entry descriptor index")?
+        } else {
+            DEFAULT_PAYLOAD_DESCRIPTOR_INDEX
+        };
 
-        validate_payload_descriptor_index(
-            payload_descriptors.len(),
-            payload_descriptor_index,
-        )?;
+        validate_payload_descriptor_index(payload_descriptors.len(), payload_descriptor_index)?;
 
         payload_entries.push(PayloadEntryDescriptor {
             byte_length,
@@ -1348,20 +1332,15 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
 
     for track_index in 0..track_count {
         let title = cursor.read_string("track title")?;
-        let (first_revolution_index, revolution_count) =
-            if has_track_entry_mappings {
-                let first = usize::try_from(
-                    cursor.read_varuint("track first revolution index")?,
-                )
+        let (first_revolution_index, revolution_count) = if has_track_entry_mappings {
+            let first = usize::try_from(cursor.read_varuint("track first revolution index")?)
                 .context("track first revolution index exceeds usize")?;
-                let count = usize::try_from(
-                    cursor.read_varuint("track revolution count")?,
-                )
+            let count = usize::try_from(cursor.read_varuint("track revolution count")?)
                 .context("track revolution count exceeds usize")?;
-                (first, count)
-            } else {
-                (track_index, 1)
-            };
+            (first, count)
+        } else {
+            (track_index, 1)
+        };
 
         if revolution_count == 0 {
             bail!("track {track_index} revolution count must be greater than zero");
@@ -1392,18 +1371,15 @@ pub fn decode_record_stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadat
         track_gaps.reserve(track_gap_count);
 
         for gap_index in 0..track_gap_count {
-            let first_revolution_index = u32::try_from(
-                cursor.read_varuint("track gap first revolution index")?,
-            )
-            .context("track gap first revolution index exceeds u32")?;
-            let revolution_count = u32::try_from(
-                cursor.read_varuint("track gap revolution count")?,
-            )
-            .context("track gap revolution count exceeds u32")?;
-            let after_track_index = u32::try_from(
-                cursor.read_varuint("track gap after track index")?,
-            )
-            .context("track gap after track index exceeds u32")?;
+            let first_revolution_index =
+                u32::try_from(cursor.read_varuint("track gap first revolution index")?)
+                    .context("track gap first revolution index exceeds u32")?;
+            let revolution_count =
+                u32::try_from(cursor.read_varuint("track gap revolution count")?)
+                    .context("track gap revolution count exceeds u32")?;
+            let after_track_index =
+                u32::try_from(cursor.read_varuint("track gap after track index")?)
+                    .context("track gap after track index exceeds u32")?;
 
             if revolution_count == 0 {
                 bail!("track gap {gap_index} revolution count must be greater than zero");
@@ -1469,23 +1445,15 @@ pub fn stream_metadata(bytes: &[u8]) -> Result<RecordStreamMetadata> {
     record_stream_metadata(bytes)
 }
 
-pub fn chunk_nonce_length_from_metadata(
-    metadata: &RecordStreamMetadata,
-) -> Result<Option<usize>> {
-    Ok(metadata
-        .encrypted
-        .then_some(CHUNK_ENCRYPTION_NONCE_LENGTH))
+pub fn chunk_nonce_length_from_metadata(metadata: &RecordStreamMetadata) -> Result<Option<usize>> {
+    Ok(metadata.encrypted.then_some(CHUNK_ENCRYPTION_NONCE_LENGTH))
 }
 
-pub fn chunk_nonce_length_from_metadata_bytes(
-    bytes: &[u8],
-) -> Result<Option<usize>> {
+pub fn chunk_nonce_length_from_metadata_bytes(bytes: &[u8]) -> Result<Option<usize>> {
     chunk_nonce_length_from_metadata(&decode_record_stream_metadata(bytes)?)
 }
 
-pub fn payload_descriptor_count_from_metadata(
-    metadata: &RecordStreamMetadata,
-) -> Result<usize> {
+pub fn payload_descriptor_count_from_metadata(metadata: &RecordStreamMetadata) -> Result<usize> {
     if metadata.payload_descriptors.is_empty() {
         bail!("payload descriptor list must not be empty");
     }
@@ -1497,22 +1465,13 @@ pub fn payload_descriptor_count_from_metadata(
     Ok(metadata.payload_descriptors.len())
 }
 
-pub fn payload_descriptor_count_from_metadata_bytes(
-    bytes: &[u8],
-) -> Result<usize> {
-    payload_descriptor_count_from_metadata(
-        &decode_record_stream_metadata(bytes)?,
-    )
+pub fn payload_descriptor_count_from_metadata_bytes(bytes: &[u8]) -> Result<usize> {
+    payload_descriptor_count_from_metadata(&decode_record_stream_metadata(bytes)?)
 }
 
-pub fn validate_payload_descriptor_index(
-    count: usize,
-    index: u8,
-) -> Result<()> {
+pub fn validate_payload_descriptor_index(count: usize, index: u8) -> Result<()> {
     if index as usize >= count {
-        bail!(
-            "payload descriptor index {index} is out of range for {count} descriptors"
-        );
+        bail!("payload descriptor index {index} is out of range for {count} descriptors");
     }
 
     Ok(())
@@ -1542,10 +1501,7 @@ fn resolve_payload_entries_with_total(
             bail!("payload entry {index} byte length must be greater than zero");
         }
 
-        validate_payload_descriptor_index(
-            descriptor_count,
-            entry.payload_descriptor_index,
-        )?;
+        validate_payload_descriptor_index(descriptor_count, entry.payload_descriptor_index)?;
 
         resolved.push(ResolvedPayloadEntry {
             index,
@@ -1561,9 +1517,7 @@ fn resolve_payload_entries_with_total(
 
     if let Some(expected) = expected {
         if offset != expected {
-            bail!(
-                "payload entry byte ranges cover {offset} bytes, expected {expected}"
-            );
+            bail!("payload entry byte ranges cover {offset} bytes, expected {expected}");
         }
     }
 
@@ -1581,9 +1535,7 @@ pub fn validate_payload_entries_metadata(
     )
 }
 
-pub fn validate_track_listing_metadata(
-    metadata: &RecordStreamMetadata,
-) -> Result<()> {
+pub fn validate_track_listing_metadata(metadata: &RecordStreamMetadata) -> Result<()> {
     if metadata.tracks.is_empty() {
         bail!("track list must not be empty");
     }
@@ -1652,21 +1604,17 @@ pub fn validate_track_listing_metadata(
     crate::tracks::validate_track_ranges(&ranges, &gap_ranges, &is_playable_revolution)
 }
 
-pub fn inspect_record_stream(
-    document: &RecordStream,
-) -> Result<RecordStreamInspection> {
+pub fn inspect_record_stream(document: &RecordStream) -> Result<RecordStreamInspection> {
     let resolved = resolve_payload_entries(
         &document.metadata.payload_entries,
         document.metadata.payload_descriptors.len(),
     )?;
 
-    let payload_byte_length = resolved
-        .iter()
-        .try_fold(0usize, |total, entry| {
-            total
-                .checked_add(entry.byte_length)
-                .context("payload byte length overflow")
-        })?;
+    let payload_byte_length = resolved.iter().try_fold(0usize, |total, entry| {
+        total
+            .checked_add(entry.byte_length)
+            .context("payload byte length overflow")
+    })?;
 
     Ok(RecordStreamInspection {
         format: "bitneedle-record-stream",
@@ -1721,8 +1669,7 @@ pub fn inspect_record_stream(
 /// over the exact BRS1 metadata bytes. There is no per-chunk index, count,
 /// or descriptor index to bind, since none of those are stored on the wire.
 pub fn chunk_encryption_aad(metadata_bytes: &[u8]) -> Result<Vec<u8>> {
-    let metadata_len =
-        u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
+    let metadata_len = u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
 
     let mut out = Vec::with_capacity(CHUNK_ENCRYPTION_DOMAIN.len() + 4 + metadata_bytes.len());
     out.extend_from_slice(CHUNK_ENCRYPTION_DOMAIN);
@@ -1768,12 +1715,7 @@ pub fn decrypt_record_stream_payloads_chacha20poly1305(
                 .as_ref()
                 .context("encrypted chunk is missing nonce")?;
 
-            decrypt_chunk_payload_chacha20poly1305(
-                key,
-                nonce,
-                &aad,
-                &chunk.payload,
-            )
+            decrypt_chunk_payload_chacha20poly1305(key, nonce, &aad, &chunk.payload)
         })
         .collect()
 }
@@ -1809,10 +1751,7 @@ fn validate_chunk_descriptors_against_entries(
     chunks: &[Chunk],
     plaintext_payload_length: Option<usize>,
 ) -> Result<()> {
-    let resolved = validate_payload_entries_metadata(
-        metadata,
-        plaintext_payload_length,
-    )?;
+    let resolved = validate_payload_entries_metadata(metadata, plaintext_payload_length)?;
 
     if metadata.encrypted {
         return Ok(());
@@ -1845,8 +1784,7 @@ fn validate_chunk_descriptors_against_entries(
 
 pub fn parse_record_stream(bytes: &[u8]) -> Result<RecordStream> {
     let header_end = record_stream_header_end(bytes)?;
-    let metadata_bytes =
-        bytes[RECORD_STREAM_HEADER_LENGTH..header_end].to_vec();
+    let metadata_bytes = bytes[RECORD_STREAM_HEADER_LENGTH..header_end].to_vec();
     let metadata = decode_record_stream_metadata(&metadata_bytes)?;
 
     payload_descriptor_count_from_metadata(&metadata)?;
@@ -1879,11 +1817,7 @@ pub fn parse_record_stream(bytes: &[u8]) -> Result<RecordStream> {
         Some(chunks.iter().map(|chunk| chunk.payload.len()).sum())
     };
 
-    validate_chunk_descriptors_against_entries(
-        &metadata,
-        &chunks,
-        plaintext_payload_length,
-    )?;
+    validate_chunk_descriptors_against_entries(&metadata, &chunks, plaintext_payload_length)?;
 
     if !metadata.encrypted {
         let payload_bytes = chunks
@@ -1891,24 +1825,17 @@ pub fn parse_record_stream(bytes: &[u8]) -> Result<RecordStream> {
             .flat_map(|chunk| chunk.payload.iter().copied())
             .collect::<Vec<_>>();
 
-        let resolved = validate_payload_entries_metadata(
-            &metadata,
-            Some(payload_bytes.len()),
-        )?;
+        let resolved = validate_payload_entries_metadata(&metadata, Some(payload_bytes.len()))?;
 
         for entry in resolved {
-            let descriptor = &metadata.payload_descriptors
-                [entry.payload_descriptor_index as usize];
+            let descriptor = &metadata.payload_descriptors[entry.payload_descriptor_index as usize];
             let end = entry
                 .byte_offset
                 .checked_add(entry.byte_length)
                 .context("payload entry range overflow")?;
 
-            validate_payload_entry_bytes(
-                descriptor,
-                &payload_bytes[entry.byte_offset..end],
-            )
-            .with_context(|| format!("payload entry {} is invalid", entry.index))?;
+            validate_payload_entry_bytes(descriptor, &payload_bytes[entry.byte_offset..end])
+                .with_context(|| format!("payload entry {} is invalid", entry.index))?;
         }
     }
 
@@ -1960,7 +1887,11 @@ pub fn chunk_payload_ranges(bytes: &[u8]) -> Result<Vec<Range<usize>>> {
 
 pub fn record_stream_payload_bytes(document: &RecordStream) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        document.chunks.iter().map(|chunk| chunk.payload.len()).sum(),
+        document
+            .chunks
+            .iter()
+            .map(|chunk| chunk.payload.len())
+            .sum(),
     );
 
     for chunk in &document.chunks {
@@ -2175,7 +2106,8 @@ pub fn build_programme_map(
     // position comes from the equal-area spiral the renderer fills; without a
     // known profile we degrade to the linear pixel fraction.
     let total_payload_bytes = payload_bytes.len().max(1) as f64;
-    let byte_fraction_of = |byte_offset: usize| (byte_offset as f64 / total_payload_bytes).clamp(0.0, 1.0);
+    let byte_fraction_of =
+        |byte_offset: usize| (byte_offset as f64 / total_payload_bytes).clamp(0.0, 1.0);
     let radii = match record_profile {
         Some(profile) => {
             let geometry = describe_record_profile(profile)?;
@@ -2209,7 +2141,10 @@ pub fn build_programme_map(
         let samples = entry_sample_count(descriptor, entry_bytes)
             .with_context(|| format!("invalid payload entry {}", entry.index))?;
         if samples == 0 {
-            bail!("payload entry {} resolved to zero logical samples", entry.index);
+            bail!(
+                "payload entry {} resolved to zero logical samples",
+                entry.index
+            );
         }
         let start_sample = cursor_sample;
         let end_sample = cursor_sample
@@ -2259,12 +2194,13 @@ pub fn build_programme_map(
                 });
             }
             None => {
-                let after_track_number = gap_after_track_of_entry[entry.index].with_context(|| {
-                    format!(
-                        "payload entry {} is not covered by any track or track gap",
-                        entry.index
-                    )
-                })?;
+                let after_track_number =
+                    gap_after_track_of_entry[entry.index].with_context(|| {
+                        format!(
+                            "payload entry {} is not covered by any track or track gap",
+                            entry.index
+                        )
+                    })?;
                 regions.push(ProgrammeRegion {
                     kind: ProgrammeRegionKind::Gap { after_track_number },
                     start_sample,
@@ -2444,8 +2380,8 @@ mod tests {
         push_varuint(&mut out, 0);
         push_varuint(&mut out, 1);
         push_u16be(&mut out, 2); // track gap count
-        // Second gap's first_revolution_index (2) is not greater than the
-        // first gap's (also 2): rejected as not strictly ascending.
+                                 // Second gap's first_revolution_index (2) is not greater than the
+                                 // first gap's (also 2): rejected as not strictly ascending.
         push_varuint(&mut out, 2);
         push_varuint(&mut out, 1);
         push_varuint(&mut out, 0);
@@ -2522,16 +2458,10 @@ mod tests {
     #[test]
     fn toned_capacity_is_not_rgb_capacity() {
         let bytes = 216_786;
-        let rgb = payload_pixel_count_for_encoding(
-            bytes,
-            PayloadPixelEncoding::Rgb24,
-        )
-        .unwrap();
+        let rgb = payload_pixel_count_for_encoding(bytes, PayloadPixelEncoding::Rgb24).unwrap();
         let toned = payload_pixel_count_for_encoding(
             bytes,
-            PayloadPixelEncoding::Toned {
-                bits_per_pixel: 20,
-            },
+            PayloadPixelEncoding::Toned { bits_per_pixel: 20 },
         )
         .unwrap();
 
@@ -2574,12 +2504,25 @@ mod tests {
     }
 
     fn gap_entry_bytes() -> Vec<u8> {
-        gap::encode_gap_payload(24_000, 256, 0x1234_5678).unwrap()
+        let sample_count = 24_000u64;
+        let payload_byte_length = 256usize;
+        let seed = 0x1234_5678u32;
+
+        let mut out = Vec::with_capacity(payload_byte_length);
+        out.extend_from_slice(gap::GAP_MAGIC);
+        out.push(gap::GAP_VERSION);
+        out.push(0); // flags
+        out.extend_from_slice(&[0u8, 0u8]); // reserved
+        out.extend_from_slice(&sample_count.to_be_bytes());
+        out.extend_from_slice(&(payload_byte_length as u64).to_be_bytes());
+        out.extend_from_slice(&seed.to_be_bytes());
+        out.resize(payload_byte_length, 0);
+        gap::fill_gap_quiet_filler(seed, &mut out[gap::GAP_HEADER_LENGTH..]);
+        out
     }
 
     fn headerless_ecdc_test_entry(fill: u8, payload_len: usize) -> Vec<u8> {
-        let payload_len =
-            u32::try_from(payload_len).expect("test ECDC payload length exceeds u32");
+        let payload_len = u32::try_from(payload_len).expect("test ECDC payload length exceeds u32");
 
         let mut entry = Vec::with_capacity(8 + payload_len as usize);
         entry.extend_from_slice(&payload_len.to_be_bytes());
@@ -2651,7 +2594,11 @@ mod tests {
         let document = RecordStream {
             metadata,
             metadata_bytes: Vec::new(),
-            chunks: vec![Chunk { payload, crc32: 0, nonce: None }],
+            chunks: vec![Chunk {
+                payload,
+                crc32: 0,
+                nonce: None,
+            }],
         };
 
         let map = build_programme_map(&document, Some("single45")).unwrap();
@@ -2661,7 +2608,10 @@ mod tests {
         // Region 0: Track A spanning two revolutions.
         assert_eq!(
             map.regions[0].kind,
-            ProgrammeRegionKind::Track { number: 1, title: "Track A".to_owned() }
+            ProgrammeRegionKind::Track {
+                number: 1,
+                title: "Track A".to_owned()
+            }
         );
         assert_eq!(map.regions[0].start_sample, 0);
         assert_eq!(map.regions[0].end_sample, output_samples * 2);
@@ -2669,7 +2619,9 @@ mod tests {
         // Region 1: the explicit track gap after track 1, one revolution.
         assert_eq!(
             map.regions[1].kind,
-            ProgrammeRegionKind::Gap { after_track_number: 1 }
+            ProgrammeRegionKind::Gap {
+                after_track_number: 1
+            }
         );
         assert_eq!(map.regions[1].sample_count, output_samples);
         assert_eq!(map.regions[1].start_sample, output_samples * 2);
@@ -2678,7 +2630,10 @@ mod tests {
         // Region 2: Track B.
         assert_eq!(
             map.regions[2].kind,
-            ProgrammeRegionKind::Track { number: 2, title: "Track B".to_owned() }
+            ProgrammeRegionKind::Track {
+                number: 2,
+                title: "Track B".to_owned()
+            }
         );
         assert_eq!(map.regions[2].end_sample, map.total_samples);
 
@@ -2688,10 +2643,7 @@ mod tests {
         let total_bytes = (rev_len * 5) as f64;
         assert_eq!(map.regions[0].radial_start_normalized, 0.0);
         assert!(
-            (map.regions[1].byte_fraction_start
-                - (rev_len * 2) as f64 / total_bytes)
-                .abs()
-                < 1e-12
+            (map.regions[1].byte_fraction_start - (rev_len * 2) as f64 / total_bytes).abs() < 1e-12
         );
         assert!(map.regions[2].radial_end_normalized > 0.999);
         // Monotonic non-decreasing radial position across regions.
@@ -2808,7 +2760,9 @@ mod tests {
         };
 
         let err = validate_track_listing_metadata(&metadata).unwrap_err();
-        assert!(err.to_string().contains("not covered by any track or track gap"));
+        assert!(err
+            .to_string()
+            .contains("not covered by any track or track gap"));
     }
 
     #[test]
