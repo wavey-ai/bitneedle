@@ -1,0 +1,27 @@
+[package]
+name = "player-wasm"
+version = "0.1.6"
+edition = "2021"
+description = "WebAssembly playback/decoding orchestration helpers for Bitneedle player apps."
+repository = "https://github.com/wavey-ai/bitneedle"
+license = "Apache-2.0"
+
+[lib]
+name = "bitneedle_player"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+base64 = "0.22.1"
+console_error_panic_hook = "0.1"
+encodec-rs = { path = "../../encodec-rs", default-features = false, features = ["ecdc"] }
+record-core = "0.1.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+record-cut = { path = "../record-cut" }
