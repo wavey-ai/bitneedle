@@ -441,7 +441,7 @@ pub fn derive_cache_encryption_key(descriptor: &RecordDescriptor) -> Result<[u8;
 
 /// Subkey used only to derive the per-entry nonce, kept separate from the AEAD
 /// key itself (same salt/secret, distinct HKDF `info` label).
-fn derive_cache_nonce_key(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
+pub fn derive_cache_nonce_key(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
     let cache_encryption = descriptor
         .cache_encryption
         .as_ref()
@@ -504,6 +504,14 @@ pub fn cache_encryption_record_binding_hash_hex(descriptor: &RecordDescriptor) -
     Ok(hex_encode(&cache_encryption_record_binding_hash(
         descriptor,
     )?))
+}
+
+pub fn derive_cache_encryption_key_hex(descriptor: &RecordDescriptor) -> Result<String> {
+    Ok(hex_encode(&derive_cache_encryption_key(descriptor)?))
+}
+
+pub fn derive_cache_nonce_key_hex(descriptor: &RecordDescriptor) -> Result<String> {
+    Ok(hex_encode(&derive_cache_nonce_key(descriptor)?))
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {

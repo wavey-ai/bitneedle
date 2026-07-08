@@ -125,7 +125,7 @@ version = "0.1.6"
 dependencies = [
  "bitneedle-id",
  "bytes2rgb",
- "record-core 0.1.6",
+ "record-core",
  "record-decode",
  "record-descriptor",
  "record-sidecar",
@@ -749,21 +749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "player-wasm"
-version = "0.1.6"
-dependencies = [
- "base64",
- "console_error_panic_hook",
- "encodec-rs 0.1.1",
- "record-core 0.1.4",
- "record-cut",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,20 +885,6 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "record-core"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "103a360ab8ec6b5b5ced5d1fc76d72a36165405c8dfb2241e3dac60393fae9e8"
-dependencies = [
- "anyhow",
- "chacha20poly1305",
- "encodec-rs 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "record-core"
 version = "0.1.6"
 dependencies = [
  "anyhow",
@@ -930,7 +901,7 @@ version = "0.1.6"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
- "record-core 0.1.6",
+ "record-core",
  "record-descriptor",
  "serde",
  "serde_json",
@@ -942,7 +913,7 @@ version = "0.1.6"
 dependencies = [
  "anyhow",
  "js-sys",
- "record-core 0.1.6",
+ "record-core",
  "record-cut",
  "record-decode",
  "record-descriptor",
@@ -963,7 +934,7 @@ dependencies = [
  "bytes2rgb",
  "image",
  "png 0.17.16",
- "record-core 0.1.6",
+ "record-core",
  "record-descriptor",
  "record-sidecar",
  "serde",
@@ -979,7 +950,7 @@ dependencies = [
  "base64",
  "brotli",
  "chacha20poly1305",
- "record-core 0.1.6",
+ "record-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -998,7 +969,7 @@ name = "record-label"
 version = "0.1.6"
 dependencies = [
  "anyhow",
- "record-core 0.1.6",
+ "record-core",
  "serde",
  "serde_json",
 ]
@@ -1011,7 +982,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "image",
- "record-core 0.1.6",
+ "record-core",
  "record-cut",
  "record-decode",
  "record-descriptor",
@@ -1028,7 +999,7 @@ dependencies = [
  "base64",
  "brotli",
  "bytes2rgb",
- "record-core 0.1.6",
+ "record-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1050,7 +1021,7 @@ dependencies = [
  "base64",
  "console_error_panic_hook",
  "image",
- "record-core 0.1.6",
+ "record-core",
  "record-cut",
  "record-decode",
  "record-descriptor",
@@ -1091,17 +1062,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1218,9 +1178,10 @@ name = "test-spin"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "base64",
  "encodec-rs 0.1.1",
  "hex",
- "record-core 0.1.6",
+ "record-core",
  "record-decode",
  "record-descriptor",
  "serde_json",

@@ -13,6 +13,7 @@ use record_core::{
     RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{RecordDescriptor, SignedReleaseReference};
+use serde_json::json;
 use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Default)]
@@ -107,6 +108,7 @@ pub fn inspect_record_png(png: &[u8], options: &InspectionOptions<'_>) -> Result
         &decoded.chunk_stream.bytes,
         &decoded.record_profile,
     )?;
+    report_cache_encryption_materials(&mut out, &decoded.descriptor)?;
 
     Ok(out)
 }
@@ -1819,6 +1821,55 @@ fn report_final_summary(
             red_cross()
         )?;
     }
+
+    Ok(())
+}
+
+fn report_cache_encryption_materials(out: &mut String, descriptor: &RecordDescriptor) -> Result<()> {
+    section(out, "CACHE ENCRYPTION FOR CACHER");
+
+    let Some(cache) = descriptor.cache_encryption() else {
+        writeln!(out, "  absent")?;
+        return Ok(());
+    };
+
+    cache.validate()?;
+
+    let configured_secret_base64url = {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        URL_SAFE_NO_PAD.encode(cache.secret())
+    };
+    let binding_hash_hex = record_descriptor::cache_encryption_record_binding_hash_hex(descriptor)?;
+    let encryption_key_hex = record_descriptor::derive_cache_encryption_key_hex(descriptor)?;
+    let nonce_key_hex = record_descriptor::derive_cache_nonce_key_hex(descriptor)?;
+
+    writeln!(out, "  descriptor version:      {}", cache.version)?;
+    writeln!(out, "  algorithm:               {:?}", cache.algorithm)?;
+    writeln!(out, "  key derivation:          {:?}", cache.key_derivation)?;
+    writeln!(out, "  configured secret:       {configured_secret_base64url}")?;
+    writeln!(out, "  record binding hash:     {binding_hash_hex}")?;
+    writeln!(out, "  encryption key (hex):    {encryption_key_hex}")?;
+    writeln!(out, "  nonce key (hex):         {nonce_key_hex}")?;
+    writeln!(
+        out,
+        "  final nonce:             requires plaintext + cache context (cache_key, chunk_index, packet_offset)"
+    )?;
+
+    writeln!(out, "  structured view:")?;
+    let structured = json!({
+        "cacheEncryption": {
+            "descriptorVersion": cache.version,
+            "algorithm": format!("{:?}", cache.algorithm),
+            "keyDerivation": format!("{:?}", cache.key_derivation),
+            "configuredSecretBase64url": configured_secret_base64url,
+            "recordBindingHashHex": binding_hash_hex,
+            "encryptionKeyHex": encryption_key_hex,
+            "nonceKeyHex": nonce_key_hex,
+            "finalNonce": null,
+            "finalNonceRequires": ["plaintext", "cache_key", "chunk_index", "packet_offset"],
+        }
+    });
+    writeln!(out, "{}", indent(&serde_json::to_string_pretty(&structured)?, 4))?;
 
     Ok(())
 }
