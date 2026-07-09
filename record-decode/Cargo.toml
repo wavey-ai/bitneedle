@@ -15,7 +15,6 @@ sha2 = "0.10"
 [dependencies]
 bytes2rgb = { path = "../bytes2rgb", version = "0.1.6" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
-record-sidecar = { path = "../record-sidecar", version = "0.1.6" }
 anyhow = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
