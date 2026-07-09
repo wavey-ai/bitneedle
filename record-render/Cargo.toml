@@ -1,6 +1,6 @@
 [package]
 name = "record-render"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Reference Bitneedle rendering helpers"
 repository = "https://github.com/wavey-ai/bitneedle"
@@ -11,11 +11,11 @@ license-file = "LICENSE"
 anyhow = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-record-cut = { path = "../record-cut", version = "0.1.6" }
-record-core = { path = "../record-core", version = "0.1.6" }
-record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
-record-decode = { path = "../record-decode", version = "0.1.6" }
-record-groove = { path = "../record-groove", version = "0.1.6" }
+record-cut = { path = "../record-cut", version = "0.1.7" }
+record-core = { path = "../record-core", version = "0.1.7" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
+record-decode = { path = "../record-decode", version = "0.1.7" }
+record-groove = { path = "../record-groove", version = "0.1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

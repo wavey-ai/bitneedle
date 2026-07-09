@@ -1,6 +1,6 @@
 [package]
 name = "bitneedle"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "bitneedle picture record decoder"
 repository = "https://github.com/wavey-ai/bitneedle"
@@ -8,9 +8,9 @@ readme = "README.md"
 license = "Apache-2.0"
 
 [dependencies]
-bitneedle-id = { path = "../bitneedle-id", version = "0.1.6" }
-bytes2rgb = { path = "../bytes2rgb", version = "0.1.6" }
-record-core = { path = "../record-core", version = "0.1.6" }
-record-decode = { path = "../record-decode", version = "0.1.6" }
-record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
-record-sidecar = { path = "../record-sidecar", version = "0.1.6" }
+bitneedle-id = { path = "../bitneedle-id", version = "0.1.7" }
+bytes2rgb = { path = "../bytes2rgb", version = "0.1.7" }
+record-core = { path = "../record-core", version = "0.1.7" }
+record-decode = { path = "../record-decode", version = "0.1.7" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
+record-sidecar = { path = "../record-sidecar", version = "0.1.7" }

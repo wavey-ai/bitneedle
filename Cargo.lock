@@ -121,7 +121,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "bitneedle"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bitneedle-id",
  "bytes2rgb",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "bitneedle-id"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "rand_core 0.6.4",
  "serde",
@@ -192,7 +192,7 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes2rgb"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "png 0.17.16",
@@ -822,7 +822,7 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "record-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "record-cut"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "record-decode"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "record-descriptor"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "record-groove"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "png 0.17.16",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "record-label"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "record-core",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "record-render"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "record-sidecar"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "record-verify"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "record-descriptor",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "test-spin"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",

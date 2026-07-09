@@ -1,6 +1,6 @@
 [package]
 name = "record-groove"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Bitneedle byte-to-pixel carrier encoding and toned palette primitives"
 repository = "https://github.com/wavey-ai/bitneedle"

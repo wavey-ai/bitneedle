@@ -1,6 +1,6 @@
 [package]
 name = "record-label"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Bitneedle label geometry and cutout authoring primitives"
 repository = "https://github.com/wavey-ai/bitneedle"
@@ -9,6 +9,6 @@ license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1"
-record-core = { path = "../record-core", version = "0.1.6" }
+record-core = { path = "../record-core", version = "0.1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

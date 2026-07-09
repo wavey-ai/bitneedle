@@ -1,6 +1,6 @@
 [package]
 name = "bytes2rgb"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "colour utilities: byte/RGB conversion, luma, hex colours"
 repository = "https://github.com/wavey-ai/bitneedle"
