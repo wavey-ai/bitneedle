@@ -5,7 +5,7 @@ edition = "2021"
 description = "bitneedle steganographic data carrier for sleeve extras"
 repository = "https://github.com/wavey-ai/bitneedle"
 readme = "README.md"
-license = "Apache-2.0"
+license-file = "LICENSE"
 
 [lib]
 name = "record_sidecar"
