@@ -14,5 +14,7 @@ members = [
   "record-sidecar",
   "test-spin",
   "bitneedle-id",
+  "record-wasm",
+  "record-cut-wasm",
 ]
 resolver = "2"

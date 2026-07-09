@@ -1327,7 +1327,7 @@ fn decode_record_png_sidecar_with_context(
 
     if let Some(pointer) = pointer.as_ref() {
         let actual: [u8; 32] = Sha256::digest(&bts1).into();
-        if actual != pointer.sha256 {
+        if actual != pointer.sha256_bytes {
             bail!("record sidecar SHA-256 does not match header pointer");
         }
     }

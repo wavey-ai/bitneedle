@@ -11,12 +11,15 @@
 //! Decoding, verification, and sidecar inspection live in `record-wasm`.
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use record_cut::{
-    encode_record_stream, PayloadDescriptorInput, PayloadEntryInput, RecordStreamInput, TrackGapInput,
-    TrackInput,
+    encode_record_stream, PayloadDescriptorInput, PayloadEntryInput, RecordStreamInput,
+    TrackGapInput, TrackInput,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
@@ -36,6 +39,73 @@ fn to_js_error(error: impl std::fmt::Display + std::fmt::Debug) -> JsValue {
     JsValue::from_str(&format!("{error:#?}"))
 }
 
+#[wasm_bindgen(js_name = buildSidecarContainer)]
+pub fn wasm_build_sidecar_container(items_json: &str) -> Result<Vec<u8>, JsValue> {
+    record_sidecar::build_sidecar_container_from_items_json(items_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackageDisplayHeader)]
+pub fn wasm_build_package_display_header(options_json: &str) -> Result<Vec<u8>, JsValue> {
+    record_sidecar::build_package_display_header_bytes_from_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackageDisplayHeaderItemJson)]
+pub fn wasm_build_package_display_header_item_json(options_json: &str) -> Result<String, JsValue> {
+    record_sidecar::build_package_display_header_item_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackageMetadataItemsJson)]
+pub fn wasm_build_package_metadata_items_json(options_json: &str) -> Result<String, JsValue> {
+    record_sidecar::build_package_metadata_items_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackagePhotoItemJson)]
+pub fn wasm_build_package_photo_item_json(
+    options_json: &str,
+    avif_bytes: &[u8],
+) -> Result<String, JsValue> {
+    record_sidecar::build_package_photo_item_json(options_json, avif_bytes).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackageCoverItemJson)]
+pub fn wasm_build_package_cover_item_json(avif_bytes: &[u8]) -> String {
+    record_sidecar::build_package_cover_item_json(avif_bytes)
+}
+
+#[wasm_bindgen(js_name = resolvePackageImageEncodeCacheKeyJson)]
+pub fn wasm_resolve_package_image_encode_cache_key_json(
+    options_json: &str,
+) -> Result<String, JsValue> {
+    record_sidecar::resolve_package_image_encode_cache_key_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = resolvePackageBestFitCacheKeyJson)]
+pub fn wasm_resolve_package_best_fit_cache_key_json(options_json: &str) -> Result<String, JsValue> {
+    record_sidecar::resolve_package_best_fit_cache_key_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = packageQuantizerSearchPlanJson)]
+pub fn wasm_package_quantizer_search_plan_json(options_json: &str) -> Result<String, JsValue> {
+    record_sidecar::package_quantizer_search_plan_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = packageFitBudgetJson)]
+pub fn wasm_package_fit_budget_json(options_json: &str) -> Result<String, JsValue> {
+    record_sidecar::package_fit_budget_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = buildPackageSidecarRenderOptionsJson)]
+pub fn wasm_build_package_sidecar_render_options_json(
+    options_json: &str,
+) -> Result<String, JsValue> {
+    record_sidecar::build_package_sidecar_render_options_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = packagePreservedPatternItemsJson)]
+pub fn wasm_package_preserved_pattern_items_json(decoded_json: &str) -> Result<String, JsValue> {
+    record_sidecar::package_preserved_pattern_items_json(decoded_json).map_err(to_js_error)
+}
+
 #[wasm_bindgen(js_name = recordLabelProfileSpecsJson)]
 pub fn wasm_record_label_profile_specs_json() -> Result<String, JsValue> {
     record_label::known_label_profile_geometries_json().map_err(to_js_error)
@@ -52,6 +122,101 @@ pub fn wasm_resolve_record_label_cutout_style_json(
     style_json: &str,
 ) -> Result<String, JsValue> {
     record_label::resolve_label_cutout_style_json(record_profile, style_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = estimateRecordPngSidecarCapacityJson)]
+pub fn wasm_estimate_record_png_sidecar_capacity_json(
+    png_bytes: &[u8],
+    record_profile: Option<String>,
+) -> Result<String, JsValue> {
+    record_sidecar::estimate_record_png_sidecar_capacity_json(png_bytes, record_profile.as_deref())
+        .map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = rewriteRecordPng)]
+pub fn wasm_rewrite_record_png(
+    png_bytes: &[u8],
+    render_options_json: &str,
+    record_profile: Option<String>,
+) -> Result<WasmRenderResult, JsValue> {
+    let (png_bytes, sidecar) = record_sidecar::rewrite_record_png(
+        png_bytes,
+        render_options_json,
+        record_profile.as_deref(),
+    )
+    .map_err(to_js_error)?;
+    let payload_json = serde_json::to_string(&serde_json::json!({
+        "status": "ok",
+        "sidecar": sidecar,
+    }))
+    .map_err(to_js_error)?;
+    let header =
+        decode_record_header_json(&png_bytes, record_profile.as_deref()).map_err(to_js_error)?;
+    Ok(WasmRenderResult {
+        png_bytes: png_bytes.to_vec(),
+        payload_json,
+        header_json: header,
+    })
+}
+
+#[wasm_bindgen(js_name = recordProfileSpecsJson)]
+pub fn wasm_record_profile_specs_json() -> Result<String, JsValue> {
+    let specs = record_core::known_record_profile_names()
+        .iter()
+        .map(|profile| record_profile_spec(profile))
+        .collect::<Result<Vec<_>>>()
+        .map_err(to_js_error)?;
+
+    serde_json::to_string(&specs).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = normalizeRecordProfileName)]
+pub fn wasm_normalize_record_profile_name(record_profile: &str) -> Result<String, JsValue> {
+    record_core::normalize_record_profile_name(record_profile).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = recordProfileSpecJson)]
+pub fn wasm_record_profile_spec_json(record_profile: &str) -> Result<String, JsValue> {
+    let spec = record_profile_spec(record_profile).map_err(to_js_error)?;
+    serde_json::to_string(&spec).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = pressRecordDurationEstimateJson)]
+pub fn wasm_press_record_duration_estimate_json(
+    record_profile: &str,
+    quality: &str,
+) -> Result<String, JsValue> {
+    let estimate = press_record_duration_estimate(record_profile, quality).map_err(to_js_error)?;
+    serde_json::to_string(&estimate).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = pressRecordDurationHintJson)]
+pub fn wasm_press_record_duration_hint_json(
+    record_profile: &str,
+    quality: &str,
+) -> Result<String, JsValue> {
+    let hint = press_record_duration_hint(record_profile, quality).map_err(to_js_error)?;
+    serde_json::to_string(&hint).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = pressRecordFormatRecommendationJson)]
+pub fn wasm_press_record_format_recommendation_json(options_json: &str) -> Result<String, JsValue> {
+    press_record_format_recommendation_json(options_json).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = pressCertainLpRecordFormatJson)]
+pub fn wasm_press_certain_lp_record_format_json(
+    duration_seconds: f64,
+    current_profile: &str,
+    current_quality: &str,
+) -> Result<String, JsValue> {
+    press_certain_lp_record_format_json(duration_seconds, current_profile, current_quality)
+        .map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = visibleSpiralTurns)]
+pub fn wasm_visible_spiral_turns(record_profile: &str, b_value: f64) -> Result<f64, JsValue> {
+    record_core::visible_spiral_turns(record_profile, b_value).map_err(to_js_error)
 }
 
 #[wasm_bindgen]
@@ -94,6 +259,26 @@ impl WasmRenderResult {
     pub fn header_json(&self) -> String {
         self.header_json.clone()
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileSpec {
+    name: String,
+    record_profile: String,
+    label: String,
+    rpm: f64,
+    spindle_hole_radius: i32,
+    label_radius: i32,
+    label_clearance: i32,
+    payload_inner_radius: i32,
+    payload_outer_radius: i32,
+    lead_in_outer_radius: i32,
+    outer_radius: i32,
+    outer_rim_thickness: i32,
+    lead_in_band_thickness: i32,
+    lead_in_turns: f64,
+    run_out_turns: f64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1089,7 +1274,9 @@ fn chunk_stream_from_payload_or_stream_with_container(
         .to_string();
 
     let input = RecordStreamInput {
-        payload_descriptors: vec![PayloadDescriptorInput::from_container(normalized_container.to_string())],
+        payload_descriptors: vec![PayloadDescriptorInput::from_container(
+            normalized_container.to_string(),
+        )],
         tracks: vec![TrackInput {
             title: track_title,
             first_revolution_index: None,
@@ -1293,6 +1480,521 @@ fn normalize_payload_code_format(format: &str) -> Result<&'static str> {
     }
 }
 
+fn decode_record_header_json(png_bytes: &[u8], record_profile: Option<&str>) -> Result<String> {
+    let decoded = decode_record_png_resolving_profile(png_bytes, record_profile)
+        .context("failed to decode Bitneedle record PNG")?;
+
+    let stream = record_core::parse_chunk_stream(&decoded.chunk_stream.bytes)
+        .context("failed to parse decoded chunk stream")?;
+    let payload = record_core::chunk_stream_payload_bytes(&stream);
+    let stream_metadata = stream.metadata.clone();
+    let descriptor = &decoded.descriptor;
+
+    let mut value =
+        serde_json::to_value(descriptor).context("failed to serialize decoded descriptor")?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("version".to_string(), json!(descriptor.version));
+        object.insert(
+            "checksumProtected".to_string(),
+            json!(descriptor.checksum_protected),
+        );
+        object.insert("recordProfile".to_string(), json!(decoded.record_profile));
+        object.insert(
+            "streamByteLength".to_string(),
+            json!(decoded.chunk_stream.bytes.len()),
+        );
+        object.insert("payloadByteLength".to_string(), json!(payload.len()));
+        object.insert(
+            "payloadEncoding".to_string(),
+            json!(descriptor.payload_encoding),
+        );
+        object.insert(
+            "descriptorMagic".to_string(),
+            json!(record_descriptor_magic()),
+        );
+        object.insert(
+            "chunkStreamMagic".to_string(),
+            json!(String::from_utf8_lossy(record_core::RECORD_STREAM_MAGIC).to_string()),
+        );
+        object.insert(
+            "chunkStream".to_string(),
+            json!({
+                "byteLength": decoded.chunk_stream.bytes.len(),
+                "metadataByteLength": stream.metadata_bytes.len(),
+                "metadata": stream_metadata,
+                "chunkCount": stream.chunks.len(),
+                "payloadByteLength": payload.len(),
+                "payloadSha256": sha256_base64url(&payload),
+            }),
+        );
+    }
+
+    serde_json::to_string(&value).context("failed to serialize decoded header JSON")
+}
+
+fn optional_record_profile(record_profile: Option<&str>) -> Option<&str> {
+    record_profile
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty() && !profile.eq_ignore_ascii_case("auto"))
+}
+
+fn record_profile_candidates(record_profile: Option<&str>) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+
+    if let Some(profile) = optional_record_profile(record_profile) {
+        let normalized = record_core::normalize_record_profile_name(profile)?;
+        seen.insert(normalized.clone());
+        candidates.push(normalized);
+    }
+
+    for &profile in record_core::known_record_profile_names() {
+        let normalized = record_core::normalize_record_profile_name(profile)?;
+        if seen.insert(normalized.clone()) {
+            candidates.push(normalized);
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn decode_record_descriptor_resolving_profile(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<(String, record_descriptor::RecordDescriptor)> {
+    let mut failures = Vec::new();
+
+    for profile in record_profile_candidates(record_profile)? {
+        match record_decode::decode_record_descriptor_from_png(png_bytes, Some(&profile)) {
+            Ok((normalized_profile, descriptor)) => return Ok((normalized_profile, descriptor)),
+            Err(error) => failures.push(format!("{profile}: {error:#}")),
+        }
+    }
+
+    bail!(
+        "failed to decode record descriptor for known profiles; tried {}",
+        failures.join(" | ")
+    )
+}
+
+fn decode_record_png_resolving_profile(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<record_decode::DecodedRecord> {
+    let (normalized_profile, descriptor) =
+        decode_record_descriptor_resolving_profile(png_bytes, record_profile)?;
+    let chunk_stream = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+        png_bytes,
+        &normalized_profile,
+        Some(descriptor.stream_byte_length),
+    )
+    .context("failed to decode Bitneedle record chunk stream")?;
+
+    Ok(record_decode::DecodedRecord {
+        record_profile: normalized_profile,
+        descriptor,
+        chunk_stream,
+    })
+}
+
+fn sha256_base64url(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    base64_url_encode(&digest)
+}
+
+fn base64_url_encode(bytes: &[u8]) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+const PRESS_RECORD_CAPACITY_BYTES_SINGLE45: f64 = 450_000.0;
+const PRESS_RECORD_CAPACITY_BYTES_LP: f64 = 600_000.0;
+
+#[derive(Debug, Clone, Copy)]
+struct PressByteRateRange {
+    min_bytes_per_second: f64,
+    max_bytes_per_second: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordFormat {
+    profile: String,
+    quality: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordDurationEstimate {
+    best_seconds: f64,
+    worst_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordDurationHint {
+    range: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordFormatCandidate {
+    profile: String,
+    quality: String,
+    estimate: PressRecordDurationEstimate,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordFormatRecommendation {
+    selected: PressRecordFormat,
+    selected_estimate: PressRecordDurationEstimate,
+    recommended: PressRecordFormatCandidate,
+    duration_seconds: f64,
+    fits_recommended: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PressRecordFormatRecommendationInput {
+    duration_seconds: Option<f64>,
+    current_profile: Option<String>,
+    current_quality: Option<String>,
+    allowed_profiles: Option<Vec<String>>,
+    allowed_qualities: Option<Vec<String>>,
+    recommendation_options: Option<Vec<PressRecordFormat>>,
+}
+
+fn press_record_duration_estimate(
+    record_profile: &str,
+    quality: &str,
+) -> Result<PressRecordDurationEstimate> {
+    let profile = press_normalize_record_profile(record_profile)?;
+    let quality = press_normalize_encode_quality(quality);
+    let Some(range) = press_byte_rate_range(&profile, quality) else {
+        return Ok(PressRecordDurationEstimate {
+            best_seconds: 0.0,
+            worst_seconds: 0.0,
+        });
+    };
+    let capacity = press_record_capacity_bytes(&profile);
+    Ok(PressRecordDurationEstimate {
+        best_seconds: capacity / range.min_bytes_per_second,
+        worst_seconds: capacity / range.max_bytes_per_second,
+    })
+}
+
+fn press_record_duration_hint(
+    record_profile: &str,
+    quality: &str,
+) -> Result<PressRecordDurationHint> {
+    let estimate = press_record_duration_estimate(record_profile, quality)?;
+    let range = if estimate.worst_seconds > 0.0 && estimate.best_seconds > 0.0 {
+        press_format_minute_range(estimate.worst_seconds, estimate.best_seconds)
+    } else {
+        "--".to_string()
+    };
+    Ok(PressRecordDurationHint { range })
+}
+
+fn press_record_format_recommendation_json(options_json: &str) -> Result<String> {
+    let input: PressRecordFormatRecommendationInput = serde_json::from_str(options_json)
+        .context("press record format recommendation options are invalid")?;
+    let recommendation = press_record_format_recommendation(&input)?;
+    serde_json::to_string(&recommendation).context("failed to serialize format recommendation")
+}
+
+fn press_record_format_recommendation(
+    input: &PressRecordFormatRecommendationInput,
+) -> Result<Option<PressRecordFormatRecommendation>> {
+    let safe_duration = finite_nonnegative(input.duration_seconds.unwrap_or(0.0));
+    let selected = PressRecordFormat {
+        profile: press_normalize_record_profile(
+            input.current_profile.as_deref().unwrap_or("single45"),
+        )?,
+        quality: press_normalize_encode_quality(input.current_quality.as_deref().unwrap_or("uq"))
+            .to_string(),
+    };
+    let selected_estimate = press_record_duration_estimate(&selected.profile, &selected.quality)?;
+    if safe_duration <= selected_estimate.worst_seconds {
+        return Ok(None);
+    }
+
+    let allowed_profiles = input
+        .allowed_profiles
+        .as_ref()
+        .map(|profiles| {
+            profiles
+                .iter()
+                .map(|profile| press_normalize_record_profile(profile))
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let allowed_qualities = input.allowed_qualities.as_ref().map(|qualities| {
+        qualities
+            .iter()
+            .map(|quality| press_normalize_encode_quality(quality).to_string())
+            .collect::<Vec<_>>()
+    });
+
+    let candidate_options = input
+        .recommendation_options
+        .clone()
+        .unwrap_or_else(default_press_recommendation_options)
+        .into_iter()
+        .map(|option| {
+            Ok(PressRecordFormat {
+                profile: press_normalize_record_profile(&option.profile)?,
+                quality: press_normalize_encode_quality(&option.quality).to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|option| {
+            allowed_profiles.as_ref().map_or(true, |profiles| {
+                profiles.iter().any(|profile| profile == &option.profile)
+            })
+        })
+        .filter(|option| {
+            allowed_qualities.as_ref().map_or(true, |qualities| {
+                qualities.iter().any(|quality| quality == &option.quality)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let candidates = candidate_options
+        .iter()
+        .map(|option| {
+            Ok(PressRecordFormatCandidate {
+                profile: option.profile.clone(),
+                quality: option.quality.clone(),
+                estimate: press_record_duration_estimate(&option.profile, &option.quality)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let recommended = candidates
+        .iter()
+        .find(|option| option.estimate.worst_seconds >= safe_duration)
+        .cloned()
+        .or_else(|| {
+            let mut sorted = candidates.clone();
+            sorted.sort_by(|a, b| {
+                b.estimate
+                    .worst_seconds
+                    .partial_cmp(&a.estimate.worst_seconds)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            sorted.into_iter().next()
+        });
+    let Some(recommended) = recommended else {
+        return Ok(None);
+    };
+    if recommended.profile == selected.profile && recommended.quality == selected.quality {
+        return Ok(None);
+    }
+
+    Ok(Some(PressRecordFormatRecommendation {
+        selected,
+        selected_estimate,
+        fits_recommended: recommended.estimate.worst_seconds >= safe_duration,
+        recommended,
+        duration_seconds: safe_duration,
+    }))
+}
+
+fn press_certain_lp_record_format_json(
+    duration_seconds: f64,
+    current_profile: &str,
+    current_quality: &str,
+) -> Result<String> {
+    serde_json::to_string(&press_certain_lp_record_format(
+        duration_seconds,
+        current_profile,
+        current_quality,
+    )?)
+    .context("failed to serialize LP format recommendation")
+}
+
+fn press_certain_lp_record_format(
+    duration_seconds: f64,
+    current_profile: &str,
+    current_quality: &str,
+) -> Result<Option<PressRecordFormatRecommendation>> {
+    let safe_duration = finite_nonnegative(duration_seconds);
+    let selected = PressRecordFormat {
+        profile: press_normalize_record_profile(current_profile)?,
+        quality: press_normalize_encode_quality(current_quality).to_string(),
+    };
+    if selected.profile != "single45" {
+        return Ok(None);
+    }
+    let selected_estimate = press_record_duration_estimate(&selected.profile, &selected.quality)?;
+    if safe_duration <= selected_estimate.best_seconds {
+        return Ok(None);
+    }
+    let recommended = PressRecordFormatCandidate {
+        profile: "lp".to_string(),
+        quality: selected.quality.clone(),
+        estimate: press_record_duration_estimate("lp", &selected.quality)?,
+    };
+    Ok(Some(PressRecordFormatRecommendation {
+        selected,
+        selected_estimate,
+        fits_recommended: recommended.estimate.worst_seconds >= safe_duration,
+        recommended,
+        duration_seconds: safe_duration,
+    }))
+}
+
+fn press_normalize_record_profile(record_profile: &str) -> Result<String> {
+    record_core::normalize_record_profile_name(record_profile).context("unknown record profile")
+}
+
+fn press_normalize_encode_quality(quality: &str) -> &'static str {
+    match quality.trim().to_ascii_lowercase().as_str() {
+        "uq" | "ultra" | "ultraquality" | "best" | "12" | "12k" | "12kbps" => "uq",
+        "hq" | "mq" | "medium" | "standard" | "6" | "6k" | "6kbps" => "hq",
+        "lq" | "low" | "nano" | "moss" | "mossnano" | "moss-nano" => "lq",
+        _ => "uq",
+    }
+}
+
+fn press_record_capacity_bytes(record_profile: &str) -> f64 {
+    if record_profile == "lp" {
+        PRESS_RECORD_CAPACITY_BYTES_LP
+    } else {
+        PRESS_RECORD_CAPACITY_BYTES_SINGLE45
+    }
+}
+
+fn press_byte_rate_range(record_profile: &str, quality: &str) -> Option<PressByteRateRange> {
+    let range = match (record_profile, quality) {
+        ("single45", "uq") => PressByteRateRange {
+            min_bytes_per_second: 1159.97333,
+            max_bytes_per_second: 1264.06513,
+        },
+        ("lp", "uq") => PressByteRateRange {
+            min_bytes_per_second: 1119.551319,
+            max_bytes_per_second: 1232.685501,
+        },
+        ("single45", "hq") => PressByteRateRange {
+            min_bytes_per_second: 559.381276,
+            max_bytes_per_second: 622.372297,
+        },
+        ("lp", "hq") => PressByteRateRange {
+            min_bytes_per_second: 535.352909,
+            max_bytes_per_second: 569.00128,
+        },
+        ("single45", "lq") => PressByteRateRange {
+            min_bytes_per_second: 250.087318,
+            max_bytes_per_second: 250.341827,
+        },
+        ("lp", "lq") => PressByteRateRange {
+            min_bytes_per_second: 250.047457,
+            max_bytes_per_second: 250.086207,
+        },
+        _ => return None,
+    };
+    Some(range)
+}
+
+fn default_press_recommendation_options() -> Vec<PressRecordFormat> {
+    [
+        ("single45", "uq"),
+        ("lp", "uq"),
+        ("single45", "hq"),
+        ("lp", "hq"),
+        ("single45", "lq"),
+        ("lp", "lq"),
+    ]
+    .into_iter()
+    .map(|(profile, quality)| PressRecordFormat {
+        profile: profile.to_string(),
+        quality: quality.to_string(),
+    })
+    .collect()
+}
+
+fn press_format_minute_range(low_seconds: f64, high_seconds: f64) -> String {
+    let low = press_format_minute_bucket(low_seconds);
+    let high = press_format_minute_bucket(high_seconds);
+    if low == high {
+        low
+    } else {
+        format!("{low}-{high}")
+    }
+}
+
+fn press_format_minute_bucket(seconds: f64) -> String {
+    format!(
+        "{}m",
+        press_format_decimal(finite_nonnegative(seconds) / 60.0, 1)
+    )
+}
+
+fn press_format_decimal(value: f64, digits: usize) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut text = format!("{value:.digits$}");
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    if text == "-0" {
+        "0".to_string()
+    } else {
+        text
+    }
+}
+
+fn finite_nonnegative(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn record_profile_spec(record_profile: &str) -> Result<ProfileSpec> {
+    let geometry = record_core::describe_record_profile(record_profile)?;
+    let name = geometry.record_profile.clone();
+
+    Ok(ProfileSpec {
+        name: name.clone(),
+        record_profile: name.clone(),
+        label: record_profile_label(&name).to_string(),
+        rpm: record_profile_rpm(&name),
+        spindle_hole_radius: geometry.spindle_hole_radius,
+        label_radius: geometry.label_radius,
+        label_clearance: record_core::label_clearance_from_profile_geometry(&geometry),
+        payload_inner_radius: geometry.payload_inner_radius,
+        payload_outer_radius: geometry.payload_outer_radius,
+        lead_in_outer_radius: geometry.payload_outer_radius + geometry.lead_in_band_thickness,
+        outer_radius: geometry.outer_radius,
+        outer_rim_thickness: geometry.outer_rim_thickness,
+        lead_in_band_thickness: geometry.lead_in_band_thickness,
+        lead_in_turns: record_core::HEADER_SPIRAL_TURNS,
+        run_out_turns: record_core::TRAILER_SPIRAL_TURNS,
+    })
+}
+
+fn record_profile_label(record_profile: &str) -> &'static str {
+    match record_profile {
+        "lp" => "LP",
+        _ => "45",
+    }
+}
+
+fn record_profile_rpm(record_profile: &str) -> f64 {
+    match record_profile {
+        "lp" => 33.3333333333,
+        _ => 45.0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,21 @@
+{
+  "name": "record-cut-wasm",
+  "type": "module",
+  "description": "WebAssembly facade for Bitneedle record authoring: rendering, programme assembly, and record-label profile helpers.",
+  "version": "0.1.6",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wavey-ai/bitneedle"
+  },
+  "files": [
+    "bitneedle_record_author_bg.wasm",
+    "bitneedle_record_author.js",
+    "bitneedle_record_author.d.ts"
+  ],
+  "main": "bitneedle_record_author.js",
+  "types": "bitneedle_record_author.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
