@@ -12,6 +12,8 @@
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ExtendedColorType, ImageEncoder};
 use record_cut::{
     encode_record_stream, PayloadDescriptorInput, PayloadEntryInput, RecordStreamInput,
     TrackGapInput, TrackInput,
@@ -139,7 +141,7 @@ pub fn wasm_rewrite_record_png(
     render_options_json: &str,
     record_profile: Option<String>,
 ) -> Result<WasmRenderResult, JsValue> {
-    let (png_bytes, sidecar) = record_sidecar::rewrite_record_png(
+    let (png_bytes, sidecar) = rewrite_record_png_preserving_pattern_items(
         png_bytes,
         render_options_json,
         record_profile.as_deref(),
@@ -156,6 +158,321 @@ pub fn wasm_rewrite_record_png(
         png_bytes: png_bytes.to_vec(),
         payload_json,
         header_json: header,
+    })
+}
+
+fn rewrite_record_png_preserving_pattern_items(
+    png_bytes: &[u8],
+    render_options_json: &str,
+    record_profile: Option<&str>,
+) -> Result<(Vec<u8>, record_sidecar::SidecarRenderSummary)> {
+    let render_options_json = merge_rewrite_options_with_preserved_pattern_items(
+        png_bytes,
+        render_options_json,
+        record_profile,
+    )?;
+    record_sidecar::rewrite_record_png(png_bytes, &render_options_json, record_profile)
+}
+
+fn merge_rewrite_options_with_preserved_pattern_items(
+    png_bytes: &[u8],
+    render_options_json: &str,
+    record_profile: Option<&str>,
+) -> Result<String> {
+    let preserved = preserved_pattern_items_for_png(png_bytes, record_profile)?;
+    if preserved.is_empty() {
+        return Ok(render_options_json.to_string());
+    }
+
+    let mut options = if render_options_json.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str::<serde_json::Value>(render_options_json)
+            .with_context(|| format!("Could not parse render options: {render_options_json}"))?
+    };
+    let Some(sidecar) = options
+        .get_mut("sidecar")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(render_options_json.to_string());
+    };
+    if sidecar.get("bsc1Base64").is_some() {
+        return Ok(render_options_json.to_string());
+    }
+    let items_value = sidecar
+        .entry("items".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let items = items_value
+        .as_array_mut()
+        .context("rewrite sidecar.items must be an array to preserve Patternize map")?;
+    items.retain(|item| !sidecar_item_is_pattern_map(item));
+    items.extend(preserved);
+    Ok(options.to_string())
+}
+
+fn preserved_pattern_items_for_png(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let decoded_json =
+        match record_sidecar::decode_record_png_sidecar_items_json(png_bytes, record_profile) {
+            Ok(value) => value,
+            Err(_) => return Ok(Vec::new()),
+        };
+    let decoded: serde_json::Value =
+        serde_json::from_str(&decoded_json).context("decoded sidecar JSON is invalid")?;
+    record_sidecar::package_preserved_pattern_items(&decoded)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatternizeExploreOptions {
+    layout_id: Option<u32>,
+    block_size: Option<u32>,
+    mode: Option<String>,
+    amount: Option<f64>,
+    embed_sidecar: Option<bool>,
+    sidecar_items: Option<Vec<serde_json::Value>>,
+}
+
+#[wasm_bindgen(js_name = patternizeRecordPngExplore)]
+pub fn wasm_patternize_record_png_explore(
+    png_bytes: &[u8],
+    options_json: &str,
+    record_profile: Option<String>,
+) -> Result<WasmRenderResult, JsValue> {
+    patternize_record_png_explore(png_bytes, options_json, record_profile.as_deref())
+        .map_err(to_js_error)
+}
+
+fn patternize_record_png_explore(
+    png_bytes: &[u8],
+    options_json: &str,
+    record_profile: Option<&str>,
+) -> Result<WasmRenderResult> {
+    let options = if options_json.trim().is_empty() {
+        PatternizeExploreOptions {
+            layout_id: None,
+            block_size: None,
+            mode: None,
+            amount: None,
+            embed_sidecar: None,
+            sidecar_items: None,
+        }
+    } else {
+        serde_json::from_str(options_json)
+            .with_context(|| format!("Could not parse patternize options: {options_json}"))?
+    };
+    let (profile, descriptor) = record_decode::decode_record_descriptor_from_png(
+        png_bytes,
+        record_profile.filter(|value| !value.trim().is_empty()),
+    )
+    .context("failed to decode record descriptor before Patternize")?;
+    let image = image::load_from_memory(png_bytes)
+        .context("failed to decode record PNG before Patternize")?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    let (width, height) = (width as usize, height as usize);
+    let mut rgba = image.into_raw();
+    let mask = record_core::build_spiral_mask(
+        width,
+        height,
+        descriptor.b_value(),
+        &profile,
+        None,
+        None,
+        None,
+    )?;
+    let groove_indices = mask
+        .ordered_pixel_indices
+        .iter()
+        .copied()
+        .take_while(|pixel_index| rgba[pixel_index * 4 + 3] != 0)
+        .collect::<Vec<_>>();
+    if groove_indices.len() < 2 {
+        bail!("record PNG has no patternizable groove pixels");
+    }
+    let layout_id = options.layout_id.unwrap_or(0).min(511);
+    let block_size = options.block_size.unwrap_or(128).clamp(2, 4096) as usize;
+    let amount = options.amount.unwrap_or(20.0).clamp(1.0, 100.0);
+    let mode = options.mode.unwrap_or_else(|| "partialSort".to_string());
+    let reverse_map = record_patternize::patternize(
+        &mut rgba,
+        &groove_indices,
+        &record_patternize::PatternizeOptions {
+            seed: layout_id,
+            amount,
+            block_size,
+            channels: 4,
+        },
+    )?;
+    if reverse_map.is_empty() {
+        bail!("Patternize did not select any groove blocks");
+    }
+    let visual = record_patternize::visual_score(&rgba, &groove_indices, 4);
+    let pattern_png = write_patternized_rgba_png(width, height, &rgba)?;
+    let capacity: serde_json::Value = serde_json::from_str(
+        &record_sidecar::estimate_record_png_sidecar_capacity_json(&pattern_png, Some(&profile))?,
+    )?;
+    let sidecar_items = patternize_sidecar_items(&reverse_map, options.sidecar_items.as_ref());
+    let required_bytes = record_sidecar::build_sidecar_container_from_items_json(
+        &serde_json::to_string(&sidecar_items)
+            .context("failed to serialize Patternize sidecar items")?,
+    )
+    .map(|bytes| bytes.len())
+    .unwrap_or_else(|_| {
+        12usize
+            .saturating_add(16)
+            .saturating_add(record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME.len())
+            .saturating_add(record_sidecar::PACKAGE_PATTERN_SIDECAR_MIME.len())
+            .saturating_add(reverse_map.len())
+    });
+    let fit = patternize_storage_fit(&capacity, required_bytes);
+    let embed_sidecar = options.embed_sidecar.unwrap_or(true);
+    let (result_png, encoded_sidecar) = if embed_sidecar {
+        let render_options = json!({
+            "sidecar": {
+                "scheme": record_sidecar::SIDECAR_SCHEME_PAIRSIGN_SAFE_LUMA_V2,
+                "seed": record_sidecar::SIDECAR_DEFAULT_SEED,
+                "carriers": ["label", "intergroove", "leadInDeadwax"],
+                "items": sidecar_items,
+            },
+        })
+        .to_string();
+        let (rewritten, summary) =
+            record_sidecar::rewrite_record_png(&pattern_png, &render_options, Some(&profile))
+                .context("failed to embed Patternize reverse map")?;
+        let decoded: serde_json::Value = serde_json::from_str(
+            &record_sidecar::decode_record_png_sidecar_items_json(&rewritten, Some(&profile))?,
+        )?;
+        let map_round_trips = decoded
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("name").and_then(serde_json::Value::as_str)
+                        == Some(record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
+                })
+            })
+            .and_then(|item| item.get("dataBase64"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| record_sidecar::decode_base64_text(value, "Patternize map").ok())
+            .is_some_and(|decoded_map| decoded_map == reverse_map);
+        if !map_round_trips {
+            bail!("embedded Patternize reverse map did not round-trip");
+        }
+        (
+            rewritten,
+            json!({
+                "ok": true,
+                "output": "stegoRecord",
+                "mapRoundTrips": true,
+                "reverseMapBytes": reverse_map.len(),
+                "sidecar": summary,
+            }),
+        )
+    } else {
+        (
+            pattern_png,
+            json!({
+                "ok": false,
+                "skipped": true,
+                "reason": "sidecar embedding disabled for search preview",
+            }),
+        )
+    };
+    let report = json!({
+        "status": "ok",
+        "pattern": {
+            "layoutId": layout_id,
+            "blockSize": block_size,
+            "mode": mode,
+            "amount": amount / 100.0,
+            "amountPercent": amount,
+            "sourceGroovePixels": groove_indices.len(),
+            "patternableGroovePixels": groove_indices.len(),
+            "groovePixels": groove_indices.len(),
+            "reversePathBytes": reverse_map.len(),
+            "visualDefinition": visual,
+        },
+        "storage": {
+            "stego": fit,
+            "encodedSidecar": encoded_sidecar,
+        },
+        "capacity": capacity,
+    });
+    Ok(WasmRenderResult {
+        png_bytes: result_png,
+        payload_json: report.to_string(),
+        header_json: "{}".to_string(),
+    })
+}
+
+fn patternize_sidecar_items(
+    reverse_map: &[u8],
+    extra_items: Option<&Vec<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
+    let mut items = Vec::new();
+    if let Some(extra_items) = extra_items {
+        items.extend(
+            extra_items
+                .iter()
+                .filter(|item| !sidecar_item_is_pattern_map(item))
+                .cloned(),
+        );
+    }
+    items.push(json!({
+        "type": "opaque",
+        "codec": "raw",
+        "name": record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME,
+        "mime": record_sidecar::PACKAGE_PATTERN_SIDECAR_MIME,
+        "dataBase64": general_purpose::URL_SAFE_NO_PAD.encode(reverse_map),
+    }));
+    items
+}
+
+fn sidecar_item_is_pattern_map(item: &serde_json::Value) -> bool {
+    item.get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value == record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
+        || item
+            .get("mime")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == record_sidecar::PACKAGE_PATTERN_SIDECAR_MIME)
+}
+
+fn write_patternized_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(rgba, width as u32, height as u32, ExtendedColorType::Rgba8)
+        .context("failed to encode Patternize PNG")?;
+    Ok(out)
+}
+
+fn patternize_storage_fit(
+    capacity: &serde_json::Value,
+    required_bytes: usize,
+) -> serde_json::Value {
+    let fit = |name: &str| {
+        let capacity_bytes = capacity
+            .get(name)
+            .and_then(|entry| entry.get("capacityBytes"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        json!({
+            "capacityBytes": capacity_bytes,
+            "fits": capacity_bytes >= required_bytes,
+            "spareBytes": capacity_bytes.saturating_sub(required_bytes),
+        })
+    };
+    json!({
+        "requiredBytes": required_bytes,
+        "label": fit("label"),
+        "intergroove": fit("intergroove"),
+        "combined": fit("combined"),
+        "leadInDeadwax": fit("leadInDeadwax"),
+        "expandedIntergroove": fit("expandedIntergroove"),
+        "expandedCombined": fit("expandedCombined"),
     })
 }
 
@@ -752,15 +1069,20 @@ struct ProgrammeTrackGapInputJson {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordProgrammeInputJson {
-    ecdc_descriptor: record_core::PayloadDescriptor,
+    #[serde(default)]
+    ecdc_descriptor: Option<record_core::PayloadDescriptor>,
+    #[serde(default)]
+    ecdc_descriptors: Vec<record_core::PayloadDescriptor>,
+    #[serde(default)]
+    entry_descriptor_indexes: Vec<u8>,
     tracks: Vec<ProgrammeTrackInputJson>,
     #[serde(default)]
     track_gaps: Vec<ProgrammeTrackGapInputJson>,
 }
 
-/// The assembled, ordered programme: the single shared ECDC descriptor, the
+/// The assembled, ordered programme: one or more compatible ECDC descriptors,
 /// ordered entry bytes (every entry is ECDC — music revolutions and inter-track
-/// gap ambience alike), their per-entry descriptor indexes (all 0), the musical
+/// gap ambience alike), their per-entry descriptor indexes, the musical
 /// track ranges, and the explicit track-gap ranges. Every entry belongs to
 /// exactly one of `tracks` or `track_gaps`; there is no third "uncovered"
 /// category.
@@ -828,20 +1150,47 @@ fn assemble_record_programme(
 ) -> Result<AssembledProgramme> {
     let programme: RecordProgrammeInputJson =
         serde_json::from_str(programme_json).context("programme JSON is invalid")?;
-    // Authoring-specific guard: the canonical ECDC descriptor must be complete so
-    // headerless entry sample counts and the programme map can be derived. A bare
-    // { "container": "ECDC" } passes generic validation but is not authorable.
-    validate_programme_ecdc_descriptor(&programme.ecdc_descriptor)
-        .context("programme ecdcDescriptor is not a complete canonical ECDC descriptor")?;
-
-    let sample_rate = programme
-        .ecdc_descriptor
+    let descriptors = if programme.ecdc_descriptors.is_empty() {
+        vec![programme
+            .ecdc_descriptor
+            .context("programme requires ecdcDescriptor or ecdcDescriptors")?]
+    } else {
+        programme.ecdc_descriptors
+    };
+    if descriptors.len() > 256 {
+        bail!("programme supports at most 256 ECDC descriptors");
+    }
+    // Each descriptor must be independently canonical. Mixed 6/12 kbps
+    // programmes may differ in codec metadata, but their PCM/revolution
+    // geometry must agree so one ordered record timeline remains well-defined.
+    for (descriptor_index, descriptor) in descriptors.iter().enumerate() {
+        validate_programme_ecdc_descriptor(descriptor).with_context(|| {
+            format!(
+                "programme ECDC descriptor {descriptor_index} is not a complete canonical ECDC descriptor"
+            )
+        })?;
+    }
+    let primary_descriptor = descriptors
+        .first()
+        .context("programme requires at least one ECDC descriptor")?;
+    let sample_rate = primary_descriptor
         .sample_rate
         .context("ecdcDescriptor requires sampleRate")?;
-    programme
-        .ecdc_descriptor
+    let channels = primary_descriptor
         .channels
         .context("ecdcDescriptor requires channels")?;
+    for (descriptor_index, descriptor) in descriptors.iter().enumerate().skip(1) {
+        if descriptor.sample_rate != Some(sample_rate)
+            || descriptor.channels != Some(channels)
+            || descriptor.block_samples != primary_descriptor.block_samples
+            || descriptor.output_offset_samples != primary_descriptor.output_offset_samples
+            || descriptor.output_samples != primary_descriptor.output_samples
+        {
+            bail!(
+                "programme ECDC descriptor {descriptor_index} has incompatible PCM/revolution geometry"
+            );
+        }
+    }
     // Validates the profile name even though gap geometry is no longer derived
     // here (gaps are now real ECDC entries supplied by the caller).
     record_core::normalize_record_profile_name(record_profile)?;
@@ -851,6 +1200,28 @@ fn assemble_record_programme(
     }
 
     let total_ecdc = ecdc_entries.len();
+    let entry_descriptor_indexes = if programme.entry_descriptor_indexes.is_empty() {
+        vec![0u8; total_ecdc]
+    } else {
+        if programme.entry_descriptor_indexes.len() != total_ecdc {
+            bail!(
+                "entryDescriptorIndexes length {} does not match supplied ECDC entry count {}",
+                programme.entry_descriptor_indexes.len(),
+                total_ecdc
+            );
+        }
+        programme.entry_descriptor_indexes
+    };
+    for (entry_index, descriptor_index) in entry_descriptor_indexes.iter().enumerate() {
+        if usize::from(*descriptor_index) >= descriptors.len() {
+            bail!(
+                "entry descriptor index {} for entry {} exceeds descriptor count {}",
+                descriptor_index,
+                entry_index,
+                descriptors.len()
+            );
+        }
+    }
     let mut used = vec![false; total_ecdc];
     let mut tracks: Vec<WasmTrackInputJson> = Vec::new();
 
@@ -956,21 +1327,17 @@ fn assemble_record_programme(
     }
 
     // Every entry — music and gap ambience alike — is a valid standalone
-    // ECDC payload under the one shared descriptor. The exact programme sample
+    // ECDC payload under its selected descriptor. The exact programme sample
     // timeline is the sum of every entry's decoded ECDC sample count; gaps
     // contribute their real encoded duration just like music.
     let mut total_samples = 0u64;
-    for entry in &ecdc_entries {
+    for (entry, descriptor_index) in ecdc_entries.iter().zip(&entry_descriptor_indexes) {
+        let descriptor = &descriptors[usize::from(*descriptor_index)];
         total_samples = total_samples.saturating_add(
-            record_core::ecdc::headerless_entry_sample_count(entry, &programme.ecdc_descriptor)
-                .unwrap_or_else(|_| {
-                    u64::from(programme.ecdc_descriptor.output_samples.unwrap_or(0))
-                }),
+            record_core::ecdc::headerless_entry_sample_count(entry, descriptor)
+                .unwrap_or_else(|_| u64::from(descriptor.output_samples.unwrap_or(0))),
         );
     }
-
-    let entry_descriptor_indexes = vec![0u8; total_ecdc];
-    let descriptors = vec![programme.ecdc_descriptor];
 
     Ok(AssembledProgramme {
         descriptors,
@@ -2040,6 +2407,136 @@ mod tests {
     }
 
     #[test]
+    fn fast_preview_can_hold_geometry_for_progressive_entries() {
+        let payload_entries: Vec<u8> = vec![
+            0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,
+            142, 224, 150, 228, 184, 207, 69, 0,
+        ];
+        let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,125]}"##;
+        let result = render_payload_entries_with_descriptor_to_png(
+            vec![payload_entries],
+            descriptor_json,
+            "rgb",
+            "single45",
+            211.33060416666666,
+            r##"{"fastFit":true,"fitTrackPixelCount":12000}"##,
+        )
+        .expect("progressive fast-fit render should accept a fixed track-pixel target");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.payload_json()).expect("render payload JSON");
+        assert_eq!(payload["fitTrackPixelCount"].as_u64(), Some(12_000));
+        assert!(payload["filteredPixelCount"].as_u64().unwrap_or_default() < 12_000);
+    }
+
+    #[test]
+    fn patternized_record_restores_exact_payload_before_decode() {
+        let payload_entry: Vec<u8> = vec![
+            0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,
+            142, 224, 150, 228, 184, 207, 69, 0,
+        ];
+        let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,34,109,34,58,34,101,110,99,111,100,101,99,95,52,56,107,104,122,34,44,34,97,108,34,58,54,52,48,48,48,44,34,110,99,34,58,56,44,34,108,109,34,58,116,114,117,101,44,34,102,112,34,58,56,49,57,50,44,34,109,114,34,58,50,44,34,97,99,118,34,58,50,44,34,116,97,117,34,58,49,46,48,44,34,108,109,104,34,58,34,98,56,99,50,49,100,54,54,53,48,98,54,50,97,48,98,56,99,100,50,49,48,99,54,101,54,50,52,100,102,98,98,51,48,99,51,97,51,57,56,57,52,54,54,53,52,52,98,49,102,53,101,49,100,102,57,54,51,101,99,97,53,49,55,34,44,34,102,108,34,58,50,48,51,125]}"##;
+        let rendered = render_payload_entries_with_descriptor_to_png(
+            vec![payload_entry],
+            descriptor_json,
+            "rgb",
+            "single45",
+            211.33060416666666,
+            r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}],"fastFit":true}"##,
+        )
+        .expect("fixture record should render");
+        let original = record_decode::decode_record_png_to_chunk_stream_for_profile(
+            &rendered.png_bytes,
+            "single45",
+        )
+        .expect("ordinary record should decode");
+
+        let patternized = patternize_record_png_explore(
+            &rendered.png_bytes,
+            r##"{"layoutId":7,"blockSize":8,"amount":100,"embedSidecar":true,"sidecarItems":[{"type":"json","codec":"raw","name":"bitneedle-label-thumbnail-v1.json","json":{"version":1,"role":"label-thumbnail-patch","width":32,"height":32,"base":"full-label-thumbnail-avif","patchItemName":"bitneedle-label-thumbnail-patch.avif","patchMime":"image/avif"}},{"type":"image","codec":"avif","name":"bitneedle-label-thumbnail-patch.avif","mime":"image/avif","rawByteLength":16,"dataBase64":"AAAAAGZ0eXBhdmlmAAAAAA=="}]}"##,
+            Some("single45"),
+        )
+        .expect("Patternize should embed a reversible map");
+        assert_ne!(patternized.png_bytes, rendered.png_bytes);
+        let report: serde_json::Value = serde_json::from_str(&patternized.payload_json)
+            .expect("Patternize report should parse");
+        assert_eq!(
+            report.pointer("/storage/encodedSidecar/ok"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            report.pointer("/storage/encodedSidecar/mapRoundTrips"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        let restored = record_sidecar::restore_patternized_record_png(
+            &patternized.png_bytes,
+            Some("single45"),
+        )
+        .expect("reverse-map sidecar should decode")
+        .expect("Patternize map should be present");
+        let decoded_items: serde_json::Value = serde_json::from_str(
+            &record_sidecar::decode_record_png_sidecar_items_json(
+                &patternized.png_bytes,
+                Some("single45"),
+            )
+            .expect("sidecar items should decode"),
+        )
+        .expect("decoded sidecar items should parse");
+        let items = decoded_items
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("decoded sidecar items should be an array");
+        assert!(items.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("bitneedle-label-thumbnail-v1.json")
+        }));
+        assert!(items.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some(record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
+        }));
+        let decoded =
+            record_decode::decode_record_png_to_chunk_stream_for_profile(&restored, "single45")
+                .expect("restored record should decode");
+        assert_eq!(decoded.bytes, original.bytes);
+        assert_eq!(decoded.pixel_count, original.pixel_count);
+
+        let (rewritten, _summary) = rewrite_record_png_preserving_pattern_items(
+            &patternized.png_bytes,
+            r##"{"sidecar":{"items":[{"type":"json","codec":"raw","name":"bitneedle-issuance-v1.json","json":{"kind":"bitneedle-issuance-v1"}}],"carriers":["label","intergroove","leadInDeadwax"]}}"##,
+            Some("single45"),
+        )
+        .expect("rewrite should preserve Patternize map");
+        let rewritten_items: serde_json::Value = serde_json::from_str(
+            &record_sidecar::decode_record_png_sidecar_items_json(&rewritten, Some("single45"))
+                .expect("rewritten sidecar items should decode"),
+        )
+        .expect("rewritten sidecar items should parse");
+        let rewritten_items = rewritten_items
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("rewritten sidecar items should be an array");
+        assert!(rewritten_items.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("bitneedle-issuance-v1.json")
+        }));
+        assert!(rewritten_items.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some(record_sidecar::PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
+        }));
+        let restored_rewritten =
+            record_sidecar::restore_patternized_record_png(&rewritten, Some("single45"))
+                .expect("rewritten reverse-map sidecar should decode")
+                .expect("rewritten Patternize map should be present");
+        let decoded_rewritten = record_decode::decode_record_png_to_chunk_stream_for_profile(
+            &restored_rewritten,
+            "single45",
+        )
+        .expect("rewritten restored record should decode");
+        assert_eq!(decoded_rewritten.bytes, original.bytes);
+        assert_eq!(decoded_rewritten.pixel_count, original.pixel_count);
+    }
+
+    #[test]
     fn descriptor_render_rejects_invalid_descriptor_json() {
         let err = render_payload_entries_with_descriptor_to_png(
             vec![vec![1, 2, 3, 4]],
@@ -2113,6 +2610,53 @@ mod tests {
         assert_eq!(assembled.track_gaps[0].first_revolution_index, 2);
         assert_eq!(assembled.track_gaps[0].revolution_count, 1);
         assert_eq!(assembled.track_gaps[0].after_track_index, 0);
+    }
+
+    #[test]
+    fn programme_preserves_mixed_ecdc_descriptor_indexes() {
+        let second_descriptor = PROGRAMME_ECDC_DESCRIPTOR.replace(
+            r#""codecMetadata":[123,125]"#,
+            r#""codecMetadata":[123,32,125]"#,
+        );
+        let json = format!(
+            r#"{{"ecdcDescriptor":{PROGRAMME_ECDC_DESCRIPTOR},"ecdcDescriptors":[{PROGRAMME_ECDC_DESCRIPTOR},{second_descriptor}],"entryDescriptorIndexes":[0,0,1,1],"tracks":[{{"title":"12 kbps","payloadIndexes":[0,1]}},{{"title":"6 kbps","payloadIndexes":[2,3]}}]}}"#
+        );
+        let assembled = assemble_record_programme(
+            vec![
+                vec![0xA1u8; 8],
+                vec![0xA2u8; 8],
+                vec![0xB1u8; 8],
+                vec![0xB2u8; 8],
+            ],
+            &json,
+            "single45",
+        )
+        .unwrap();
+
+        assert_eq!(assembled.descriptors.len(), 2);
+        assert_eq!(assembled.entry_descriptor_indexes, vec![0, 0, 1, 1]);
+
+        let options = parse_render_options("{}").unwrap();
+        let chunk_input = chunk_stream_from_multi_descriptor_entries(
+            assembled.entry_bytes,
+            assembled.entry_descriptor_indexes,
+            assembled.descriptors,
+            assembled.tracks,
+            assembled.track_gaps,
+            &options,
+        )
+        .unwrap();
+        let stream = record_core::parse_chunk_stream(&chunk_input.stream_bytes).unwrap();
+        assert_eq!(stream.metadata.payload_descriptors.len(), 2);
+        assert_eq!(
+            stream
+                .metadata
+                .payload_entries
+                .iter()
+                .map(|entry| entry.payload_descriptor_index)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 1]
+        );
     }
 
     #[test]

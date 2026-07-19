@@ -17,11 +17,13 @@ wasm-opt = false
 [dependencies]
 base64 = "0.22.1"
 anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 record-cut = { path = "../record-cut", version = "0.1.6" }
 record-core = { path = "../record-core", version = "0.1.6" }
 record-decode = { path = "../record-decode", version = "0.1.6" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
 record-label = { path = "../record-label", version = "0.1.6" }
+record-patternize = { path = "../record-patternize", version = "0.1.7" }
 record-render = { path = "../record-render", version = "0.1.6" }
 record-sidecar = { path = "../record-sidecar", version = "0.1.6" }
 serde = { version = "1", features = ["derive"] }

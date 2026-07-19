@@ -34,6 +34,8 @@ export function packagePreservedPatternItemsJson(decoded_json: string): string;
 
 export function packageQuantizerSearchPlanJson(options_json: string): string;
 
+export function patternizeRecordPngExplore(png_bytes: Uint8Array, options_json: string, record_profile?: string | null): WasmRenderResult;
+
 export function pressCertainLpRecordFormatJson(duration_seconds: number, current_profile: string, current_quality: string): string;
 
 export function pressRecordDurationEstimateJson(record_profile: string, quality: string): string;
@@ -120,6 +122,7 @@ export interface InitOutput {
     readonly packageFitBudgetJson: (a: number, b: number) => [number, number, number, number];
     readonly packagePreservedPatternItemsJson: (a: number, b: number) => [number, number, number, number];
     readonly packageQuantizerSearchPlanJson: (a: number, b: number) => [number, number, number, number];
+    readonly patternizeRecordPngExplore: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly pressCertainLpRecordFormatJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pressRecordDurationEstimateJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pressRecordDurationHintJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

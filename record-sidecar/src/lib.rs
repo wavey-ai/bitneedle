@@ -2690,6 +2690,50 @@ pub fn decode_record_png_sidecar_items_json(
     serde_json::to_string(&decoded).context("failed to serialize decoded record sidecar items")
 }
 
+/// Restore a Patternize groove permutation before payload decoding.
+///
+/// Returns `Ok(None)` for an ordinary record or a sidecar that contains no
+/// BNPM item. The restored PNG retains its descriptor and sidecar pixels; only
+/// payload-groove pixels are put back in their exact pre-Patternize order.
+pub fn restore_patternized_record_png(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let mut context = decode_record_png_context(png_bytes, record_profile)?;
+    if sidecar_pointer_from_descriptor(&context.descriptor)?.is_none() {
+        return Ok(None);
+    }
+    let (bts1, _) =
+        decode_record_png_sidecar_with_context(png_bytes, Some(&context.record_profile))
+            .context("failed to decode Patternize reverse-map sidecar")?;
+    let decoded =
+        decode_sidecar_container_items(&bts1).context("Patternize sidecar container is invalid")?;
+    let Some(item) = decoded.items.iter().find(|item| {
+        item.name == PACKAGE_PATTERN_SIDECAR_ITEM_NAME || item.mime == PACKAGE_PATTERN_SIDECAR_MIME
+    }) else {
+        return Ok(None);
+    };
+    let reverse_map = decode_base64_text(&item.data_base64, "Patternize reverse map")?;
+    let mask = record_core::build_spiral_mask(
+        context.width,
+        context.height,
+        context.descriptor.b_value(),
+        &context.record_profile,
+        None,
+        None,
+        None,
+    )?;
+    let groove_indices = mask
+        .ordered_pixel_indices
+        .iter()
+        .copied()
+        .take_while(|pixel_index| context.rgba[pixel_index * 4 + 3] != 0)
+        .collect::<Vec<_>>();
+    record_patternize::restore(&mut context.rgba, &groove_indices, &reverse_map)
+        .context("failed to restore Patternize groove pixels")?;
+    write_rgba_png(context.width, context.height, &context.rgba).map(Some)
+}
+
 pub fn rewrite_record_png(
     png_bytes: &[u8],
     render_options_json: &str,

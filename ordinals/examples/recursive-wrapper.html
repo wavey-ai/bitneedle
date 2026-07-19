@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bitneedle Ordinal Runtime Example</title>
+    <style>
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        display: grid;
+        place-items: center;
+        background: #fff;
+      }
+
+      #bitneedle-record {
+        width: min(576px, 100vw);
+        height: min(576px, 100vw);
+      }
+
+      #bitneedle-download {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="bitneedle-record" width="576" height="576"></canvas>
+    <button id="bitneedle-download" type="button" disabled>Download PNG</button>
+
+    <script src="../src/bitneedle-ordinal-runtime.js"></script>
+    <script id="bitneedle-ordinal-record" type="application/json">
+      {
+        "v": 1,
+        "p": "single45",
+        "r": "/content/08a1b126a930b7939eaf94c9a0c1af5cd7fbe8b9a90510346d2c5127c5dc8d43i0",
+        "a": "/content/04c2408b42e77f8c8472e75782fc969a85d57126e8d724cf3a4e53c00b6f49a3i0",
+        "la": "/content/2fd5009098ddf180e582e12ce837a2ad57882e018ec7c7d14936458364272f34i0",
+        "bg": "#fafafa",
+        "fg": "#000000",
+        "lr": 149,
+        "on": "1,852,218,650,130,935",
+        "sat": "849,379",
+        "bn": "71867558",
+        "l": [
+          "On-chain Record",
+          "Bitneedle",
+          "Recursive render example",
+          "A",
+          "2:53",
+          "2024",
+          "",
+          "Rendered from JSON and RGB bytes",
+          "Downloadable PNG"
+        ]
+      }
+    </script>
+    <script>
+      BitneedleOrdinal.bootstrap().catch((error) => {
+        document.body.textContent = error && error.stack || String(error);
+      });
+    </script>
+  </body>
+</html>

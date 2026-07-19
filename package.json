@@ -1,0 +1,12 @@
+{
+  "name": "bitneedle-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node ordinals/tools/dev-server.mjs",
+    "ordinals:check": "node --check ordinals/src/bitneedle-ordinal-runtime.js && node --check ordinals/tools/compact-manifest.mjs && node --check ordinals/tools/make-wrapper.mjs && node --check ordinals/tools/compare-rust-spiral.mjs && node ordinals/tools/compare-rust-spiral.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}

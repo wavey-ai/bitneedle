@@ -1635,16 +1635,18 @@ fn render_payload_codes_to_transparent_spiral(
         .map(|region| region.pixel_count)
         .sum::<usize>();
     let required_track_pixel_count = track.pixel_count.saturating_add(dummy_spiral_pixel_count);
-    if render_options
+    let preview_fit_track_pixel_count = render_options
         .fit_track_pixel_count
-        .filter(|value| *value > 0)
-        .is_some()
-    {
-        bail!("fitTrackPixelCount is not supported; omit it to use exact b-value fit");
+        .filter(|value| *value > 0);
+    if preview_fit_track_pixel_count.is_some() && !render_options.fast_fit {
+        bail!("fitTrackPixelCount is only supported for fast-fit previews");
     }
     normalize_spiral_fit_mode(render_options.spiral_fit_mode.as_deref())?;
     let resolved_fit_track_pixel_count =
-        if let Some(explicit) = fit_track_pixel_count.filter(|value| *value > 0) {
+        if let Some(explicit) = fit_track_pixel_count
+            .filter(|value| *value > 0)
+            .or(preview_fit_track_pixel_count)
+        {
             explicit.max(required_track_pixel_count)
         } else {
             required_track_pixel_count

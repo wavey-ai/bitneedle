@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "p": "single45",
+  "r": "/content/08a1b126a930b7939eaf94c9a0c1af5cd7fbe8b9a90510346d2c5127c5dc8d43i0",
+  "a": "/content/04c2408b42e77f8c8472e75782fc969a85d57126e8d724cf3a4e53c00b6f49a3i0",
+  "la": "/content/2fd5009098ddf180e582e12ce837a2ad57882e018ec7c7d14936458364272f34i0",
+  "bg": "#fafafa",
+  "fg": "#000000",
+  "lr": 149,
+  "on": "1,852,218,650,130,935",
+  "sat": "849,379",
+  "bn": "71867558",
+  "l": [
+    "On-chain Record",
+    "Bitneedle",
+    "Recursive render example",
+    "A",
+    "2:53",
+    "2024",
+    "",
+    "Rendered from JSON and RGB bytes",
+    "Downloadable PNG"
+  ]
+}

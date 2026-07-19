@@ -9,6 +9,7 @@ members = [
   "record-descriptor",
   "record-label",
   "record-groove",
+  "record-patternize",
   "record-render",
   "record-verify",
   "record-sidecar",

@@ -447,6 +447,8 @@ dependencies = [
 [[package]]
 name = "encodec-rs"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3b027e5d7f465868e7b237e55d697c75dddcc2e23d624bac3265ddc2550b9e4"
 dependencies = [
  "anyhow",
  "clap",
@@ -461,9 +463,7 @@ dependencies = [
 
 [[package]]
 name = "encodec-rs"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b027e5d7f465868e7b237e55d697c75dddcc2e23d624bac3265ddc2550b9e4"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -841,12 +841,33 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rand"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
- "rand_chacha",
+ "rand_chacha 0.9.0",
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -889,7 +910,7 @@ version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
- "encodec-rs 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "encodec-rs 0.1.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -913,12 +934,14 @@ version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64",
+ "image",
  "js-sys",
  "record-core",
  "record-cut",
  "record-decode",
  "record-descriptor",
  "record-label",
+ "record-patternize",
  "record-render",
  "record-sidecar",
  "serde",
@@ -977,6 +1000,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "record-patternize"
+version = "0.1.7"
+dependencies = [
+ "anyhow",
+ "rand 0.8.7",
+ "serde",
+]
+
+[[package]]
 name = "record-render"
 version = "0.1.7"
 dependencies = [
@@ -1006,6 +1038,7 @@ dependencies = [
  "record-cut",
  "record-decode",
  "record-descriptor",
+ "record-patternize",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1185,7 +1218,7 @@ version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
- "encodec-rs 0.1.1",
+ "encodec-rs 0.1.2",
  "hex",
  "record-core",
  "record-decode",
@@ -1245,7 +1278,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
 dependencies = [
- "rand",
+ "rand 0.9.4",
  "web-time",
 ]
 

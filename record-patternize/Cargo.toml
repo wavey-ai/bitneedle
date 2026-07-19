@@ -1,0 +1,14 @@
+[package]
+name = "record-patternize"
+version = "0.1.7"
+edition = "2021"
+description = "Reversible seeded pixel patternizing for Bitneedle picture records"
+repository = "https://github.com/wavey-ai/bitneedle"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+rand = "0.8"

@@ -14,6 +14,7 @@ export const normalizeRecordProfileName: (a: number, b: number) => [number, numb
 export const packageFitBudgetJson: (a: number, b: number) => [number, number, number, number];
 export const packagePreservedPatternItemsJson: (a: number, b: number) => [number, number, number, number];
 export const packageQuantizerSearchPlanJson: (a: number, b: number) => [number, number, number, number];
+export const patternizeRecordPngExplore: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const pressCertainLpRecordFormatJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const pressRecordDurationEstimateJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pressRecordDurationHintJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

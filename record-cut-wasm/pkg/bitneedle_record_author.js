@@ -342,6 +342,26 @@ export function packageQuantizerSearchPlanJson(options_json) {
 }
 
 /**
+ * @param {Uint8Array} png_bytes
+ * @param {string} options_json
+ * @param {string | null} [record_profile]
+ * @returns {WasmRenderResult}
+ */
+export function patternizeRecordPngExplore(png_bytes, options_json, record_profile) {
+    const ptr0 = passArray8ToWasm0(png_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    var ptr2 = isLikeNone(record_profile) ? 0 : passStringToWasm0(record_profile, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.patternizeRecordPngExplore(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return WasmRenderResult.__wrap(ret[0]);
+}
+
+/**
  * @param {number} duration_seconds
  * @param {string} current_profile
  * @param {string} current_quality
