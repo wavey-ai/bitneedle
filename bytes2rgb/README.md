@@ -1,6 +1,6 @@
 # bytes2rgb
 
-Decoder-side colour utilities for Bitneedle.
+Decoder-side color utilities for Bitneedle.
 
 This crate recovers byte streams from RGBA pixel data used by Bitneedle
 picture-record objects. It intentionally documents and exposes the read path:

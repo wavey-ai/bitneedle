@@ -8,13 +8,13 @@ SPDX-License-Identifier: CC0-1.0
 
 ## Abstract
 
-This document specifies the Bitneedle Picture Record Format, an exact-digital
-raster image format in which a recoverable byte stream is carried by the visible
-spiral groove of a record-like image.
+This document specifies the Bitneedle Picture Record Format. It is an
+exact-digital raster image format. The visible spiral groove of the image
+contains a recoverable byte stream.
 
-The base format uses a 576 by 576 PNG/RGBA carrier, two registered annular
-record profiles, an outer and inner grayscale metadata spiral carrying a BRD1
-record descriptor, and a main Archimedean payload spiral carrying a BRS1
+The base format uses a 576 by 576 PNG/RGBA carrier. It has two registered annular
+record profiles. The outer and inner grayscale metadata spirals contain a BRD1
+record descriptor. The main Archimedean payload spiral contains a BRS1
 Bitneedle Record Stream.
 
 BRS1 is payload-format independent. It carries one or more logical payload
@@ -36,36 +36,36 @@ This document is an Internet-Draft-style work in progress. It has no standing
 in the IETF standards process unless submitted through the normal IETF
 Internet-Draft process.
 
-## Intellectual Property and Licence Notice
+## Intellectual Property and License Notice
 
 Certain aspects of Bitneedle records, encoding, decoding, rendering, caching,
 and playback are patent pending. This specification is published for
 interoperability and implementation clarity. No express or implied patent
-licence is granted by this document.
+license is granted by this document.
 
 ## 1. Introduction
 
-A Bitneedle picture record is a raster image in which selected pixels are
-arranged along deterministic record-like spiral paths. A conforming decoder
-traces those paths, reads exact pixel samples, and reconstructs exact bytes.
+A Bitneedle picture record is a raster image. Selected pixels follow
+deterministic record-like spiral paths. A conforming decoder traces these paths.
+It reads exact pixel samples and reconstructs the exact bytes.
 
 The format is exact-digital. Printing, photography, resampling, lossy
-recompression, automatic colour correction, and scan recovery are outside the
+recompression, automatic color correction, and scan recovery are outside the
 scope of this revision.
 
 ### 1.1 Scope
 
 This document specifies:
 
-* the 576 by 576 RGBA carrier;
-* the registered record profiles single45 and lp;
-* deterministic spiral tracing and duplicate-pixel handling;
-* the BRD1 binary record descriptor;
-* direct-RGB main-payload pixel mapping;
-* the BRS1 compact binary stream metadata and chunk framing;
-* the canonical payload-entry and track-mapping model;
-* the binary signed-release reference;
-* the optional BSC1 binary sidecar container; and
+* the 576 by 576 RGBA carrier
+* the registered record profiles single45 and lp
+* deterministic spiral tracing and duplicate-pixel handling
+* the BRD1 binary record descriptor
+* direct-RGB main-payload pixel mapping
+* the BRS1 compact binary stream metadata and chunk framing
+* the canonical payload-entry and track-mapping model
+* the binary signed-release reference
+* the optional BSC1 binary sidecar container
 * the BSC1 pair-sign carrier scheme.
 
 Codec containers such as ECDC and MOSSNANO are named by BRS1 payload
@@ -98,8 +98,8 @@ sidecar item is not part of the playable BRS1 payload.
 
 ### 2.1 Requirements Language
 
-The key words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, MAY, and OPTIONAL
-are to be interpreted as described in BCP 14 when they appear in all capitals.
+BCP 14 defines the key words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, MAY,
+and OPTIONAL. These words have their BCP 14 meanings when they are in uppercase.
 
 ### 2.2 Numeric Representation
 
@@ -120,7 +120,7 @@ Unless otherwise stated:
 ### 2.3 Coordinate System
 
 The raster origin is the upper-left pixel. Positive x points right and positive
-y points down.
+The y-axis points down.
 
     centre_x = width / 2
     centre_y = height / 2
@@ -166,20 +166,20 @@ sidecar
 
 A conforming encoder MUST:
 
-* produce a 576 by 576, 8-bit RGBA raster;
-* use a registered record profile;
-* encode a valid BRD1 descriptor;
-* include BRD1 segment types 1, 2, 4, and 7;
-* set BRD1 segment 2 to the exact BRS1 stream length;
-* use payload encoding rgb;
-* write a valid BRS1 stream along the main payload spiral;
-* include at least one payload descriptor, payload entry, track, and chunk;
-* map every track to an existing payload entry;
-* write a correct CRC-32 for every stored chunk payload;
-* fill the fixed 64-byte signature slot in every chunk;
-* use an all-zero signature slot when the chunk is unsigned;
+* produce a 576 by 576, 8-bit RGBA raster
+* use a registered record profile
+* encode a valid BRD1 descriptor
+* include BRD1 segment types 1, 2, 4, and 7
+* set BRD1 segment 2 to the exact BRS1 stream length
+* use payload encoding rgb
+* write a valid BRS1 stream along the main payload spiral
+* include at least one payload descriptor, payload entry, track, and chunk
+* map every track to an existing payload entry
+* write a correct CRC-32 for every stored chunk payload
+* fill the fixed 64-byte signature slot in every chunk
+* use an all-zero signature slot when the chunk is unsigned
 * use a non-zero signature produced by the selected external signing profile
-  when the chunk is signed; and
+  when the chunk is signed
 * use the same entry model for single-track and multitrack records.
 
 A conforming encoder MUST NOT emit JSON BRS1 metadata, toned-v1, BNPM, BPLP,
@@ -189,17 +189,17 @@ ECLP, BTS1, or a newly encoded legacy stream.
 
 A conforming decoder MUST:
 
-* recover and validate BRD1;
-* recover exactly the declared BRS1 length;
-* decode compact BRS1 metadata;
-* validate all metadata flags and indexes;
-* parse all chunks without truncation or trailing bytes;
-* verify each chunk CRC-32;
-* distinguish all-zero unsigned signatures from non-zero signed chunks;
+* recover and validate BRD1
+* recover exactly the declared BRS1 length
+* decode compact BRS1 metadata
+* validate all metadata flags and indexes
+* parse all chunks without truncation or trailing bytes
+* verify each chunk CRC-32
+* distinguish all-zero unsigned signatures from non-zero signed chunks
 * verify non-zero signatures only when a signing profile and trusted key are
-  available;
-* validate payload-entry lengths and derived offsets;
-* validate track-to-entry mappings; and
+  available
+* validate payload-entry lengths and derived offsets
+* validate track-to-entry mappings
 * expose tracks without treating transport chunks as tracks.
 
 A decoder MUST NOT treat black RGB as empty. Alpha zero marks the first
@@ -215,7 +215,7 @@ Failure to recover BSC1 MUST NOT invalidate an otherwise valid base record.
 ### 4.1 Canonical Raster
 
     dimensions: 576 x 576
-    colour:     8-bit RGB
+    color:      8-bit RGB
     alpha:      8-bit
     container:  PNG/RGBA
 
@@ -307,7 +307,7 @@ versions may define explicit extension handling.
 | 6 | artist | optional UTF-8 | no |
 | 7 | payload encoding | non-empty UTF-8 | yes |
 | 8 | release ID | optional UTF-8 | no |
-| 9 | catalogue number | optional UTF-8 | no |
+| 9 | catalog number | optional UTF-8 | no |
 | 10 | label | optional UTF-8 | no |
 | 11 | artwork credit | optional UTF-8 | no |
 | 13 | canonical URL | optional UTF-8 | no |
@@ -341,11 +341,11 @@ Segment 16 contains:
 
 Version 1 requirements:
 
-* reference version MUST equal 1;
-* both algorithm codes MUST be non-zero;
-* manifest hash, key ID, and signature MUST be non-empty;
-* each variable field MUST fit in u16 length;
-* the manifest itself is not carried by this envelope; and
+* reference version MUST equal 1
+* both algorithm codes MUST be non-zero
+* manifest hash, key ID, and signature MUST be non-empty
+* each variable field MUST fit in u16 length
+* the manifest itself is not carried by this envelope
 * algorithm-code registries, manifest serialization, signing preimage, trust,
   and revocation policy are defined by external signing profiles.
 
@@ -458,8 +458,8 @@ Each payload entry contains:
 Byte length MUST be greater than zero. When descriptor indexes are omitted,
 index zero is implied.
 
-Entry indexes and byte offsets are derived from array position and cumulative
-length; they are not stored on the wire.
+Array position and cumulative length give the entry indexes and byte offsets.
+These values are not stored on the wire.
 
 For entries E0 through En:
 
@@ -507,11 +507,11 @@ Encrypted chunk:
 
 Signature semantics:
 
-* 64 zero bytes mean unsigned;
-* any non-zero signature means signed under an external chunk-signing profile;
-* parsers MUST retain the exact signature bytes;
-* base structural validation does not require a key resolver;
-* a verifier with a selected profile SHOULD verify non-zero signatures; and
+* 64 zero bytes mean unsigned
+* any non-zero signature means signed under an external chunk-signing profile
+* parsers MUST retain the exact signature bytes
+* base structural validation does not require a key resolver
+* a verifier with a selected profile SHOULD verify non-zero signatures
 * failure of a required external signature policy is an authorization failure,
   not a CRC/framing failure.
 
@@ -522,14 +522,14 @@ it therefore covers ciphertext including its authentication tag.
 
 ### 9.8 Chunk Rules
 
-* chunk count MUST be non-zero;
-* indexes MUST be contiguous from zero;
-* every chunk MUST declare the same chunk count;
-* parsed chunk count MUST equal the declared count;
-* descriptor indexes MUST exist;
-* each CRC-32 MUST match;
-* the stream MUST contain no trailing bytes;
-* unencrypted chunks MUST lie wholly inside one declared payload entry; and
+* chunk count MUST be non-zero
+* indexes MUST be contiguous from zero
+* every chunk MUST declare the same chunk count
+* parsed chunk count MUST equal the declared count
+* descriptor indexes MUST exist
+* each CRC-32 MUST match
+* the stream MUST contain no trailing bytes
+* unencrypted chunks MUST lie wholly inside one declared payload entry
 * an unencrypted chunk descriptor index MUST match that entry.
 
 Canonical encoders SHOULD split at payload-entry boundaries and SHOULD use
@@ -628,14 +628,14 @@ bundle, or another application-defined mechanism.
 
 This revision does not define:
 
-* a canonical release-manifest serialization;
-* release or edition manifest fields;
-* recordCommitment or editionCommitment construction;
-* wallet signing;
-* account authorization;
-* issuance attestations;
-* registration receipt chains;
-* hash or signature algorithm-code assignments;
+* a canonical release-manifest serialization
+* release or edition manifest fields
+* recordCommitment or editionCommitment construction
+* wallet signing
+* account authorization
+* issuance attestations
+* registration receipt chains
+* hash or signature algorithm-code assignments
 * key resolution or revocation policy.
 
 Those concerns belong to external signing and rights profiles.
@@ -676,7 +676,7 @@ Fisher-Yates, and decoded using Rec. 709 luma.
 
 Each pair carries two bits:
 
-* sign bit: whether first-pixel luma is greater than second-pixel luma;
+* sign bit: whether first-pixel luma is greater than second-pixel luma
 * magnitude bit: whether the absolute luma difference is at least 16.0.
 
 The current capacity is therefore two bits per pair, or one byte per four
@@ -738,14 +738,14 @@ JSON is permitted as an item payload. It is not BSC1 structural metadata.
 
 A sidecar-capable decoder:
 
-1. validates BRD1;
-2. validates BRS1;
-3. reads the BRD1 segment-21 pointer;
-4. reconstructs the selected carrier pairs;
-5. applies the deterministic shuffle;
-6. recovers exactly the declared BSC1 byte length;
-7. verifies the raw SHA-256 digest;
-8. validates the BSC1 container and item framing; and
+1. validates BRD1
+2. validates BRS1
+3. reads the BRD1 segment-21 pointer
+4. reconstructs the selected carrier pairs
+5. applies the deterministic shuffle
+6. recovers exactly the declared BSC1 byte length
+7. verifies the raw SHA-256 digest
+8. validates the BSC1 container and item framing
 9. exposes supported items.
 
 ## 13. Complete Decoding Procedure
@@ -780,7 +780,7 @@ A conforming decoder performs:
 ## 14. Exact-Digital Requirements
 
 Encoded samples MUST be preserved exactly. Scaling, resampling, filtering,
-lossy recompression, colour correction, and alpha destruction invalidate the
+lossy recompression, color correction, and alpha destruction invalidate the
 format.
 
 ## 15. Unsupported Earlier Forms
@@ -807,15 +807,15 @@ new hashes and signatures.
 
 Future revisions may define:
 
-* additional raster sizes and record profiles;
-* BRD1 versions and segment types;
-* new payload pixel encodings;
-* additional BRS1 metadata flags;
-* container codes and descriptor fields;
-* chunk-signing profiles;
-* encryption profiles;
-* signed-release algorithm registries;
-* BSC1 carrier schemes;
+* additional raster sizes and record profiles
+* BRD1 versions and segment types
+* new payload pixel encodings
+* additional BRS1 metadata flags
+* container codes and descriptor fields
+* chunk-signing profiles
+* encryption profiles
+* signed-release algorithm registries
+* BSC1 carrier schemes
 * BSC1 item types and codecs.
 
 An extension MUST NOT silently reinterpret an existing version-1 field.
@@ -827,17 +827,17 @@ containers are untrusted.
 
 Implementations SHOULD:
 
-* validate lengths before allocation;
-* enforce all integer bounds;
-* reject overlong varuint encodings;
-* reject unknown flags and codes where required;
-* cap decompressor output;
-* sandbox codec parsing;
-* verify every CRC-32;
-* distinguish structural validity from signature authorization;
-* require an explicit trust policy for non-zero signatures;
-* reject overlapping or out-of-range derived data;
-* verify BSC1 hashes before exposing items; and
+* validate lengths before allocation
+* enforce all integer bounds
+* reject overlong varuint encodings
+* reject unknown flags and codes where required
+* cap decompressor output
+* sandbox codec parsing
+* verify every CRC-32
+* distinguish structural validity from signature authorization
+* require an explicit trust policy for non-zero signatures
+* reject overlapping or out-of-range derived data
+* verify BSC1 hashes before exposing items
 * rate-limit public cache writes.
 
 CRC-32 detects accidental corruption but is not a cryptographic authenticity
@@ -932,16 +932,16 @@ metadata.
 
 Draft 01:
 
-* uses BRD1 plus compact binary BRS1;
-* uses direct RGB payload pixels only;
-* makes payload entries mandatory for single-track and multitrack records;
-* stores entry lengths and derives offsets;
-* stores track titles and entry mappings compactly;
-* requires CRC protection for every chunk;
-* permits chunks to be unsigned through an all-zero fixed signature slot;
-* permits signed chunks through an external fixed-64-byte signing profile;
-* permits optional ChaCha20-Poly1305 encryption;
-* replaces inline signed manifests with a binary signed-release reference;
-* retains BSC1 and its pair-sign sidecar carrier;
-* removes groove patternisation and BNPM; and
+* uses BRD1 plus compact binary BRS1
+* uses direct RGB payload pixels only
+* makes payload entries mandatory for single-track and multitrack records
+* stores entry lengths and derives offsets
+* stores track titles and entry mappings compactly
+* requires CRC protection for every chunk
+* permits chunks to be unsigned through an all-zero fixed signature slot
+* permits signed chunks through an external fixed-64-byte signing profile
+* permits optional ChaCha20-Poly1305 encryption
+* replaces inline signed manifests with a binary signed-release reference
+* retains BSC1 and its pair-sign sidecar carrier
+* removes groove patternisation and BNPM
 * provides no canonical legacy decoder path.

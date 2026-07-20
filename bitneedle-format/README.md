@@ -2,8 +2,8 @@
 
 A compact visual guide to the canonical **BRD1 + BRS1 + optional BSC1** format.
 
-This README is explanatory. The normative details are in
-`draft-bitneedle-picture-record-format-01.txt`.
+This README gives explanatory information. The normative specification is
+`draft-bitneedle-picture-record-format-02.txt`.
 
 ## At a glance
 
@@ -115,7 +115,7 @@ radius 0                                                     radius 287
 | 6 | Artist | UTF-8 | no |
 | 7 | Payload encoding | UTF-8 (`rgb`) | yes |
 | 8 | Release ID | UTF-8 | no |
-| 9 | Catalogue number | UTF-8 | no |
+| 9 | Catalog number | UTF-8 | no |
 | 10 | Label | UTF-8 | no |
 | 11 | Artwork credit | UTF-8 | no |
 | 13 | Canonical URL | UTF-8 | no |
@@ -426,7 +426,7 @@ BRD1/BRS1 binary bytes
         ▼
 typed Rust structures
         │
-        ├── labelled terminal report
+        ├── labeled terminal report
         ├── pretty JSON diagnostic view
         └── raw hexadecimal prefix
 ```

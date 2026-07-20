@@ -2,7 +2,6 @@
 
 Sidecar parsing and recovery helpers for Bitneedle picture-record objects.
 
-This crate is published for interoperability, verification, playback, and
-archival tooling. It is not a commercial Bitneedle record authoring platform
-and does not grant rights to create, mint, issue, sell, or market Bitneedle
-records outside the Apache-2.0 license as applied to this crate.
+Use this crate for interoperability, verification, playback, and archive tools.
+It is not a commercial Bitneedle record-authoring platform. This crate does not
+grant rights outside its Apache-2.0 license.

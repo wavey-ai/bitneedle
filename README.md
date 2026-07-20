@@ -1,36 +1,34 @@
-# bitneedle
+# Bitneedle
 
-Bitneedle is the public reference code for reading and validating Bitneedle
-picture-record objects: visual record-like images that carry recoverable audio
-data.
+Bitneedle is the public reference implementation for Bitneedle picture records.
+A Bitneedle picture record is an image that contains recoverable audio data.
+Use this code to read and validate a Bitneedle picture record.
 
-This repository is published so artists, collectors, archivists, marketplaces,
-and independent developers can inspect Bitneedle objects, verify that the audio
-is carried by the object itself, and build self-sufficient playback and
-preservation tools.
+Artists, collectors, archivists, marketplaces, and developers can examine a
+Bitneedle picture record. They can make sure that the record contains its audio
+data. They can also build independent tools to play and preserve the record.
 
 ## Licensing
 
-This repository contains components under different licences.
+Different licenses apply to the components in this repository.
 
-- Decoding, verification, and interoperability crates are licensed under the
-  Apache License, Version 2.0, in `LICENSE`.
-- Record-authoring crates (the ones that construct, encode, or render
-  Bitneedle records) are licensed under the Wavey Artist Source Licence, in
-  `LICENSE-ARTIST`. That licence permits qualifying Artists and Artist
-  Entities to create and sell their own Bitneedle records, but reserves
-  commercial authoring, platform, and label use.
+- The Apache License, Version 2.0, applies to the decoding, verification, and
+  interoperability crates. Refer to `LICENSE`.
+- The Wavey Artist Source Licence applies to the record-authoring crates. Refer
+  to `LICENSE-ARTIST`.
+- Qualifying Artists and Artist Entities can use the record-authoring crates to
+  make and sell their own Bitneedle records.
+- A label, platform, or other commercial user must get a separate license.
 
-See each crate's `Cargo.toml` and `LICENSE` file for its applicable licence.
-Any patent licence is limited to the express terms of the applicable
-component licence; publication of this repository is not intended to
-dedicate any patent-pending technology to the public or waive patent rights
-beyond those express terms. See `PATENTS.md` for the patent notice and
-limited decoder pledge.
+The `Cargo.toml` and `LICENSE` files identify the license for each crate. Only
+the applicable component license can grant a patent license. Publication of
+this repository does not grant other patent rights. Publication does not put
+patent-pending technology in the public domain. Refer to `PATENTS.md` for the
+patent notice and the limited decoder pledge.
 
 ## Repository scope
 
-| Crate | Licence | Role |
+| Crate | License | Role |
 | --- | --- | --- |
 | `record-core` | Apache-2.0 | Shared geometry, record-profile, chunk/gap, and spiral-index primitives used by both decoder and authoring tools. |
 | `record-descriptor` | Apache-2.0 | BRD1 descriptor wire format, parsing, and decoding. |
@@ -45,9 +43,9 @@ limited decoder pledge.
 | `record-label` | Wavey Artist Source Licence | Canonical label geometry and spindle/dink cutout authoring primitives. |
 | `record-render` | Wavey Artist Source Licence | Constructs and renders the finished record PNG. |
 | `record-cut` | Wavey Artist Source Licence | Canonical BRS1 record-stream authoring/encoding, BRD1 descriptor authoring (`descriptor` module), and GAP1 authoring (`gap` module). |
-| `record-cut-wasm` | Wavey Artist Source Licence | WebAssembly facade for record authoring: rendering, programme assembly, and record-label profile helpers. |
+| `record-cut-wasm` | Wavey Artist Source Licence | WebAssembly facade for record rendering, program assembly, and record-label profile helpers. |
 
 This repository is not the commercial Bitneedle record authoring platform.
-Only Artists and Artist Entities may use the Wavey Artist Source Licence
-crates under the terms of that licence; record labels, platforms, and other
-commercial users need a separate licence (see `LICENSE-ARTIST` §15).
+Only Artists and Artist Entities can use the applicable crates under the Wavey
+Artist Source Licence. Record labels, platforms, and other commercial users
+need a separate license. Refer to section 15 of `LICENSE-ARTIST`.

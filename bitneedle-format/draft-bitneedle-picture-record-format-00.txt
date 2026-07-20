@@ -8,13 +8,14 @@ Expires: 5 December 2026                                   3 June 2026
 
 Abstract
 
-   This document specifies the Bitneedle Picture Record Format, an
-   exact-digital raster image format in which a recoverable byte stream is
-   carried by the visible spiral groove of a record-like image.
+   This document specifies the Bitneedle Picture Record Format.  It is an
+   exact-digital raster image format.  The visible spiral groove of the
+   image contains a recoverable byte stream.
 
-   The base format uses a 576 by 576 PNG/RGBA carrier, two registered
-   annular record profiles, an outer and inner grayscale metadata spiral,
-   and a main Archimedean payload spiral carrying a BCS2 chunk stream.
+   The base format uses a 576 by 576 PNG/RGBA carrier.  It has two
+   registered annular record profiles.  It also has outer and inner
+   grayscale metadata spirals.  The main Archimedean payload spiral
+   contains a BCS2 chunk stream.
    The main BCS2 stream normally carries an audio payload container such
    as ECDC, although the image format is independent of any particular
    media codec.
@@ -22,9 +23,8 @@ Abstract
    This document also specifies an optional BTS1 typed sidecar container
    carried in non-payload visual regions.  The sidecar is intended for
    auxiliary release extras.  A separate optional reversible-presentation
-   extension, BNPM, is described because it is implemented by the reference
-   code for patternized records; it is not part of the base playback
-   profile.
+   extension, BNPM, is implemented by the reference code for patternized
+   records.  BNPM is not part of the base playback profile.
 
 Status of This Memo
 
@@ -148,21 +148,21 @@ Table of Contents
 
    This document specifies:
 
-   *  the 576 by 576 raster carrier profile;
+   *  the 576 by 576 raster carrier profile
 
-   *  the registered record geometries "single45" and "lp";
+   *  the registered record geometries "single45" and "lp"
 
-   *  the deterministic spiral tracing and pixel ordering rules;
+   *  the deterministic spiral tracing and pixel ordering rules
 
-   *  the BRD1 record descriptor and its metadata segment registry;
+   *  the BRD1 record descriptor and its metadata segment registry
 
-   *  the RGB main-payload pixel mapping;
+   *  the RGB main-payload pixel mapping
 
-   *  the BCS2 chunk stream container carried by the main payload spiral;
+   *  the BCS2 chunk stream container carried by the main payload spiral
 
-   *  signed-release metadata conventions used by public records;
+   *  signed-release metadata conventions used by public records
 
-   *  the optional BTS1 sidecar and its public carrier scheme; and
+   *  the optional BTS1 sidecar and its public carrier scheme
 
    *  the optional BNPM reversible-presentation extension implemented by
       the reference code.
@@ -191,11 +191,11 @@ Table of Contents
 
 2.1.  Requirements Language
 
-   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
-   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
-   "OPTIONAL" in this document are to be interpreted as described in
-   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
-   capitals, as shown here.
+   BCP 14 [RFC2119] [RFC8174] defines the requirement words in this
+   document.  These words are "MUST", "MUST NOT", "REQUIRED", "SHALL",
+   "SHALL NOT", "SHOULD", and "SHOULD NOT".  They also include
+   "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL".  These words
+   have their BCP 14 meanings only when they are in uppercase.
 
 2.2.  Numeric Representation
 
@@ -289,19 +289,19 @@ Table of Contents
 
    A base-conforming encoder MUST:
 
-   *  use one of the registered record profiles;
+   *  use one of the registered record profiles
 
-   *  encode a BRD1 descriptor in the metadata spirals;
+   *  encode a BRD1 descriptor in the metadata spirals
 
-   *  include BRD1 segment types 1, 2, 4, and 7;
+   *  include BRD1 segment types 1, 2, 4, and 7
 
-   *  set segment 7 to the canonical payload encoding "rgb";
+   *  set segment 7 to the canonical payload encoding "rgb"
 
-   *  write the exact BCS2 stream byte length in segment 2;
+   *  write the exact BCS2 stream byte length in segment 2
 
-   *  write the BCS2 stream along the main payload spiral in RGB order;
+   *  write the BCS2 stream along the main payload spiral in RGB order
 
-   *  preserve non-zero alpha for all written metadata and payload pixels;
+   *  preserve non-zero alpha for all written metadata and payload pixels
       and
 
    *  leave the first unwritten payload-groove pixel with alpha equal to
@@ -313,10 +313,17 @@ Table of Contents
 
 3.2.  Base Decoders
 
-   A base-conforming decoder MUST recover the BRD1 descriptor, verify its
-   CRC-32, reconstruct the main groove path from the recovered b_value and
-   record profile, recover the declared number of BCS2 bytes, and validate
-   the BCS2 chunk stream structure before playback or extraction.
+   A base-conforming decoder MUST:
+
+   *  recover the BRD1 descriptor
+
+   *  verify the BRD1 CRC-32
+
+   *  reconstruct the main groove path from b_value and the record profile
+
+   *  recover the declared number of BCS2 bytes
+
+   *  validate the BCS2 chunk stream before playback or extraction.
 
    A base decoder MUST NOT treat black RGB pixels as empty.  Black is a
    valid payload value.  The payload terminal marker is the first sampled
@@ -548,8 +555,14 @@ Table of Contents
    Written metadata pixels MUST have non-zero alpha.  Metadata pixels MUST
    NOT use independent color channels.
 
-   A decoder MUST reject a metadata pixel if alpha is zero, if R, G, and B
-   are not equal, or if R is outside the inclusive range 120..135.
+   A decoder MUST reject a metadata pixel when one or more of these
+   conditions apply:
+
+   *  Alpha is zero.
+
+   *  R, G, and B are not equal.
+
+   *  R is outside the inclusive range 120..135.
 
 7.3.  Descriptor Prefix
 
@@ -597,9 +610,10 @@ Table of Contents
 
 7.5.  Descriptor CRC-32
 
-   Segment type 1 carries a CRC-32/IEEE checksum over the complete BRD1
-   descriptor byte stream, including prefix and segment framing, with the
-   four payload bytes of the type 1 CRC-32 segment set to zero.
+   Segment type 1 carries a CRC-32/IEEE checksum of the complete BRD1
+   descriptor byte stream.  The checksum includes the prefix and segment
+   framing.  Set the four payload bytes of the type 1 CRC-32 segment to
+   zero for the calculation.
 
    The CRC-32/IEEE algorithm is:
 
@@ -631,8 +645,8 @@ Table of Contents
    Encoders MUST include types 1, 2, 4, and 7.  Segment type 2 MUST contain
    the exact byte length of the BCS2 stream carried by the main payload
    spiral.  The value 0xffffffffffffffff means absent and is only for
-   compatibility with older or diagnostic material; base-conforming records
-   MUST NOT use it.
+   compatibility with older or diagnostic material.  Base-conforming
+   records MUST NOT use it.
 
    Segment type 4 MUST contain "single45" or "lp".  Segment type 7 MUST
    contain "rgb" in this revision.
@@ -654,7 +668,7 @@ Table of Contents
 
    Empty payloads represent absent or empty values.  Control characters
    MUST NOT appear in text fields.  Segment 13 is the preferred place for
-   a URL used to generate a QR code or application link; this specification
+   a URL used to generate a QR code or application link.  This specification
    does not define a QR bitmap segment.
 
    Encoders SHOULD keep creator metadata compact.  Ordinary title and
@@ -763,9 +777,9 @@ Table of Contents
       +------+-----------------+--------------------------------------+
 
    In this revision, "rgb" is the only interoperable base payload encoding.
-   Earlier design notes mentioned grayscale payload pixels, but grayscale
-   is not implemented by the current reference decoder and is not part of
-   this revision's base profile.
+   Earlier design notes included grayscale payload pixels.  The current
+   reference decoder does not implement grayscale payload pixels.  They are
+   not part of this revision's base profile.
 
    For "rgb", if the byte stream length is not divisible by 3, the final
    pixel is padded with zero bytes in unused RGB channels.  Decoders MUST
@@ -778,10 +792,10 @@ Table of Contents
    RGB payload stream.  Every written payload pixel MUST have non-zero
    alpha.
 
-   Decoders MUST recover payload pixels in main-groove order until the
-   first sampled pixel with alpha equal to zero, map the non-empty pixels
-   according to the declared payload encoding, and truncate the resulting
-   byte stream to the declared BCS2 stream byte length.
+   Decoders MUST recover payload pixels in main-groove order.  Recovery
+   MUST stop at the first sampled pixel with an alpha value of zero.
+   Decoders MUST map non-empty pixels with the declared payload encoding.
+   They MUST truncate the result to the declared BCS2 stream byte length.
 
    If the declared byte length is greater than the number of recoverable
    bytes before terminal padding is removed, the decoder MUST reject the
@@ -840,38 +854,48 @@ Table of Contents
 
 9.2.1.  rgbTone Field
 
-   When the record descriptor declares the payload encoding "toned-v1",
-   the stream metadata MUST contain a first-level "rgbTone" field: an
-   array of span tuples describing how the chunk-record bytes are encoded
-   as toned pixels.  Each span is the 6-element array
+   When the record descriptor declares "toned-v1", the stream metadata
+   MUST contain a first-level "rgbTone" field.  This field is an array of
+   span tuples.  Each tuple describes toned-pixel encoding for chunk-record
+   bytes.  Each span is this 6-element array:
 
       [byteOffset, byteLength, baseRgbHex, lumaTolerance, bitsPerPixel,
        ordering]
 
-   where byteOffset and byteLength are relative to the first chunk-record
-   byte, baseRgbHex is the uppercase "RRGGBB" base colour, lumaTolerance
-   is the allowed Rec. 709 luma drift in integer steps, bitsPerPixel is
-   the palette index width (1-24), and ordering selects the palette
-   candidate ordering: 0 = nearest RGB distance to the base colour,
-   1 = nearest Rec. 709 chroma (Cb/Cr) distance.
+   The tuple fields have these meanings:
+
+   *  byteOffset and byteLength are relative to the first chunk-record byte
+
+   *  baseRgbHex is the uppercase "RRGGBB" base color
+
+   *  lumaTolerance is the permitted Rec. 709 luma drift in integer steps
+
+   *  bitsPerPixel is the palette index width from 1 through 24
+
+   *  ordering 0 selects the nearest RGB distance to the base color
+
+   *  ordering 1 selects the nearest Rec. 709 chroma distance.
 
    Spans MUST be ordered ascending by byteOffset, contiguous from 0, and
    exactly cover the chunk-record bytes.  Parsers MUST ignore array
    elements beyond the six defined here.  If the tuple shape ever needs
    to change incompatibly, a new field name supersedes "rgbTone".
 
-   Bootstrap: the stream header region (magic, metadata length, and
-   metadata JSON bytes) is always encoded as raw RGB (3 bytes per pixel),
-   regardless of payload encoding, so a decoder can read "rgbTone" before
-   decoding any toned pixels.  Palette construction from a span tuple is
-   deterministic: enumerate every 8-bit RGB colour whose rounded Rec. 709
-   luma lies within lumaTolerance of the base colour's rounded luma, sort
-   by the declared ordering (ties broken by ascending R, G, B), and keep
-   the first 2^bitsPerPixel entries.  Each pixel encodes bitsPerPixel
-   payload bits as a palette index, most significant bit first; each
-   span's trailing bits are zero-padded and truncated by byteLength on
-   decode.  Toned payloads require lossless pixel transport; any lossy
-   re-encode destroys palette membership.
+   The stream header region uses raw RGB at three bytes per pixel.  This
+   region includes the magic, metadata length, and metadata JSON bytes.
+   This rule applies for all payload encodings.  Thus, a decoder can read
+   "rgbTone" before it decodes toned pixels.
+
+   Palette construction from a span tuple is deterministic.  Enumerate
+   each 8-bit RGB color within lumaTolerance of the rounded base luma.
+   Sort the colors with the declared ordering.  Break ties by ascending R,
+   G, and B values.  Keep the first 2^bitsPerPixel entries.
+
+   Each pixel contains bitsPerPixel payload bits as a palette index.  The
+   most significant bit is first.  Zero-pad the trailing bits of each
+   span.  During decode, truncate these bits with byteLength.  Toned
+   payloads require lossless pixel transport.  Lossy encoding destroys
+   palette membership.
 
 9.3.  Chunk Record
 
@@ -974,22 +998,22 @@ Table of Contents
 
    A BCS2 parser MUST:
 
-   *  verify the "BCS2" magic;
+   *  verify the "BCS2" magic
 
-   *  verify that the metadata JSON byte length is in bounds;
+   *  verify that the metadata JSON byte length is in bounds
 
-   *  parse the metadata JSON as a JSON object;
+   *  parse the metadata JSON as a JSON object
 
    *  verify that "payloadDescriptors" is a non-empty array of no more
       than 256 entries;
 
-   *  walk all chunks without trailing or truncated bytes;
+   *  walk all chunks without trailing or truncated bytes
 
-   *  verify that chunk count is nonzero and constant;
+   *  verify that chunk count is nonzero and constant
 
-   *  verify contiguous chunk indexes;
+   *  verify contiguous chunk indexes
 
-   *  verify payload descriptor indexes are in range; and
+   *  verify payload descriptor indexes are in range
 
    *  verify CRC-32 for every stored chunk payload.
 
@@ -1115,10 +1139,10 @@ Table of Contents
 
 10.4.  Public-Key Trust
 
-   Verifiers MUST NOT trust a public key merely because it is embedded in
-   the record image.  The record may carry a key ID, but the corresponding
-   public key MUST come from a trusted player bundle, trusted application
-   configuration, or a trusted authenticated key endpoint.
+   Verifiers MUST NOT trust a public key only because the record contains
+   it.  The record can contain a key ID.  The related public key MUST come
+   from a trusted source.  Permitted sources are a player bundle,
+   application configuration, or authenticated key endpoint.
 
 11.  BTS1 Steganographic Sidecar
 
@@ -1167,12 +1191,11 @@ Table of Contents
    Scheme ID 1 and name "pairsign-safe-luma-v2" denote the current public
    sidecar carrier scheme.
 
-   Encoders construct a list of adjacent horizontal pixel pairs by scanning
-   rows from top to bottom and columns from left to right.  At each row
-   position, if the current pixel and the pixel immediately to its right
-   are both inside enabled carrier regions and neither is protected, the
-   pair is appended and the scan advances by two pixels.  Otherwise the
-   scan advances by one pixel.
+   Encoders scan rows from top to bottom.  They scan columns from left to
+   right.  The encoder examines the current pixel and the pixel to its
+   right.  It adds the pair when both pixels are in enabled carrier regions
+   and are not protected.  Then, the scan advances by two pixels.
+   Otherwise, the scan advances by one pixel.
 
    After construction, the complete pair list is shuffled using the
    Mulberry32 Fisher-Yates procedure in Section 11.4 with the nonzero seed
@@ -1286,27 +1309,28 @@ Table of Contents
    UTF-8 text and JSON items MUST decode to valid UTF-8.  JSON items MUST
    decode to valid JSON.  Image items in this revision SHOULD use codec
    avif with MIME type "image/avif".  Baseline sidecar decoders need not
-   implement every registered codec; unsupported item data MUST be treated
-   as untrusted stored bytes and not automatically decoded.
+   implement every registered codec.  A decoder MUST treat unsupported
+   item data as untrusted stored bytes.  It MUST NOT automatically decode
+   this data.
 
 11.9.  Sidecar Recovery
 
    A sidecar-capable decoder SHOULD:
 
-   1.  recover and verify BRD1;
+   1.  recover and verify BRD1
 
-   2.  recover and verify BCS2 independently;
+   2.  recover and verify BCS2 independently
 
-   3.  parse segment 21, if present;
+   3.  parse segment 21, if present
 
    4.  reconstruct the carrier pair list from the record profile, b_value,
        carrier flags, scheme ID, and seed;
 
-   5.  recover exactly the declared BTS1 byte length;
+   5.  recover exactly the declared BTS1 byte length
 
-   6.  verify the SHA-256 digest in the pointer;
+   6.  verify the SHA-256 digest in the pointer
 
-   7.  validate the BTS1 container; and
+   7.  validate the BTS1 container
 
    8.  expose supported items to the user.
 
@@ -1415,12 +1439,14 @@ Table of Contents
 
    If selected offsets are present, item pixels are selected by those
    offsets in listed order.  Otherwise, if item_count equals the full block
-   length, all block pixels are selected.  Otherwise, only fullSort mode can
-   reconstruct omitted offsets: it selects ceil(block_length * amount)
-   pixels, clamped to at least 2 and at most block_length, by sorting block
-   positions with the deterministic item hash used by the reference
-   implementation.  Encoders SHOULD include offsets whenever this implicit
-   reconstruction would not be unambiguous.
+   length, all block pixels are selected.
+
+   Otherwise, only fullSort mode can
+   reconstruct omitted offsets.  It selects ceil(block_length * amount)
+   pixels.  It limits the result to at least 2 and at most block_length.
+   It sorts block positions with the deterministic reference item hash.
+   Encoders SHOULD include offsets when implicit reconstruction is not
+   unambiguous.
 
    If the BRD1 descriptor declares a BCS2 stream byte length, BNPM source
    stream byte length MUST match it.
@@ -1495,11 +1521,11 @@ Table of Contents
 
    Conforming exact-digital interchange requires:
 
-   *  lossless storage;
+   *  lossless storage
 
-   *  no color-space transform that changes effective channel values;
+   *  no color-space transform that changes effective channel values
 
-   *  no scaling, resampling, filtering, or lossy recompression;
+   *  no scaling, resampling, filtering, or lossy recompression
 
    *  no compositing or blending that changes written metadata, payload, or
       sidecar RGB samples;
@@ -1516,10 +1542,17 @@ Table of Contents
 
 15.  Extension Points and Registries
 
-   Future specifications MAY define additional raster sizes, record
-   profiles, metadata segment types, payload encodings, BCS2 payload
-   container descriptors, sidecar carrier schemes, sidecar item types,
-   sidecar codecs, or photo-robust optical modes.
+   Future specifications MAY define these items:
+
+   *  additional raster sizes and record profiles
+
+   *  metadata segment types and payload encodings
+
+   *  BCS2 payload container descriptors
+
+   *  sidecar carrier schemes, item types, and codecs
+
+   *  photo-robust optical modes.
 
    New BRD1 segment types MUST use the length-prefixed segment framing in
    Section 7.4.  New optional fields that do not alter the meaning of
@@ -1536,10 +1569,17 @@ Table of Contents
    recovered BCS2 payload bytes, sidecar item bytes, and metadata strings
    as untrusted input.
 
-   Implementations SHOULD bound memory allocation using declared lengths;
-   reject malformed BRD1 descriptors, BCS2 streams, BTS1 containers, and
-   BNPM maps; cap decompressor output; and validate recovered payload
-   container structure before media decode.
+   Implementations SHOULD:
+
+   *  use declared lengths to limit memory allocation
+
+   *  reject malformed BRD1 descriptors and BCS2 streams
+
+   *  reject malformed BTS1 containers and BNPM maps
+
+   *  limit decompressor output
+
+   *  validate the recovered payload container before media decode.
 
    Brotli, Zstandard, AVIF, JSON, ECDC, and future media codecs can expose
    parser or decompressor attack surfaces.  Decoders SHOULD apply normal
@@ -1572,10 +1612,18 @@ Table of Contents
 
    This document has no IANA actions.
 
-   The BRD1 segment-type registry, payload-encoding registry, sidecar
-   carrier scheme registry, sidecar item type registry, and sidecar codec
-   registry are Bitneedle registries maintained by the Bitneedle format
-   specification repository.
+   The Bitneedle format specification repository maintains these
+   registries:
+
+   *  BRD1 segment types
+
+   *  payload encodings
+
+   *  sidecar carrier schemes
+
+   *  sidecar item types
+
+   *  sidecar codecs.
 
 19.  References
 
