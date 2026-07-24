@@ -1044,6 +1044,26 @@ pub fn render_payload_entries_with_descriptor_to_png_native(
     .map(Into::into)
 }
 
+pub fn render_payload_entries_with_descriptor_to_png_fast_native(
+    payload_entries: Vec<Vec<u8>>,
+    payload_descriptor_json: &str,
+    code_format: &str,
+    record_profile: &str,
+    duration_seconds: f64,
+    render_options_json: &str,
+) -> Result<NativeRenderResult> {
+    let forced_render_options_json = force_fast_fit_render_options_json(render_options_json)?;
+    render_payload_entries_with_descriptor_to_png(
+        payload_entries,
+        payload_descriptor_json,
+        code_format,
+        record_profile,
+        duration_seconds,
+        &forced_render_options_json,
+    )
+    .map(Into::into)
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProgrammeTrackInputJson {
