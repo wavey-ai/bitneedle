@@ -188,7 +188,13 @@ pub fn payload_to_standalone_ecdc(
 
     let mut object: serde_json::Map<String, Value> = serde_json::from_slice(codec_metadata)
         .context("ECDC codec metadata is not a JSON object")?;
-    object.insert("al".to_owned(), Value::from(block_samples));
+    match object.get("al") {
+        Some(Value::Number(value)) if value.as_u64().is_some_and(|value| value > 0) => {}
+        Some(_) => bail!("ECDC codec metadata \"al\" must be a positive integer"),
+        None => {
+            object.insert("al".to_owned(), Value::from(block_samples));
+        }
+    }
 
     let header_json = serde_json::to_vec(&Value::Object(object))
         .context("failed to serialize reconstructed ECDC header")?;
@@ -348,6 +354,36 @@ mod tests {
             Some(64_000)
         );
         assert_eq!(parts.payload, payload);
+    }
+
+    #[test]
+    fn guarded_descriptor_preserves_owned_audio_length() {
+        let mut descriptor = ecdc_payload_descriptor(48_000, 2, &metadata()).unwrap();
+        descriptor.codec_metadata = Some(
+            serde_json::to_vec(&serde_json::json!({
+                "m": "encodec_48khz",
+                "al": 64_000,
+                "nc": 8,
+                "lm": true,
+                "fp": 8192,
+                "mr": 2,
+                "acv": 2,
+                "fl": 203
+            }))
+            .unwrap(),
+        );
+
+        let rebuilt =
+            payload_to_standalone_ecdc(&descriptor, b"opaque codec payload bytes").unwrap();
+        let parts = split_ecdc_header::<Value>(&rebuilt).unwrap();
+
+        assert_eq!(descriptor.block_samples, Some(64_960));
+        assert_eq!(descriptor.output_offset_samples, Some(480));
+        assert_eq!(descriptor.output_samples, Some(64_000));
+        assert_eq!(
+            parts.metadata.get("al").and_then(Value::as_u64),
+            Some(64_000)
+        );
     }
 
     #[test]

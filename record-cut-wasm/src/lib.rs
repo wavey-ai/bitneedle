@@ -408,6 +408,19 @@ fn patternize_record_png_explore(
     })
 }
 
+pub fn patternize_record_png_native(
+    png_bytes: &[u8],
+    options_json: &str,
+    record_profile: Option<&str>,
+) -> Result<NativeRenderResult> {
+    patternize_record_png_explore(
+        png_bytes,
+        options_json,
+        record_profile,
+    )
+    .map(Into::into)
+}
+
 fn patternize_sidecar_items(
     reverse_map: &[u8],
     extra_items: Option<&Vec<serde_json::Value>>,
