@@ -73,11 +73,15 @@ export function decryptCacheEntry(descriptor_json: string, context_json: string,
 
 export function encryptCacheEntry(descriptor_json: string, context_json: string, plaintext: Uint8Array): Uint8Array;
 
+export function extractBitneedlePackageSection(package_bytes: Uint8Array, section_name: string): Uint8Array;
+
 export function extractLabelThumbnail(png_bytes: Uint8Array, record_profile?: string | null): WasmLabelThumbnail;
 
 export function inferRecordProfileFromPng(png_bytes: Uint8Array): string;
 
 export function initPanicHook(): void;
+
+export function inspectBitneedlePackageJson(package_bytes: Uint8Array): string;
 
 export function recordDescriptorMagic(): string;
 
@@ -114,8 +118,10 @@ export interface InitOutput {
     readonly decodeSidecarContainerItemsJson: (a: number, b: number) => [number, number, number, number];
     readonly decryptCacheEntry: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly encryptCacheEntry: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly extractBitneedlePackageSection: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly extractLabelThumbnail: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inferRecordProfileFromPng: (a: number, b: number) => [number, number, number, number];
+    readonly inspectBitneedlePackageJson: (a: number, b: number) => [number, number, number, number];
     readonly recordDescriptorMagic: () => [number, number];
     readonly recordPngToRgbColorBlockPng: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly recordWasmBuildInfoJson: () => [number, number];

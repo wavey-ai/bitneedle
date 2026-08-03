@@ -32,6 +32,7 @@ patent notice and the limited decoder pledge.
 | --- | --- | --- |
 | `record-core` | Apache-2.0 | Shared geometry, record-profile, chunk/gap, and spiral-index primitives used by both decoder and authoring tools. |
 | `record-descriptor` | Apache-2.0 | BRD1 descriptor wire format, parsing, and decoding. |
+| `record-package` | Apache-2.0 | Optional BPK1 container for exact BRD1, BRS1, and BSC1 component bytes. |
 | `record-decode` | Apache-2.0 | Decode and inspect Bitneedle picture-record images. |
 | `record-verify` | Apache-2.0 | Canonical hashing, registration receipt chains, and signature verification. |
 | `record-sidecar` | Apache-2.0 | Sidecar structures used to support recovery and inspection. |

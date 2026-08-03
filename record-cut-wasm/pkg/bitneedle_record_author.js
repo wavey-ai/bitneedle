@@ -60,6 +60,28 @@ export class WasmRenderResult {
 if (Symbol.dispose) WasmRenderResult.prototype[Symbol.dispose] = WasmRenderResult.prototype.free;
 
 /**
+ * @param {Uint8Array} brd1_bytes
+ * @param {Uint8Array} brs1_bytes
+ * @param {Uint8Array} bsc1_bytes
+ * @returns {Uint8Array}
+ */
+export function buildBitneedlePackage(brd1_bytes, brs1_bytes, bsc1_bytes) {
+    const ptr0 = passArray8ToWasm0(brd1_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(brs1_bytes, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(bsc1_bytes, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.buildBitneedlePackage(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
+}
+
+/**
  * @param {Uint8Array} avif_bytes
  * @returns {string}
  */
@@ -238,6 +260,50 @@ export function estimateRecordPngSidecarCapacityJson(png_bytes, record_profile) 
         return getStringFromWasm0(ptr3, len3);
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * @param {Uint8Array} package_bytes
+ * @param {string} section_name
+ * @returns {Uint8Array}
+ */
+export function extractBitneedlePackageSection(package_bytes, section_name) {
+    const ptr0 = passArray8ToWasm0(package_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(section_name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.extractBitneedlePackageSection(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * @param {Uint8Array} package_bytes
+ * @returns {string}
+ */
+export function inspectBitneedlePackageJson(package_bytes) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(package_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.inspectBitneedlePackageJson(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
 }
 

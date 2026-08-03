@@ -24,6 +24,7 @@ record-decode = { path = "../record-decode", version = "0.1.6" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.6" }
 record-label = { path = "../record-label", version = "0.1.6" }
 record-patternize = { path = "../record-patternize", version = "0.1.7" }
+record-package = { path = "../record-package", version = "0.1.0" }
 record-render = { path = "../record-render", version = "0.1.6" }
 record-sidecar = { path = "../record-sidecar", version = "0.1.6" }
 serde = { version = "1", features = ["derive"] }

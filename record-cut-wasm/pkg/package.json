@@ -2,7 +2,7 @@
   "name": "record-cut-wasm",
   "type": "module",
   "description": "WebAssembly facade for Bitneedle record authoring: rendering, programme assembly, and record-label profile helpers.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",

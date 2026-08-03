@@ -79,9 +79,29 @@ pub fn wasm_record_wasm_build_info_json() -> String {
         "version": env!("CARGO_PKG_VERSION"),
         "builtFrom": "bitneedle/record-wasm",
         "descriptorMagic": record_descriptor_magic(),
-        "chunkStreamMagic": String::from_utf8_lossy(record_core::RECORD_STREAM_MAGIC)
+        "chunkStreamMagic": String::from_utf8_lossy(record_core::RECORD_STREAM_MAGIC),
+        "packageMagic": String::from_utf8_lossy(record_package::PACKAGE_MAGIC)
     })
     .to_string()
+}
+
+#[wasm_bindgen(js_name = inspectBitneedlePackageJson)]
+pub fn wasm_inspect_bitneedle_package_json(package_bytes: &[u8]) -> Result<String, JsValue> {
+    let inspection = record_package::inspect_package(package_bytes).map_err(to_js_error)?;
+    serde_json::to_string(&inspection).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = extractBitneedlePackageSection)]
+pub fn wasm_extract_bitneedle_package_section(
+    package_bytes: &[u8],
+    section_name: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let kind = record_package::PackageSectionKind::from_name(section_name).map_err(to_js_error)?;
+    let package = record_package::parse_package(package_bytes).map_err(to_js_error)?;
+    package
+        .section(kind)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| JsValue::from_str(&format!("BPK1 has no {} section", kind.name())))
 }
 
 #[wasm_bindgen(js_name = decodeRecordMetadataJson)]

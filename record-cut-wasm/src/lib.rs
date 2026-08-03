@@ -41,6 +41,35 @@ fn to_js_error(error: impl std::fmt::Display + std::fmt::Debug) -> JsValue {
     JsValue::from_str(&format!("{error:#?}"))
 }
 
+#[wasm_bindgen(js_name = buildBitneedlePackage)]
+pub fn wasm_build_bitneedle_package(
+    brd1_bytes: &[u8],
+    brs1_bytes: &[u8],
+    bsc1_bytes: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let bsc1 = (!bsc1_bytes.is_empty()).then_some(bsc1_bytes);
+    record_package::encode_package(brd1_bytes, brs1_bytes, bsc1).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = inspectBitneedlePackageJson)]
+pub fn wasm_inspect_bitneedle_package_json(package_bytes: &[u8]) -> Result<String, JsValue> {
+    let inspection = record_package::inspect_package(package_bytes).map_err(to_js_error)?;
+    serde_json::to_string(&inspection).map_err(to_js_error)
+}
+
+#[wasm_bindgen(js_name = extractBitneedlePackageSection)]
+pub fn wasm_extract_bitneedle_package_section(
+    package_bytes: &[u8],
+    section_name: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let kind = record_package::PackageSectionKind::from_name(section_name).map_err(to_js_error)?;
+    let package = record_package::parse_package(package_bytes).map_err(to_js_error)?;
+    package
+        .section(kind)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| JsValue::from_str(&format!("BPK1 has no {} section", kind.name())))
+}
+
 #[wasm_bindgen(js_name = buildSidecarContainer)]
 pub fn wasm_build_sidecar_container(items_json: &str) -> Result<Vec<u8>, JsValue> {
     record_sidecar::build_sidecar_container_from_items_json(items_json).map_err(to_js_error)

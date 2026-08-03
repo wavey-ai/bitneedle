@@ -548,6 +548,25 @@ export function encryptCacheEntry(descriptor_json, context_json, plaintext) {
 }
 
 /**
+ * @param {Uint8Array} package_bytes
+ * @param {string} section_name
+ * @returns {Uint8Array}
+ */
+export function extractBitneedlePackageSection(package_bytes, section_name) {
+    const ptr0 = passArray8ToWasm0(package_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(section_name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.extractBitneedlePackageSection(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
  * @param {Uint8Array} png_bytes
  * @param {string | null} [record_profile]
  * @returns {WasmLabelThumbnail}
@@ -591,6 +610,31 @@ export function inferRecordProfileFromPng(png_bytes) {
 
 export function initPanicHook() {
     wasm.initPanicHook();
+}
+
+/**
+ * @param {Uint8Array} package_bytes
+ * @returns {string}
+ */
+export function inspectBitneedlePackageJson(package_bytes) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(package_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.inspectBitneedlePackageJson(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
 }
 
 /**

@@ -13,4 +13,5 @@ bytes2rgb = { path = "../bytes2rgb", version = "0.1.7" }
 record-core = { path = "../record-core", version = "0.1.7" }
 record-decode = { path = "../record-decode", version = "0.1.7" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
+record-package = { path = "../record-package", version = "0.1.0" }
 record-sidecar = { path = "../record-sidecar", version = "0.1.7" }

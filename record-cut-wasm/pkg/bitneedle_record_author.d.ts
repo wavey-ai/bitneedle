@@ -10,6 +10,8 @@ export class WasmRenderResult {
     pngBytes(): Uint8Array;
 }
 
+export function buildBitneedlePackage(brd1_bytes: Uint8Array, brs1_bytes: Uint8Array, bsc1_bytes: Uint8Array): Uint8Array;
+
 export function buildPackageCoverItemJson(avif_bytes: Uint8Array): string;
 
 export function buildPackageDisplayHeader(options_json: string): Uint8Array;
@@ -25,6 +27,10 @@ export function buildPackageSidecarRenderOptionsJson(options_json: string): stri
 export function buildSidecarContainer(items_json: string): Uint8Array;
 
 export function estimateRecordPngSidecarCapacityJson(png_bytes: Uint8Array, record_profile?: string | null): string;
+
+export function extractBitneedlePackageSection(package_bytes: Uint8Array, section_name: string): Uint8Array;
+
+export function inspectBitneedlePackageJson(package_bytes: Uint8Array): string;
 
 export function normalizeRecordProfileName(record_profile: string): string;
 
@@ -110,6 +116,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmrenderresult_free: (a: number, b: number) => void;
+    readonly buildBitneedlePackage: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly buildPackageCoverItemJson: (a: number, b: number) => [number, number];
     readonly buildPackageDisplayHeader: (a: number, b: number) => [number, number, number, number];
     readonly buildPackageDisplayHeaderItemJson: (a: number, b: number) => [number, number, number, number];
@@ -118,6 +125,8 @@ export interface InitOutput {
     readonly buildPackageSidecarRenderOptionsJson: (a: number, b: number) => [number, number, number, number];
     readonly buildSidecarContainer: (a: number, b: number) => [number, number, number, number];
     readonly estimateRecordPngSidecarCapacityJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly extractBitneedlePackageSection: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly inspectBitneedlePackageJson: (a: number, b: number) => [number, number, number, number];
     readonly normalizeRecordProfileName: (a: number, b: number) => [number, number, number, number];
     readonly packageFitBudgetJson: (a: number, b: number) => [number, number, number, number];
     readonly packagePreservedPatternItemsJson: (a: number, b: number) => [number, number, number, number];
@@ -148,9 +157,9 @@ export interface InitOutput {
     readonly wasmrenderresult_pngBytes: (a: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

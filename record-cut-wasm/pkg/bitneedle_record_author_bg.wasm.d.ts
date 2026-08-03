@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmrenderresult_free: (a: number, b: number) => void;
+export const buildBitneedlePackage: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const buildPackageCoverItemJson: (a: number, b: number) => [number, number];
 export const buildPackageDisplayHeader: (a: number, b: number) => [number, number, number, number];
 export const buildPackageDisplayHeaderItemJson: (a: number, b: number) => [number, number, number, number];
@@ -10,6 +11,8 @@ export const buildPackagePhotoItemJson: (a: number, b: number, c: number, d: num
 export const buildPackageSidecarRenderOptionsJson: (a: number, b: number) => [number, number, number, number];
 export const buildSidecarContainer: (a: number, b: number) => [number, number, number, number];
 export const estimateRecordPngSidecarCapacityJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const extractBitneedlePackageSection: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const inspectBitneedlePackageJson: (a: number, b: number) => [number, number, number, number];
 export const normalizeRecordProfileName: (a: number, b: number) => [number, number, number, number];
 export const packageFitBudgetJson: (a: number, b: number) => [number, number, number, number];
 export const packagePreservedPatternItemsJson: (a: number, b: number) => [number, number, number, number];
@@ -40,7 +43,7 @@ export const wasmrenderresult_payloadJson: (a: number) => [number, number];
 export const wasmrenderresult_pngBytes: (a: number) => [number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_start: () => void;

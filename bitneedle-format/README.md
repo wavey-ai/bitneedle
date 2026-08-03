@@ -2,8 +2,10 @@
 
 A compact visual guide to the canonical **BRD1 + BRS1 + optional BSC1** format.
 
+BPK1 transports these exact components before PNG rendering.
+
 This README gives explanatory information. The normative specification is
-`draft-bitneedle-picture-record-format-02.txt`.
+`draft-bitneedle-picture-record-format-03.txt`.
 
 ## At a glance
 
@@ -30,6 +32,7 @@ This README gives explanatory information. The normative specification is
 
 | Layer | Magic | Purpose | Structural encoding |
 |---|---|---|---|
+| Package | `BPK1` | Optional transport for exact record components | Binary directory and component bytes |
 | Raster | PNG | Exact RGBA carrier | 576 × 576, 8-bit RGBA |
 | Descriptor | `BRD1` | Geometry, BRS1 length, release display metadata | Binary segments |
 | Record stream | `BRS1` | Payload descriptors, entries, tracks, chunks | Compact binary |
