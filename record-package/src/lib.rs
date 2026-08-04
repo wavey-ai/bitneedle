@@ -242,6 +242,24 @@ pub fn encode_package(brd1: &[u8], brs1: &[u8], bsc1: Option<&[u8]>) -> Result<V
     Ok(output)
 }
 
+/// Recover exact record components from a picture-record PNG and package them.
+pub fn encode_package_from_png(png: &[u8]) -> Result<Vec<u8>> {
+    let decoded = record_decode::decode_record_png(png)
+        .context("failed to decode picture-record PNG for BPK1")?;
+    let (_, brd1) =
+        record_decode::decode_record_descriptor_bytes_from_png(png, Some(&decoded.record_profile))
+            .context("failed to recover the exact BRD1 descriptor")?;
+    let bsc1 = if decoded.descriptor.bsc_pointer.is_some() {
+        Some(
+            record_sidecar::decode_record_png_sidecar_bytes(png, Some(&decoded.record_profile))
+                .context("failed to recover the exact BSC1 sidecar")?,
+        )
+    } else {
+        None
+    };
+    encode_package(&brd1, &decoded.chunk_stream.bytes, bsc1.as_deref())
+}
+
 /// Parse and validate a complete BPK1 package.
 pub fn parse_package(bytes: &[u8]) -> Result<ParsedPackage<'_>> {
     if bytes.len() < PACKAGE_PREFIX_LENGTH {

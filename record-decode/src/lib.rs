@@ -92,6 +92,17 @@ fn decode_record_descriptor_from_rgba(
     height: usize,
     record_profile: &str,
 ) -> Result<RecordDescriptor> {
+    let descriptor_bytes = record_descriptor_bytes_from_rgba(rgba, width, height, record_profile)?;
+
+    record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
+}
+
+fn record_descriptor_bytes_from_rgba(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    record_profile: &str,
+) -> Result<Vec<u8>> {
     let header_indices =
         build_header_spiral_indices(width, height, record_profile, None, None, None)?;
     let trailer_indices =
@@ -109,14 +120,12 @@ fn decode_record_descriptor_from_rgba(
     let mut descriptor_indices = header_indices;
     descriptor_indices.extend_from_slice(&trailer_indices);
 
-    let descriptor_bytes = record_descriptor::metadata_bytes_from_grayscale_rgba(
+    record_descriptor::metadata_bytes_from_grayscale_rgba(
         rgba,
         &descriptor_indices,
         payload_len,
         "record descriptor",
-    )?;
-
-    record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
+    )
 }
 
 fn decode_record_groove_to_track_data(
@@ -204,6 +213,28 @@ pub fn decode_record_descriptor_from_png(
     }
 
     Ok((normalized_profile, descriptor))
+}
+
+pub fn decode_record_descriptor_bytes_from_png(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<(String, Vec<u8>)> {
+    let (width, height, rgba) = load_png_rgba(png_bytes)?;
+    let normalized_profile = match record_profile {
+        Some(profile) => normalize_record_profile_name(profile)?,
+        None => infer_record_profile_from_png(png_bytes)?,
+    };
+    let bytes = record_descriptor_bytes_from_rgba(&rgba, width, height, &normalized_profile)?;
+    let descriptor = record_descriptor::decode_record_descriptor_bytes(&bytes)?;
+    let descriptor_profile = normalize_record_profile_name(&descriptor.record_profile)?;
+    if descriptor_profile != normalized_profile {
+        bail!(
+            "record descriptor profile {} does not match inferred profile {}",
+            descriptor_profile,
+            normalized_profile
+        );
+    }
+    Ok((normalized_profile, bytes))
 }
 
 pub fn decode_record_png_to_chunk_stream_for_profile_with_length(

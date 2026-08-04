@@ -2690,6 +2690,13 @@ pub fn decode_record_png_sidecar_items_json(
     serde_json::to_string(&decoded).context("failed to serialize decoded record sidecar items")
 }
 
+pub fn decode_record_png_sidecar_bytes(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<Vec<u8>> {
+    decode_record_png_sidecar_with_context(png_bytes, record_profile).map(|(bytes, _)| bytes)
+}
+
 /// Restore a Patternize groove permutation before payload decoding.
 ///
 /// Returns `Ok(None)` for an ordinary record or a sidecar that contains no
