@@ -1050,6 +1050,7 @@ dependencies = [
  "base64",
  "brotli",
  "bytes2rgb",
+ "getrandom 0.3.4",
  "image",
  "record-core",
  "record-cut",

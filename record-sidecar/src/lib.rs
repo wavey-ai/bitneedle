@@ -2536,6 +2536,33 @@ fn descriptor_input_with_rewrite_options(
     })
 }
 
+fn descriptor_input_with_cache_encryption(
+    descriptor: &record_descriptor::RecordDescriptor,
+    cache_encryption: record_descriptor::CacheEncryptionDescriptor,
+) -> record_cut::descriptor::RecordDescriptorInput {
+    record_cut::descriptor::RecordDescriptorInput {
+        record_profile: descriptor.record_profile.clone(),
+        stream_byte_length: descriptor.stream_byte_length,
+        payload_encoding: Some(descriptor.payload_encoding.clone()),
+        title: descriptor.title.clone(),
+        artist: descriptor.artist.clone(),
+        release_id: descriptor
+            .release_id
+            .map(record_descriptor::release_id_to_text),
+        catalog_number: descriptor.catalog_number.clone(),
+        label: descriptor.label.clone(),
+        artwork_credit: descriptor.artwork_credit.clone(),
+        canonical_url: descriptor.canonical_url.clone(),
+        created_at: descriptor.created_at,
+        copyright_year: descriptor.copyright_year,
+        copyright_holder: descriptor.copyright_holder.clone(),
+        signed_release_reference: descriptor.signed_release_reference.clone(),
+        bsc_pointer: descriptor.bsc_pointer.clone(),
+        tone_spans: descriptor.tone_spans.clone(),
+        cache_encryption: Some(cache_encryption),
+    }
+}
+
 fn paint_descriptor_spiral(
     data: &mut [u8],
     width: usize,
@@ -2795,6 +2822,29 @@ pub fn rewrite_record_png(
     )?;
     let rewritten = write_rgba_png(context.width, context.height, &context.rgba)?;
     Ok((rewritten, summary))
+}
+
+/// Adds or replaces the cache-encryption descriptor without decoding or
+/// re-encoding the record payload. Only the redundant descriptor spirals are
+/// repainted; artwork, audio carriers, and sidecar carriers remain unchanged.
+pub fn patch_record_png_cache_encryption_secret(
+    png_bytes: &[u8],
+    secret_base64url: &str,
+    record_profile: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut context = decode_record_png_context(png_bytes, record_profile)?;
+    let cache_encryption =
+        record_descriptor::CacheEncryptionDescriptor::from_secret_base64url(secret_base64url)?;
+    let descriptor = descriptor_input_with_cache_encryption(&context.descriptor, cache_encryption);
+    paint_descriptor_spiral(
+        &mut context.rgba,
+        context.width,
+        context.height,
+        &context.record_profile,
+        context.descriptor.b_value(),
+        &descriptor,
+    )?;
+    write_rgba_png(context.width, context.height, &context.rgba)
 }
 
 pub fn normalize_sidecar_scheme(raw: Option<&str>) -> Result<String> {
