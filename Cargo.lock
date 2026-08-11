@@ -1242,6 +1242,7 @@ dependencies = [
  "record-core",
  "record-decode",
  "record-descriptor",
+ "record-sidecar",
  "serde_json",
 ]
 

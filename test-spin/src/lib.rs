@@ -61,8 +61,10 @@ pub struct ExternalManifest<'a> {
 
 /// Decode and inspect a complete Bitneedle PNG.
 pub fn inspect_record_png(png: &[u8], options: &InspectionOptions<'_>) -> Result<String> {
-    let decoded =
-        record_decode::decode_record_png(png).context("record_decode::decode_record_png failed")?;
+    let restored = record_sidecar::restore_patternized_record_png(png, None)
+        .context("record_sidecar::restore_patternized_record_png failed")?;
+    let decoded = record_decode::decode_record_png(restored.as_deref().unwrap_or(png))
+        .context("record_decode::decode_record_png failed")?;
 
     let mut out = String::new();
 
