@@ -40,10 +40,18 @@ The progression:
 
 Shipping editions embed their secret image with the standard months-old
 API — sign and number the label visually, composite it into the record,
-then `rewrite_record_png(record, { sidecar: { carriers: ["label"],
-items: [image] } })` and verify with `decode_record_png_sidecar_bytes`.
-Full label-region capacity, decodable by every existing record decoder,
+then `rewrite_record_png(record, { sidecar: { carriers: ["label",
+"intergroove"], items: [image] } })` and verify with
+`decode_record_png_sidecar_bytes`. Both carriers, because the label
+alone holds about 8.5KB on a 576px single and the intergroove takes the
+same image to roughly 27KB. Decodable by every existing record decoder,
 zero bespoke geometry.
+
+Read it back with `decode_record_png_sidecar_bytes(png, profile)` and
+nothing else: the carrier set, seed and scheme come from the record's
+own BSC1 descriptor pointer, so one call reads label-only pressings and
+label+intergroove pressings alike. A hand-rolled annulus walk would
+miss half of a modern edition.
 
 When a future edition type wants the inscription-as-carrier treatment,
 start from spike (3), and budget for the descriptor version bump that
