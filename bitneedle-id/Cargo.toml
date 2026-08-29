@@ -10,6 +10,7 @@ default = []
 generate = ["dep:rand_core", "ulid/std"]
 
 [dependencies]
+sha2 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

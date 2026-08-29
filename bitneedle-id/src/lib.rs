@@ -51,6 +51,7 @@ use std::{
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -76,6 +77,9 @@ pub const YL_CATALOGUE_DATA_SYMBOLS: usize = 10;
 pub const YL_CATALOGUE_CHECKSUM_SYMBOLS: usize = 1;
 
 /// Number of compact symbols in a YL catalogue code.
+/// Domain separation for [`YlCatalogueCode::derive`].
+pub const YL_CATALOGUE_DERIVATION_DOMAIN: &[u8] = b"bitneedle.yl-catalogue.v1";
+
 pub const YL_CATALOGUE_COMPACT_LENGTH: usize =
     YL_CATALOGUE_DATA_SYMBOLS + YL_CATALOGUE_CHECKSUM_SYMBOLS;
 
@@ -339,6 +343,40 @@ impl YlCatalogueCode {
 
     pub fn parse(value: impl AsRef<str>) -> Result<Self, YlCatalogueCodeParseError> {
         value.as_ref().parse()
+    }
+
+    /// The catalogue code of a release, derived from its ID.
+    ///
+    /// A release already has an identity: sixteen bytes in the record's own
+    /// header, collision-free without anyone coordinating. Minting a second
+    /// random number to stand for the same release meant a record carried
+    /// two unrelated identifiers and the header paid for both. This is the
+    /// same identity at the resolution a person can say out loud — fifty
+    /// bits, derived, stored nowhere.
+    ///
+    /// Hashed rather than truncated, so the code gives away nothing about
+    /// the ULID it came from — not the timestamp it opens with, and not
+    /// enough to work backwards. It cannot be reversed: fifty-five bits do
+    /// not hold a hundred and twenty-eight.
+    pub fn derive(release_id: [u8; 16]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(YL_CATALOGUE_DERIVATION_DOMAIN);
+        hasher.update(release_id);
+        let digest: [u8; 32] = hasher.finalize().into();
+
+        let mut compact = [0u8; YL_CATALOGUE_COMPACT_LENGTH];
+        let mut bit = 0usize;
+        for symbol in compact.iter_mut().take(YL_CATALOGUE_DATA_SYMBOLS) {
+            let mut value = 0u8;
+            for _ in 0..5 {
+                value = value << 1 | (digest[bit / 8] >> (7 - bit % 8) & 1);
+                bit += 1;
+            }
+            *symbol = value;
+        }
+        compact[YL_CATALOGUE_DATA_SYMBOLS] =
+            Self::checksum_symbol_value(&compact[..YL_CATALOGUE_DATA_SYMBOLS]);
+        Self(compact)
     }
 
     pub fn canonical(self) -> String {
@@ -630,6 +668,43 @@ define_typed_id!(AuthorizationId, Authorization);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_catalogue_code_is_the_release_it_belongs_to() {
+        let release = [
+            0x01, 0x8f, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5,
+            0xe6, 0xf7,
+        ];
+        let code = YlCatalogueCode::derive(release);
+
+        // Same release, same code: derived, never stored, so two readers
+        // that never speak agree.
+        assert_eq!(code, YlCatalogueCode::derive(release));
+
+        // And it survives the round trip through the form people read.
+        let parsed = YlCatalogueCode::parse(code.canonical()).expect("a valid code");
+        assert_eq!(parsed, code);
+
+        // A different release is a different code.
+        let mut other = release;
+        other[0] ^= 0xff;
+        assert_ne!(code, YlCatalogueCode::derive(other));
+    }
+
+    #[test]
+    fn a_derived_code_does_not_open_with_the_ulid() {
+        // Hashed, not truncated: the first symbols must not simply be the
+        // release ID's own leading bits, which are its timestamp.
+        let release = [
+            0x01, 0x8f, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5,
+            0xe6, 0xf7,
+        ];
+        let code = YlCatalogueCode::derive(release);
+        let leading = code.as_compact_str();
+        let raw = YlCatalogueCode::derive([0; 16]).as_compact_str();
+        assert_ne!(leading, raw);
+        assert_eq!(leading.len(), YL_CATALOGUE_COMPACT_LENGTH);
+    }
+
     use super::*;
 
     fn code_from_payload(payload: &str) -> String {
