@@ -2683,9 +2683,22 @@ fn descriptor_input_with_rewrite_options(
 })
 }
 
+fn descriptor_input_from(
+    descriptor: &record_descriptor::RecordDescriptor,
+) -> record_cut::descriptor::RecordDescriptorInput {
+    descriptor_input_with_cache_encryption_option(descriptor, descriptor.cache_encryption.clone())
+}
+
 fn descriptor_input_with_cache_encryption(
     descriptor: &record_descriptor::RecordDescriptor,
     cache_encryption: record_descriptor::CacheEncryptionDescriptor,
+) -> record_cut::descriptor::RecordDescriptorInput {
+    descriptor_input_with_cache_encryption_option(descriptor, Some(cache_encryption))
+}
+
+fn descriptor_input_with_cache_encryption_option(
+    descriptor: &record_descriptor::RecordDescriptor,
+    cache_encryption: Option<record_descriptor::CacheEncryptionDescriptor>,
 ) -> record_cut::descriptor::RecordDescriptorInput {
     record_cut::descriptor::RecordDescriptorInput {
         record_profile: descriptor.record_profile.clone(),
@@ -2706,12 +2719,14 @@ fn descriptor_input_with_cache_encryption(
         signed_release_reference: descriptor.signed_release_reference.clone(),
         bsc_pointer: descriptor.bsc_pointer.clone(),
         tone_spans: descriptor.tone_spans.clone(),
-        cache_encryption: Some(cache_encryption),
-        chain_anchor: None,
-        additional_signatures: Vec::new(),
-        isrcs: Vec::new(),
-        upc: None,
-        deferred_attestation: None,
+        cache_encryption,
+        // Carried across as they were: a repaint must not drop what the
+        // record already says.
+        chain_anchor: descriptor.chain_anchor.clone(),
+        isrcs: descriptor.isrcs.clone(),
+        upc: descriptor.upc.clone(),
+        deferred_attestation: descriptor.deferred_attestation.clone(),
+        additional_signatures: descriptor.additional_signatures.clone(),
     }
 }
 
@@ -2974,6 +2989,113 @@ pub fn rewrite_record_png(
     )?;
     let rewritten = write_rgba_png(context.width, context.height, &context.rgba)?;
     Ok((rewritten, summary))
+}
+
+/// The release commitment of a record that already exists.
+///
+/// Everything the commitment is taken over is recoverable from the pressed
+/// PNG: the descriptor's own identity, the BRS1 bytes, and each revolution's
+/// ECDC entry. So a record cut without a signature is not a record that can
+/// never have one — this is the digest to hand to whoever holds the key.
+///
+/// The descriptor identity deliberately excludes the signature segments, so
+/// the digest computed here is the same digest before and after the
+/// signature is written back in.
+pub fn record_release_commitment(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<[u8; 32]> {
+    let _ = record_profile;
+    let decoded = record_decode::decode_record_png(png_bytes)?;
+    let descriptor = &decoded.descriptor;
+    let release_id = descriptor
+        .release_id
+        .context("a release cannot be committed to without a release ID")?;
+    let stream = record_core::parse_record_stream(&decoded.chunk_stream.bytes)?;
+    let entries = record_core::validate_payload_entries_metadata(&stream.metadata, None)?;
+    let payload = stream
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.payload.iter().copied())
+        .collect::<Vec<_>>();
+
+    let mut revolutions = Vec::new();
+    for entry in &entries {
+        let descriptor_for_entry =
+            &stream.metadata.payload_descriptors[entry.payload_descriptor_index as usize];
+        if !descriptor_for_entry
+            .container
+            .eq_ignore_ascii_case(record_core::PAYLOAD_CONTAINER_ECDC)
+        {
+            continue;
+        }
+        let end = entry
+            .byte_offset
+            .checked_add(entry.byte_length)
+            .context("payload entry range overflow")?;
+        if end > payload.len() {
+            bail!("payload entry {} runs past the stream", entry.index);
+        }
+        revolutions.push(record_core::commitment::revolution_commitment(
+            release_id,
+            u32::try_from(entry.index).context("revolution index exceeds u32")?,
+            sha256_digest_bytes(&payload[entry.byte_offset..end]),
+        ));
+    }
+
+    Ok(record_core::commitment::release_commitment_v2(
+        release_id,
+        record_descriptor::record_profile_code(&descriptor.record_profile)?,
+        record_descriptor::payload_encoding_code(&descriptor.payload_encoding)?,
+        sha256_digest_bytes(&decoded.chunk_stream.bytes),
+        record_descriptor::descriptor_commitment(descriptor)?,
+        &revolutions,
+    ))
+}
+
+/// Signs a record that already exists, without re-cutting it.
+///
+/// A pressing made before anyone was ready to sign it is still signable: the
+/// commitment covers the audio and the descriptor's own fields, none of
+/// which this touches. Only the redundant descriptor spirals are repainted —
+/// artwork, audio carriers and sidecar carriers are left exactly as they
+/// were pressed.
+///
+/// The signature is made elsewhere, by whoever holds the key: pass the
+/// digest from [`record_release_commitment`] to them and the bytes they
+/// return to this.
+pub fn patch_record_png_signature(
+    png_bytes: &[u8],
+    key_id: &[u8],
+    signature: &[u8],
+    record_profile: Option<&str>,
+) -> Result<Vec<u8>> {
+    let commitment = record_release_commitment(png_bytes, record_profile)?;
+    let reference = record_descriptor::SignedReleaseReference {
+        version: record_descriptor::SIGNED_RELEASE_REFERENCE_VERSION,
+        release_commitment_sha256: commitment,
+        key_id: key_id.to_vec(),
+        signature: signature.to_vec(),
+    };
+    reference.validate()?;
+
+    let mut context = decode_record_png_context(png_bytes, record_profile)?;
+    let mut descriptor = descriptor_input_from(&context.descriptor);
+    // A second signer joins the list; the first takes the primary segment.
+    if context.descriptor.signed_release_reference.is_some() {
+        descriptor.additional_signatures.push(reference);
+    } else {
+        descriptor.signed_release_reference = Some(reference);
+    }
+    paint_descriptor_spiral(
+        &mut context.rgba,
+        context.width,
+        context.height,
+        &context.record_profile,
+        context.descriptor.b_value(),
+        &descriptor,
+    )?;
+    write_rgba_png(context.width, context.height, &context.rgba)
 }
 
 /// Adds or replaces the cache-encryption descriptor without decoding or
@@ -3546,6 +3668,60 @@ mod attestation_tests {
             text: None,
             json: None,
         }
+    }
+
+    #[test]
+    fn a_repaint_keeps_what_the_record_already_says() {
+        // Signing an existing record repaints its descriptor. Everything it
+        // already said has to come through that repaint — a record gaining a
+        // signature must not lose its barcode on the way.
+        let reference = record_descriptor::SignedReleaseReference {
+            version: record_descriptor::SIGNED_RELEASE_REFERENCE_VERSION,
+            release_commitment_sha256: [2; 32],
+            key_id: b"yl.vin".to_vec(),
+            signature: vec![
+                3;
+                record_descriptor::SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH
+            ],
+        };
+        let descriptor = record_descriptor::RecordDescriptor {
+            version: record_descriptor::RECORD_DESCRIPTOR_VERSION,
+            checksum_protected: true,
+            b_value_bits: 1.0f64.to_bits(),
+            record_profile: record_descriptor::RECORD_PROFILE_SINGLE45.to_string(),
+            stream_byte_length: 4096,
+            payload_encoding: record_descriptor::PAYLOAD_ENCODING_RGB.to_string(),
+            title: Some("Title".to_string()),
+            artist: Some("Artist".to_string()),
+            release_id: Some([1; record_descriptor::RELEASE_ID_LENGTH]),
+            catalog_number: None,
+            label: None,
+            artwork_credit: None,
+            canonical_url: None,
+            created_at: None,
+            copyright_year: None,
+            copyright_holder: None,
+            signed_release_reference: None,
+            bsc_pointer: None,
+            tone_spans: Vec::new(),
+            cache_encryption: None,
+            chain_anchor: Some(vec![9; 8]),
+            additional_signatures: Vec::new(),
+            isrcs: vec![record_descriptor::TrackIsrc {
+                track_index: 0,
+                code: "GBABC2400001".to_string(),
+            }],
+            upc: Some("5060204800016".to_string()),
+            deferred_attestation: Some(reference),
+        };
+
+        let input = descriptor_input_from(&descriptor);
+        assert_eq!(input.chain_anchor, descriptor.chain_anchor);
+        assert_eq!(input.upc, descriptor.upc);
+        assert_eq!(input.isrcs.len(), 1);
+        assert_eq!(input.isrcs[0].code, "GBABC2400001");
+        assert!(input.deferred_attestation.is_some());
+        assert_eq!(input.title, descriptor.title);
     }
 
     #[test]
