@@ -1,0 +1,27 @@
+[package]
+name = "record-proof"
+version = "0.1.7"
+edition = "2021"
+description = "Print-proof post-processing for bitneedle picture records: adds colour calibration targets around the disc"
+repository = "https://github.com/wavey-ai/bitneedle"
+readme = "README.md"
+license = "Apache-2.0"
+
+[[bin]]
+name = "record-proof"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+qrcode = { version = "0.14", default-features = false }
+record-core = { path = "../record-core", version = "0.1.7" }
+record-decode = { path = "../record-decode", version = "0.1.7" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
+record-groove = { path = "../record-groove", version = "0.1.7" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+record-render = { path = "../record-render", version = "0.1.7" }
+record-cut = { path = "../record-cut", version = "0.1.7" }

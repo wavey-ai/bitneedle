@@ -26,6 +26,7 @@ export const extractBitneedlePackageSection: (a: number, b: number, c: number, d
 export const extractLabelThumbnail: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const inferRecordProfileFromPng: (a: number, b: number) => [number, number, number, number];
 export const inspectBitneedlePackageJson: (a: number, b: number) => [number, number, number, number];
+export const programmeMapFromChunkStreamJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const recordDescriptorMagic: () => [number, number];
 export const recordPngToRgbColorBlockPng: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const recordWasmBuildInfoJson: () => [number, number];

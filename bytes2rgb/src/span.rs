@@ -2,6 +2,7 @@
 
 use crate::{TonedConfig, TonedPalette};
 use anyhow::{bail, Context, Result};
+use std::borrow::Cow;
 
 /// The resolved settings for one encoded byte range. Persist these (e.g. as
 /// track-level metadata) — they are everything a decoder needs.
@@ -84,12 +85,21 @@ pub fn decode_toned_spans(rgba: &[u8], spans: &[ToneSpan]) -> Result<Vec<u8>> {
 
     let (expected_byte_length, _expected_pixel_count) = validate_tone_spans(spans)?;
 
-    let opaque: Vec<u8> = rgba
-        .chunks_exact(4)
-        .filter(|chunk| chunk[3] != 0)
-        .flatten()
-        .copied()
-        .collect();
+    // Groove extraction already produces a contiguous, fully opaque buffer.
+    // Borrow that common path directly instead of duplicating the complete
+    // RGBA carrier before decoding. Preserve filtering for callers that pass
+    // square-image padding or another buffer containing transparent pixels.
+    let opaque: Cow<'_, [u8]> = if rgba.chunks_exact(4).all(|chunk| chunk[3] != 0) {
+        Cow::Borrowed(rgba)
+    } else {
+        Cow::Owned(
+            rgba.chunks_exact(4)
+                .filter(|chunk| chunk[3] != 0)
+                .flatten()
+                .copied()
+                .collect(),
+        )
+    };
 
     let mut bytes = Vec::with_capacity(expected_byte_length);
 

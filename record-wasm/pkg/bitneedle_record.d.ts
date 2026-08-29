@@ -83,6 +83,13 @@ export function initPanicHook(): void;
 
 export function inspectBitneedlePackageJson(package_bytes: Uint8Array): string;
 
+/**
+ * Builds the same pre-decode programme map from an already extracted BRS1
+ * stream. Playback uses this after PNG extraction so it does not walk and
+ * decode the complete record groove a second time.
+ */
+export function programmeMapFromChunkStreamJson(chunk_stream_bytes: Uint8Array, record_profile: string): string;
+
 export function recordDescriptorMagic(): string;
 
 export function recordPngToRgbColorBlockPng(png_bytes: Uint8Array, record_profile?: string | null): Uint8Array;
@@ -122,6 +129,7 @@ export interface InitOutput {
     readonly extractLabelThumbnail: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inferRecordProfileFromPng: (a: number, b: number) => [number, number, number, number];
     readonly inspectBitneedlePackageJson: (a: number, b: number) => [number, number, number, number];
+    readonly programmeMapFromChunkStreamJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly recordDescriptorMagic: () => [number, number];
     readonly recordPngToRgbColorBlockPng: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly recordWasmBuildInfoJson: () => [number, number];

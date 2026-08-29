@@ -12,6 +12,9 @@ use record_descriptor::{
     payload_encoding_code, record_profile_code, release_id_to_bytes, CacheEncryptionDescriptor,
     SignedReleaseReference, ToneSpanDescriptor, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1,
     RECORD_DESCRIPTOR_MAGIC, RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION,
+    encode_isrc_segment, normalize_upc, TrackIsrc,
+    SEGMENT_ADDITIONAL_SIGNATURES, SEGMENT_CHAIN_ANCHOR,
+    SEGMENT_DEFERRED_ATTESTATION, SEGMENT_ISRC, SEGMENT_UPC,
     SEGMENT_ARTIST, SEGMENT_ARTWORK_CREDIT, SEGMENT_BSC_POINTER, SEGMENT_CACHE_ENCRYPTION,
     SEGMENT_CANONICAL_URL, SEGMENT_CATALOG_NUMBER, SEGMENT_COPYRIGHT_HOLDER,
     SEGMENT_COPYRIGHT_YEAR, SEGMENT_CREATED_AT, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_LABEL,
@@ -42,6 +45,14 @@ pub struct RecordDescriptorInput {
     pub bsc_pointer: Option<Vec<u8>>,
     pub tone_spans: Vec<ToneSpanDescriptor>,
     pub cache_encryption: Option<CacheEncryptionDescriptor>,
+    /// The deferred group: written after the press, and never unsigned.
+    pub chain_anchor: Option<Vec<u8>>,
+    pub isrcs: Vec<TrackIsrc>,
+    pub upc: Option<String>,
+    pub deferred_attestation: Option<SignedReleaseReference>,
+    /// Signatures beyond the first: a pressing may be attested by the
+    /// artist, by yl.vin, or by both.
+    pub additional_signatures: Vec<SignedReleaseReference>,
 }
 
 pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Result<Vec<u8>> {
@@ -55,6 +66,27 @@ pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Re
     out.extend_from_slice(&key_id_len.to_be_bytes());
     out.extend_from_slice(&reference.key_id);
     out.extend_from_slice(&reference.signature);
+    Ok(out)
+}
+
+pub fn encode_additional_signatures(
+    references: &[SignedReleaseReference],
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        &u16::try_from(references.len())
+            .context("signature count exceeds u16")?
+            .to_be_bytes(),
+    );
+    for reference in references {
+        let encoded = encode_signed_release_reference(reference)?;
+        out.extend_from_slice(
+            &u16::try_from(encoded.len())
+                .context("signature exceeds u16")?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(&encoded);
+    }
     Ok(out)
 }
 
@@ -167,6 +199,42 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         .transpose()?
         .unwrap_or_default();
     let bsc_pointer = descriptor.bsc_pointer.clone().unwrap_or_default();
+    let chain_anchor = descriptor.chain_anchor.clone().unwrap_or_default();
+    let isrcs = if descriptor.isrcs.is_empty() {
+        Vec::new()
+    } else {
+        encode_isrc_segment(&descriptor.isrcs)?
+    };
+    let upc = descriptor
+        .upc
+        .as_deref()
+        .map(normalize_upc)
+        .transpose()?
+        .map(|value| value.into_bytes())
+        .unwrap_or_default();
+    let deferred_attestation = descriptor
+        .deferred_attestation
+        .as_ref()
+        .map(encode_signed_release_reference)
+        .transpose()?
+        .unwrap_or_default();
+    let additional_signatures = if descriptor.additional_signatures.is_empty() {
+        Vec::new()
+    } else {
+        if descriptor.signed_release_reference.is_none() {
+            bail!("additional signatures without a signed release reference to join");
+        }
+        encode_additional_signatures(&descriptor.additional_signatures)?
+    };
+    // Null or signed, refused at the point of writing as well as reading.
+    if (!chain_anchor.is_empty() || !isrcs.is_empty() || !upc.is_empty())
+        == deferred_attestation.is_empty()
+    {
+        bail!(
+            "the deferred group is null or signed: a chain anchor, ISRC or barcode \
+             requires its attestation, and the attestation requires something to sign"
+        );
+    }
     let cache_encryption = descriptor
         .cache_encryption
         .as_ref()
@@ -215,6 +283,11 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_BSC_POINTER, bsc_pointer),
         (SEGMENT_TONED_CARRIER_MAP, toned_carrier_map),
         (SEGMENT_CACHE_ENCRYPTION, cache_encryption),
+        (SEGMENT_CHAIN_ANCHOR, chain_anchor),
+        (SEGMENT_ISRC, isrcs),
+        (SEGMENT_UPC, upc),
+        (SEGMENT_DEFERRED_ATTESTATION, deferred_attestation),
+        (SEGMENT_ADDITIONAL_SIGNATURES, additional_signatures),
     ] {
         if payload.is_empty() {
             continue;

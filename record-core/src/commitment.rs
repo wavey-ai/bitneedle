@@ -51,6 +51,45 @@ pub fn release_commitment(
     hasher.finalize().into()
 }
 
+const RELEASE_DOMAIN_V2: &[u8] = b"BITNEEDLE-RELEASE-V2";
+
+/// SHA-256 over the release commitment preimage, v2.
+///
+/// v1 bound the audio and nothing else, which left a pressed record's own
+/// words — its title, its artist, the geometry it was cut at — outside the
+/// signature and therefore changeable by anyone. A pressed record is not
+/// changeable; it is pressed. v2 folds in `descriptor_sha256`, the digest of
+/// every field the descriptor carries, so the signature covers everything
+/// the record says about itself.
+///
+/// What stays outside is only what cannot exist yet at press time: the chain
+/// anchor, the ISRCs and the barcode. Those are signed in their own right by
+/// the deferred attestation, which is bound to this commitment's descriptor
+/// digest, so they cannot be moved between records.
+///
+/// v1 remains for records already pressed under it.
+pub fn release_commitment_v2(
+    release_id: [u8; 16],
+    record_profile_code: u8,
+    payload_encoding_code: u8,
+    brs1_sha256: [u8; 32],
+    descriptor_sha256: [u8; 32],
+    revolution_commitments: &[[u8; 32]],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(RELEASE_DOMAIN_V2);
+    hasher.update(release_id);
+    hasher.update([record_profile_code]);
+    hasher.update([payload_encoding_code]);
+    hasher.update(brs1_sha256);
+    hasher.update(descriptor_sha256);
+    hasher.update((revolution_commitments.len() as u32).to_be_bytes());
+    for commitment in revolution_commitments {
+        hasher.update(commitment);
+    }
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +103,25 @@ mod tests {
 
     fn ecdc_sha256() -> [u8; 32] {
         Sha256::digest(b"ecdc entry bytes").into()
+    }
+
+    #[test]
+    fn v2_differs_from_v1_and_follows_the_descriptor() {
+        let release_id = release_id();
+        let brs1 = ecdc_sha256();
+        let revolutions = [revolution_commitment(release_id, 0, ecdc_sha256())];
+        let descriptor: [u8; 32] = Sha256::digest(b"descriptor").into();
+        let other: [u8; 32] = Sha256::digest(b"descriptor with a new title").into();
+
+        let v1 = release_commitment(release_id, 0, 0, brs1, &revolutions);
+        let v2 = release_commitment_v2(release_id, 0, 0, brs1, descriptor, &revolutions);
+        assert_ne!(v1, v2, "the domains must separate the two versions");
+
+        let changed = release_commitment_v2(release_id, 0, 0, brs1, other, &revolutions);
+        assert_ne!(
+            v2, changed,
+            "a change anywhere in the descriptor must change the commitment"
+        );
     }
 
     #[test]

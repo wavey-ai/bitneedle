@@ -10,6 +10,7 @@ members = [
   "record-label",
   "record-groove",
   "record-patternize",
+  "record-proof",
   "record-package",
   "record-render",
   "record-verify",

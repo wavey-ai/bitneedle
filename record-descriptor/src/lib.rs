@@ -70,6 +70,44 @@ pub const SEGMENT_TONED_CARRIER_MAP: u8 = 22;
 pub const SEGMENT_CACHE_ENCRYPTION: u8 = 23;
 pub const SEGMENT_COPYRIGHT_YEAR: u8 = 24;
 pub const SEGMENT_COPYRIGHT_HOLDER: u8 = 25;
+/// The deferred group: the only fields a pressed record may gain later.
+///
+/// A pressed record is immutable — everything it says about itself is inside
+/// the release commitment. These three are the exception, and only because
+/// none of them can exist at press time: a chain anchor needs a commitment
+/// to anchor, and ISRCs and barcodes are issued by registrars on their own
+/// schedule. They are never merely absent-or-present, though: writing any of
+/// them requires [`SEGMENT_DEFERRED_ATTESTATION`], so a deferred field is
+/// null or signed and nothing in between.
+pub const SEGMENT_CHAIN_ANCHOR: u8 = 26;
+/// ISRCs, one per recording rather than per record: a count, then
+/// `(track index u16be, 12 ASCII characters)` pairs in ascending index
+/// order. Pairs because registrars assign codes a track at a time.
+pub const SEGMENT_ISRC: u8 = 27;
+/// The release barcode: 12, 13 or 14 ASCII digits (UPC-A, EAN-13, GTIN-14)
+/// with a valid mod-10 check digit.
+pub const SEGMENT_UPC: u8 = 28;
+/// The signature over the deferred group, in the same envelope shape as
+/// [`SEGMENT_SIGNED_RELEASE_REFERENCE`], over
+/// [`deferred_identity_bytes`].
+pub const SEGMENT_DEFERRED_ATTESTATION: u8 = 29;
+
+/// Signatures beyond the first, so a release can be attested by more than
+/// one party.
+///
+/// A pressing may be signed by the artist, by yl.vin, or by both. They are
+/// all signatures over the same release commitment — the same digest, signed
+/// independently — so this is a list rather than a role table: who a
+/// signature belongs to is a question for whoever resolves its key ID, not
+/// something the wire format decides. Order carries no meaning.
+///
+/// Kept separate from [`SEGMENT_SIGNED_RELEASE_REFERENCE`] rather than
+/// letting that segment repeat, because a repeated segment reads as a
+/// duplicate to every reader already in the field, whereas an unknown one is
+/// skipped.
+pub const SEGMENT_ADDITIONAL_SIGNATURES: u8 = 31;
+
+pub const ISRC_LENGTH: usize = 12;
 
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
@@ -415,6 +453,314 @@ fn cache_encryption_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<
     }
     push_len_prefixed_string(&mut out, 15, descriptor.copyright_holder.as_deref());
     Ok(out)
+}
+
+pub fn decode_additional_signatures(payload: &[u8]) -> Result<Vec<SignedReleaseReference>> {
+    if payload.len() < 2 {
+        bail!("additional signatures segment is truncated");
+    }
+    let count = u16::from_be_bytes(payload[..2].try_into().expect("slice length")) as usize;
+    if count == 0 {
+        bail!("additional signatures segment must not be empty");
+    }
+    let mut references = Vec::with_capacity(count);
+    let mut offset = 2usize;
+    for _ in 0..count {
+        if offset + 2 > payload.len() {
+            bail!("additional signature is truncated");
+        }
+        let length =
+            u16::from_be_bytes(payload[offset..offset + 2].try_into().expect("slice length"))
+                as usize;
+        offset += 2;
+        let end = offset
+            .checked_add(length)
+            .context("additional signature length overflow")?;
+        if end > payload.len() {
+            bail!("additional signature is truncated");
+        }
+        references.push(decode_signed_release_reference(&payload[offset..end])?);
+        offset = end;
+    }
+    if offset != payload.len() {
+        bail!("additional signatures segment has trailing bytes");
+    }
+    Ok(references)
+}
+
+/// One key, one signature. Two signatures from the same key over the same
+/// commitment say nothing the first did not.
+pub fn validate_signature_set(descriptor: &RecordDescriptor) -> Result<()> {
+    if descriptor.additional_signatures.is_empty() {
+        return Ok(());
+    }
+    let Some(primary) = descriptor.signed_release_reference.as_ref() else {
+        bail!("additional signatures without a signed release reference to join");
+    };
+    let mut seen = vec![primary.key_id.as_slice()];
+    for reference in &descriptor.additional_signatures {
+        if reference.release_commitment_sha256 != primary.release_commitment_sha256 {
+            bail!("every signature on a release must be over the same commitment");
+        }
+        if seen.contains(&reference.key_id.as_slice()) {
+            bail!("the same key has signed this release twice");
+        }
+        seen.push(reference.key_id.as_slice());
+    }
+    Ok(())
+}
+
+/// An ISRC in canonical form: uppercase, unhyphenated, 12 characters —
+/// 2 alpha country, 3 alphanumeric registrant, 2 digit year, 5 digit
+/// designation.
+pub fn normalize_isrc(value: &str) -> Result<String> {
+    let code: String = value
+        .chars()
+        .filter(|character| !matches!(character, '-' | ' '))
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if code.len() != ISRC_LENGTH {
+        bail!("ISRC must be {ISRC_LENGTH} characters, got {}", code.len());
+    }
+    let bytes = code.as_bytes();
+    if !bytes[..2].iter().all(u8::is_ascii_alphabetic) {
+        bail!("ISRC country code must be two letters");
+    }
+    if !bytes[2..5].iter().all(u8::is_ascii_alphanumeric) {
+        bail!("ISRC registrant code must be three letters or digits");
+    }
+    if !bytes[5..].iter().all(u8::is_ascii_digit) {
+        bail!("ISRC year and designation must be seven digits");
+    }
+    Ok(code)
+}
+
+/// A barcode as issued: 12, 13 or 14 digits with a valid mod-10 check digit.
+pub fn normalize_upc(value: &str) -> Result<String> {
+    let digits: String = value.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    if !matches!(digits.len(), 12 | 13 | 14) {
+        bail!(
+            "barcode must be 12, 13 or 14 digits (UPC-A, EAN-13, GTIN-14), got {}",
+            digits.len()
+        );
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("barcode must be digits only");
+    }
+    // Mod 10: weight 3 and 1 alternating from the right, excluding the
+    // check digit itself.
+    let bytes = digits.as_bytes();
+    let check = (bytes[bytes.len() - 1] - b'0') as u32;
+    let sum: u32 = bytes[..bytes.len() - 1]
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, byte)| {
+            let digit = (byte - b'0') as u32;
+            if index % 2 == 0 {
+                digit * 3
+            } else {
+                digit
+            }
+        })
+        .sum();
+    if (10 - (sum % 10)) % 10 != check {
+        bail!("barcode check digit is wrong");
+    }
+    Ok(digits)
+}
+
+pub fn encode_isrc_segment(isrcs: &[TrackIsrc]) -> Result<Vec<u8>> {
+    let mut sorted = isrcs.to_vec();
+    sorted.sort_by_key(|entry| entry.track_index);
+    if sorted.windows(2).any(|pair| pair[0].track_index == pair[1].track_index) {
+        bail!("two ISRCs claim the same track");
+    }
+    let mut out = Vec::with_capacity(2 + sorted.len() * (2 + ISRC_LENGTH));
+    out.extend_from_slice(
+        &u16::try_from(sorted.len())
+            .context("ISRC count exceeds u16")?
+            .to_be_bytes(),
+    );
+    for entry in &sorted {
+        out.extend_from_slice(&entry.track_index.to_be_bytes());
+        out.extend_from_slice(normalize_isrc(&entry.code)?.as_bytes());
+    }
+    Ok(out)
+}
+
+pub fn decode_isrc_segment(payload: &[u8]) -> Result<Vec<TrackIsrc>> {
+    if payload.len() < 2 {
+        bail!("ISRC segment is truncated");
+    }
+    let count = u16::from_be_bytes(payload[..2].try_into().expect("slice length")) as usize;
+    let expected = 2 + count * (2 + ISRC_LENGTH);
+    if payload.len() != expected {
+        bail!("ISRC segment declares {count} codes but is {} bytes", payload.len());
+    }
+    let mut entries = Vec::with_capacity(count);
+    let mut previous: Option<u16> = None;
+    for index in 0..count {
+        let at = 2 + index * (2 + ISRC_LENGTH);
+        let track_index = u16::from_be_bytes(payload[at..at + 2].try_into().expect("slice length"));
+        if let Some(previous) = previous {
+            if track_index <= previous {
+                bail!("ISRCs must be in ascending track order without repeats");
+            }
+        }
+        previous = Some(track_index);
+        let code = std::str::from_utf8(&payload[at + 2..at + 2 + ISRC_LENGTH])
+            .context("ISRC is not valid UTF-8")?;
+        entries.push(TrackIsrc {
+            track_index,
+            code: normalize_isrc(code)?,
+        });
+    }
+    Ok(entries)
+}
+
+/// The signed shape of the deferred group.
+///
+/// Bound to [`descriptor_commitment`] rather than to the press signature, so
+/// a barcode cannot be lifted off one record onto another, and so a record
+/// that was never signed at press can still carry a signed barcode.
+pub fn deferred_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"bitneedle.record-descriptor.deferred.v1");
+    out.extend_from_slice(&descriptor_commitment(descriptor)?);
+    out.push(1);
+    match descriptor.chain_anchor.as_ref() {
+        Some(anchor) => {
+            push_u32(
+                &mut out,
+                u32::try_from(anchor.len()).context("chain anchor exceeds u32")?,
+            );
+            out.extend_from_slice(anchor);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    out.push(2);
+    let isrcs = encode_isrc_segment(&descriptor.isrcs)?;
+    push_u32(
+        &mut out,
+        u32::try_from(isrcs.len()).context("ISRC block exceeds u32")?,
+    );
+    out.extend_from_slice(&isrcs);
+    push_len_prefixed_string(&mut out, 3, descriptor.upc.as_deref());
+    Ok(out)
+}
+
+/// SHA-256 of [`deferred_identity_bytes`]: what the deferred attestation
+/// signs.
+pub fn deferred_commitment(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(deferred_identity_bytes(descriptor)?).into())
+}
+
+/// The rule that makes a deferred field null or signed and nothing between.
+pub fn validate_deferred_group(descriptor: &RecordDescriptor) -> Result<()> {
+    let present = descriptor.chain_anchor.is_some()
+        || !descriptor.isrcs.is_empty()
+        || descriptor.upc.is_some();
+    match (present, descriptor.deferred_attestation.as_ref()) {
+        (true, None) => bail!(
+            "a record carrying a chain anchor, an ISRC or a barcode must carry \
+             the deferred attestation that signs them"
+        ),
+        (false, Some(_)) => bail!("deferred attestation with nothing deferred to sign"),
+        _ => Ok(()),
+    }
+}
+
+/// The signed shape of a descriptor: everything a pressed record says about
+/// itself, in a fixed order, length-prefixed.
+///
+/// A pressed record is immutable. Every field here is inside the release
+/// commitment, so changing any of them — a title, a catalogue number, the
+/// carrier geometry, the toned palette — makes a different release, which is
+/// what pressing a record again means.
+///
+/// Two segments are outside, and only two. The signed-release reference
+/// cannot contain its own signature. The chain anchor cannot exist yet: it
+/// is written once the release has been pressed and anchored, which is the
+/// single thing about a pressed record that is allowed to change.
+pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"bitneedle.record-descriptor.signed-identity.v1");
+    push_u8(&mut out, descriptor.version);
+    push_u8(&mut out, u8::from(descriptor.checksum_protected));
+    push_u64(&mut out, descriptor.b_value_bits);
+    push_len_prefixed_string(&mut out, 1, Some(&descriptor.record_profile));
+    push_u64(&mut out, descriptor.stream_byte_length as u64);
+    push_len_prefixed_string(&mut out, 2, Some(&descriptor.payload_encoding));
+    push_len_prefixed_string(&mut out, 3, descriptor.title.as_deref());
+    push_len_prefixed_string(&mut out, 4, descriptor.artist.as_deref());
+    push_len_prefixed_u8_slice(&mut out, 5, descriptor.release_id.as_ref());
+    push_len_prefixed_string(&mut out, 6, descriptor.catalog_number.as_deref());
+    push_len_prefixed_string(&mut out, 7, descriptor.label.as_deref());
+    push_len_prefixed_string(&mut out, 8, descriptor.artwork_credit.as_deref());
+    push_len_prefixed_string(&mut out, 9, descriptor.canonical_url.as_deref());
+    out.push(10);
+    match descriptor.created_at {
+        Some(value) => {
+            push_u32(&mut out, 8);
+            push_u64(&mut out, value);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    out.push(11);
+    match descriptor.bsc_pointer.as_ref() {
+        Some(pointer) => {
+            push_u32(
+                &mut out,
+                u32::try_from(pointer.len()).context("BSC pointer exceeds u32")?,
+            );
+            out.extend_from_slice(pointer);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    out.push(12);
+    push_u32(
+        &mut out,
+        u32::try_from(descriptor.tone_spans.len()).context("tone span count exceeds u32")?,
+    );
+    for span in &descriptor.tone_spans {
+        push_u32(
+            &mut out,
+            u32::try_from(span.byte_length).context("tone span byte length exceeds u32")?,
+        );
+        out.extend_from_slice(&span.base);
+        push_u8(&mut out, span.luma_tolerance);
+        push_u8(&mut out, span.bits_per_pixel);
+        push_u8(&mut out, span.ordering.wire_code());
+    }
+    out.push(13);
+    match descriptor.copyright_year {
+        Some(value) => {
+            push_u32(&mut out, 2);
+            push_u16(&mut out, value);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    push_len_prefixed_string(&mut out, 14, descriptor.copyright_holder.as_deref());
+    out.push(15);
+    match descriptor.cache_encryption.as_ref() {
+        Some(cache_encryption) => {
+            let encoded = encode_cache_encryption_descriptor(cache_encryption)?;
+            push_u32(
+                &mut out,
+                u32::try_from(encoded.len()).context("cache encryption exceeds u32")?,
+            );
+            out.extend_from_slice(&encoded);
+        }
+        None => push_u32(&mut out, 0),
+    }
+    Ok(out)
+}
+
+/// SHA-256 of [`signed_descriptor_identity_bytes`], for the release
+/// commitment to carry.
+pub fn descriptor_commitment(descriptor: &RecordDescriptor) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(signed_descriptor_identity_bytes(descriptor)?).into())
 }
 
 pub fn cache_encryption_record_binding_hash(
@@ -800,6 +1146,26 @@ pub struct RecordDescriptor {
     pub bsc_pointer: Option<Vec<u8>>,
     pub tone_spans: Vec<ToneSpanDescriptor>,
     pub cache_encryption: Option<CacheEncryptionDescriptor>,
+    /// The on-chain anchor, written after pressing. Opaque here: what a
+    /// chain reference means is a matter for the chain, not for BRD1.
+    pub chain_anchor: Option<Vec<u8>>,
+    /// Every other signature over the same release commitment.
+    pub additional_signatures: Vec<SignedReleaseReference>,
+    /// ISRCs by track index, ascending. Empty when none have been issued.
+    pub isrcs: Vec<TrackIsrc>,
+    /// The release barcode, as issued.
+    pub upc: Option<String>,
+    /// The signature covering everything above that was added after the
+    /// press. Required whenever any of them is present.
+    pub deferred_attestation: Option<SignedReleaseReference>,
+}
+
+/// One recording's ISRC, against the track it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackIsrc {
+    pub track_index: u16,
+    /// Canonical form: uppercase, unhyphenated, 12 characters.
+    pub code: String,
 }
 
 impl RecordDescriptor {
@@ -1229,6 +1595,11 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut bsc_pointer = None;
     let mut tone_spans = None;
     let mut cache_encryption = None;
+    let mut chain_anchor = None;
+    let mut additional_signatures = None;
+    let mut isrcs = None;
+    let mut upc = None;
+    let mut deferred_attestation = None;
 
     while offset < body.len() {
         if parsed_segments >= prefix.segment_count {
@@ -1388,7 +1759,42 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 }
                 cache_encryption = Some(decode_cache_encryption_descriptor(payload)?);
             }
-            _ => bail!("unsupported canonical record descriptor segment type {kind}"),
+            SEGMENT_CHAIN_ANCHOR => {
+                if chain_anchor.is_some() {
+                    bail!("duplicate chain anchor segment");
+                }
+                if payload.is_empty() {
+                    bail!("chain anchor segment must not be empty");
+                }
+                chain_anchor = Some(payload.to_vec());
+            }
+            SEGMENT_ADDITIONAL_SIGNATURES => assign_once(
+                &mut additional_signatures,
+                decode_additional_signatures(payload)?,
+                "additional signatures",
+            )?,
+            SEGMENT_ISRC => assign_once(&mut isrcs, decode_isrc_segment(payload)?, "ISRC list")?,
+            SEGMENT_UPC => assign_once(
+                &mut upc,
+                normalize_upc(decode_text(payload, "barcode")?.as_str())?,
+                "barcode",
+            )?,
+            SEGMENT_DEFERRED_ATTESTATION => assign_once(
+                &mut deferred_attestation,
+                decode_signed_release_reference(payload)?,
+                "deferred attestation",
+            )?,
+            // A segment type this build does not know is skipped, not
+            // refused.
+            //
+            // Segments are type-length-value, so stepping over one is exact,
+            // and the descriptor CRC32 is computed across the whole payload
+            // — unknown bytes included — so corruption is still caught by
+            // the check below. Refusing outright meant that the first
+            // reader to add a field made every record it wrote unreadable
+            // by every reader already in the field, which is a flag day for
+            // something the framing was built to make additive.
+            _ => {}
         }
 
         offset = payload_end;
@@ -1437,7 +1843,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         other => bail!("unsupported canonical payload encoding {other}"),
     }
 
-    Ok(RecordDescriptor {
+    let descriptor = RecordDescriptor {
         version: prefix.version,
         checksum_protected: true,
         b_value_bits: prefix.b_value_bits,
@@ -1458,7 +1864,17 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         bsc_pointer,
         tone_spans,
         cache_encryption,
-    })
+        chain_anchor,
+        additional_signatures: additional_signatures.unwrap_or_default(),
+        isrcs: isrcs.unwrap_or_default(),
+        upc,
+        deferred_attestation,
+    };
+    // Null or signed: a deferred field with no attestation over it is a
+    // malformed record, not merely an untrusted one.
+    validate_deferred_group(&descriptor)?;
+    validate_signature_set(&descriptor)?;
+    Ok(descriptor)
 }
 
 pub fn compute_descriptor_crc32(bytes: &[u8]) -> u32 {
@@ -1584,6 +2000,75 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+    /// A minimal valid BRD1 payload, plus whatever extra segments are asked
+    /// for. Built by hand because the encoder lives in `record-cut`.
+    fn descriptor_bytes(extra: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut segments: u16 = 0;
+        let mut push = |body: &mut Vec<u8>, kind: u8, payload: &[u8], segments: &mut u16| {
+            body.push(kind);
+            body.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+            body.extend_from_slice(payload);
+            *segments += 1;
+        };
+        push(&mut body, SEGMENT_DESCRIPTOR_CRC32, &0u32.to_be_bytes(), &mut segments);
+        push(&mut body, SEGMENT_STREAM_BYTE_LENGTH, &4096u32.to_be_bytes(), &mut segments);
+        push(
+            &mut body,
+            SEGMENT_RECORD_PROFILE,
+            &[RECORD_PROFILE_SINGLE45_CODE],
+            &mut segments,
+        );
+        push(
+            &mut body,
+            SEGMENT_PAYLOAD_ENCODING,
+            &[PAYLOAD_ENCODING_RGB_CODE],
+            &mut segments,
+        );
+        push(&mut body, SEGMENT_TITLE, b"Title", &mut segments);
+        for (kind, payload) in extra {
+            push(&mut body, *kind, payload, &mut segments);
+        }
+
+        let payload_len = RECORD_DESCRIPTOR_PREFIX_LENGTH + body.len();
+        let mut full = Vec::with_capacity(payload_len);
+        full.extend_from_slice(RECORD_DESCRIPTOR_MAGIC);
+        full.push(RECORD_DESCRIPTOR_VERSION);
+        full.extend_from_slice(&(payload_len as u16).to_be_bytes());
+        full.extend_from_slice(&segments.to_be_bytes());
+        full.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        full.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
+        full.extend_from_slice(&body);
+
+        let crc = compute_descriptor_crc32(&full);
+        let crc_at = RECORD_DESCRIPTOR_PREFIX_LENGTH + 3;
+        full[crc_at..crc_at + 4].copy_from_slice(&crc.to_be_bytes());
+        full
+    }
+
+    #[test]
+    fn unknown_segments_are_skipped_rather_than_refused() {
+        let bytes = descriptor_bytes(&[(200, vec![9, 9, 9, 9])]);
+        let descriptor = decode_record_descriptor_bytes(&bytes)
+            .expect("a descriptor carrying an unknown segment still decodes");
+        assert_eq!(descriptor.title.as_deref(), Some("Title"));
+        assert_eq!(descriptor.stream_byte_length, 4096);
+    }
+
+    #[test]
+    fn a_corrupt_unknown_segment_still_fails_the_crc() {
+        let mut bytes = descriptor_bytes(&[(200, vec![9, 9, 9, 9])]);
+        // The last byte of the unknown segment's payload.
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        let error = decode_record_descriptor_bytes(&bytes)
+            .expect_err("corruption anywhere in the payload must fail");
+        assert!(
+            error.to_string().contains("CRC32"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn test_descriptor(secret: Vec<u8>) -> RecordDescriptor {
         RecordDescriptor {
             version: RECORD_DESCRIPTOR_VERSION,
@@ -1611,7 +2096,143 @@ mod tests {
                 key_derivation: CacheKeyDerivation::HkdfSha256,
                 secret,
             }),
+            chain_anchor: None,
+            additional_signatures: Vec::new(),
+            isrcs: Vec::new(),
+            upc: None,
+            deferred_attestation: None,
         }
+    }
+
+    fn reference(key: &str, commitment: [u8; 32]) -> SignedReleaseReference {
+        SignedReleaseReference {
+            version: SIGNED_RELEASE_REFERENCE_VERSION,
+            release_commitment_sha256: commitment,
+            key_id: key.as_bytes().to_vec(),
+            signature: vec![7; SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH],
+        }
+    }
+
+    #[test]
+    fn isrc_normalizes_to_twelve_characters() {
+        assert_eq!(
+            normalize_isrc("gb-abc-24-00001").expect("a well formed ISRC"),
+            "GBABC2400001"
+        );
+        assert!(normalize_isrc("GBABC240000").is_err(), "too short");
+        assert!(normalize_isrc("1BABC2400001").is_err(), "country is letters");
+        assert!(normalize_isrc("GBABCX400001").is_err(), "year is digits");
+    }
+
+    #[test]
+    fn isrcs_round_trip_in_track_order() {
+        let isrcs = vec![
+            TrackIsrc { track_index: 3, code: "GBABC2400004".to_string() },
+            TrackIsrc { track_index: 0, code: "gb-abc-24-00001".to_string() },
+        ];
+        let encoded = encode_isrc_segment(&isrcs).expect("encodes");
+        let decoded = decode_isrc_segment(&encoded).expect("decodes");
+        assert_eq!(decoded[0].track_index, 0);
+        assert_eq!(decoded[0].code, "GBABC2400001");
+        assert_eq!(decoded[1].track_index, 3);
+    }
+
+    #[test]
+    fn two_isrcs_cannot_claim_one_track() {
+        let isrcs = vec![
+            TrackIsrc { track_index: 1, code: "GBABC2400001".to_string() },
+            TrackIsrc { track_index: 1, code: "GBABC2400002".to_string() },
+        ];
+        assert!(encode_isrc_segment(&isrcs).is_err());
+    }
+
+    #[test]
+    fn barcodes_are_checked_by_their_last_digit() {
+        // A real EAN-13 check digit, and the same barcode with it wrong.
+        assert_eq!(normalize_upc("5-060204-800016").expect("valid"), "5060204800016");
+        assert!(normalize_upc("5060204800017").is_err(), "check digit");
+        assert!(normalize_upc("50602048000").is_err(), "wrong length");
+    }
+
+    #[test]
+    fn a_deferred_field_is_null_or_signed() {
+        let mut descriptor = test_descriptor(vec![0x11; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        descriptor.upc = Some("5060204800016".to_string());
+        assert!(
+            validate_deferred_group(&descriptor).is_err(),
+            "a barcode with nothing signing it is malformed"
+        );
+
+        descriptor.deferred_attestation = Some(reference("yl.vin", [1; 32]));
+        validate_deferred_group(&descriptor).expect("signed, so well formed");
+
+        descriptor.upc = None;
+        descriptor.isrcs.clear();
+        descriptor.chain_anchor = None;
+        assert!(
+            validate_deferred_group(&descriptor).is_err(),
+            "an attestation with nothing to sign is malformed"
+        );
+    }
+
+    #[test]
+    fn the_deferred_group_is_outside_what_the_press_signed() {
+        let base = test_descriptor(vec![0x11; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let pressed = descriptor_commitment(&base).expect("commits");
+
+        let mut anchored = base.clone();
+        anchored.chain_anchor = Some(vec![9; 32]);
+        anchored.upc = Some("5060204800016".to_string());
+        anchored.deferred_attestation = Some(reference("yl.vin", [1; 32]));
+        assert_eq!(
+            pressed,
+            descriptor_commitment(&anchored).expect("commits"),
+            "anchoring a release must not disturb what was pressed"
+        );
+
+        let mut retitled = base.clone();
+        retitled.title = Some("Another name".to_string());
+        assert_ne!(
+            pressed,
+            descriptor_commitment(&retitled).expect("commits"),
+            "a pressed record's own words are inside the commitment"
+        );
+
+        let mut recut = base.clone();
+        recut.b_value_bits = 2.0f64.to_bits();
+        assert_ne!(
+            pressed,
+            descriptor_commitment(&recut).expect("commits"),
+            "the geometry it was cut at is inside the commitment too"
+        );
+    }
+
+    #[test]
+    fn a_release_may_be_signed_by_more_than_one_party() {
+        let mut descriptor = test_descriptor(vec![0x11; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let commitment = [4; 32];
+        descriptor.signed_release_reference = Some(reference("artist", commitment));
+        descriptor.additional_signatures = vec![reference("yl.vin", commitment)];
+        validate_signature_set(&descriptor).expect("artist and yl.vin, over one commitment");
+
+        descriptor.additional_signatures = vec![reference("artist", commitment)];
+        assert!(
+            validate_signature_set(&descriptor).is_err(),
+            "one key, one signature"
+        );
+
+        descriptor.additional_signatures = vec![reference("yl.vin", [5; 32])];
+        assert!(
+            validate_signature_set(&descriptor).is_err(),
+            "every signature is over the same commitment"
+        );
+
+        descriptor.signed_release_reference = None;
+        descriptor.additional_signatures = vec![reference("yl.vin", commitment)];
+        assert!(
+            validate_signature_set(&descriptor).is_err(),
+            "there is nothing for them to join"
+        );
     }
 
     fn test_context() -> CacheEncryptionContext {

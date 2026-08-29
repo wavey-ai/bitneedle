@@ -470,6 +470,148 @@ impl SidecarCarrier {
     }
 }
 
+/// The reserved item name the sidecar's own attestation is stored under.
+pub const SIDECAR_ATTESTATION_ITEM_NAME: &str = "attestation";
+
+const SIDECAR_ATTESTATION_DOMAIN: &[u8] = b"bitneedle.record-sidecar.attestation.v1";
+
+/// What the sidecar's attestation signs.
+///
+/// The sidecar is the one part of a pressed record that is meant to be
+/// rewritten — editions are issued, labels are re-authored — so its
+/// signature cannot live in the immutable descriptor. It lives here, in the
+/// sidecar itself, and is replaced along with everything else each time the
+/// sidecar is written. Whoever does the writing signs what they wrote.
+///
+/// The preimage is the record's descriptor commitment followed by every
+/// other item in stored order, each contributing its name and the digest of
+/// its stored bytes. Binding to the descriptor is what stops a signed
+/// sidecar being lifted off one record and dropped onto another; the
+/// attestation item itself is excluded, because it cannot contain its own
+/// signature.
+pub fn sidecar_attestation_identity_bytes(
+    descriptor_commitment: &[u8; 32],
+    items: &[SidecarDecodedItem],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(SIDECAR_ATTESTATION_DOMAIN);
+    out.extend_from_slice(descriptor_commitment);
+    let signed: Vec<&SidecarDecodedItem> = items
+        .iter()
+        .filter(|item| item.name != SIDECAR_ATTESTATION_ITEM_NAME)
+        .collect();
+    out.extend_from_slice(&(signed.len() as u32).to_be_bytes());
+    for item in signed {
+        out.push(item.item_type);
+        out.push(item.codec);
+        out.extend_from_slice(&(item.name.len() as u32).to_be_bytes());
+        out.extend_from_slice(item.name.as_bytes());
+        out.extend_from_slice(&(item.stored_byte_length).to_be_bytes());
+        out.extend_from_slice(&sha256_digest_bytes(item.stored_data_base64.as_bytes()));
+    }
+    out
+}
+
+/// SHA-256 of [`sidecar_attestation_identity_bytes`]: the digest a sidecar
+/// attestation carries and a signer signs.
+pub fn sidecar_attestation_commitment(
+    descriptor_commitment: &[u8; 32],
+    items: &[SidecarDecodedItem],
+) -> [u8; 32] {
+    sha256_digest_bytes(&sidecar_attestation_identity_bytes(
+        descriptor_commitment,
+        items,
+    ))
+}
+
+/// A sidecar's attestation, as it is stored and read back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarAttestation {
+    pub version: u8,
+    /// Base64url, no padding: the digest from
+    /// [`sidecar_attestation_commitment`].
+    pub commitment: String,
+    /// Who signed. Opaque to the sidecar; resolved by whoever verifies.
+    pub key_id: String,
+    /// Base64url, no padding: 64 raw Ed25519 bytes.
+    pub signature: String,
+}
+
+pub const SIDECAR_ATTESTATION_VERSION: u8 = 1;
+
+impl SidecarAttestation {
+    pub fn validate(&self) -> Result<()> {
+        if self.version != SIDECAR_ATTESTATION_VERSION {
+            bail!("unsupported sidecar attestation version {}", self.version);
+        }
+        if self.key_id.trim().is_empty() {
+            bail!("sidecar attestation key ID must not be empty");
+        }
+        if decode_attestation_field(&self.commitment, "commitment")?.len() != 32 {
+            bail!("sidecar attestation commitment must be 32 bytes");
+        }
+        if decode_attestation_field(&self.signature, "signature")?.len() != 64 {
+            bail!("sidecar attestation signature must be 64 bytes");
+        }
+        Ok(())
+    }
+
+    /// The digest this attestation claims, as bytes.
+    pub fn commitment_bytes(&self) -> Result<[u8; 32]> {
+        let bytes = decode_attestation_field(&self.commitment, "commitment")?;
+        bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("sidecar attestation commitment must be 32 bytes"))
+    }
+
+    pub fn signature_bytes(&self) -> Result<Vec<u8>> {
+        decode_attestation_field(&self.signature, "signature")
+    }
+}
+
+fn decode_attestation_field(value: &str, label: &str) -> Result<Vec<u8>> {
+    let trimmed = value.trim();
+    general_purpose::URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| general_purpose::URL_SAFE.decode(trimmed))
+        .or_else(|_| general_purpose::STANDARD.decode(trimmed))
+        .with_context(|| format!("sidecar attestation {label} is not valid base64"))
+}
+
+/// The attestation carried by a decoded sidecar, if it carries one.
+pub fn sidecar_attestation(items: &[SidecarDecodedItem]) -> Result<Option<SidecarAttestation>> {
+    let Some(item) = items
+        .iter()
+        .find(|item| item.name == SIDECAR_ATTESTATION_ITEM_NAME)
+    else {
+        return Ok(None);
+    };
+    let json = item
+        .json
+        .as_ref()
+        .context("the sidecar attestation item is not JSON")?;
+    let attestation: SidecarAttestation = serde_json::from_value(json.clone())
+        .context("the sidecar attestation is not readable")?;
+    attestation.validate()?;
+    Ok(Some(attestation))
+}
+
+/// Whether a sidecar's attestation is over the items actually present.
+///
+/// This is the structural half of verification: it says the signed digest
+/// matches what the sidecar now contains and that it is bound to this
+/// record. Whether the key is one to trust is a separate question, and one
+/// this crate deliberately does not answer.
+pub fn sidecar_attestation_covers(
+    attestation: &SidecarAttestation,
+    descriptor_commitment: &[u8; 32],
+    items: &[SidecarDecodedItem],
+) -> Result<bool> {
+    Ok(attestation.commitment_bytes()?
+        == sidecar_attestation_commitment(descriptor_commitment, items))
+}
+
 pub fn sha256_digest_bytes(bytes: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(bytes);
     let mut out = [0u8; 32];
@@ -2533,7 +2675,12 @@ fn descriptor_input_with_rewrite_options(
         bsc_pointer: Some(encode_sidecar_header_pointer(&pointer)?),
         tone_spans: descriptor.tone_spans.clone(),
         cache_encryption: descriptor.cache_encryption.clone(),
-    })
+            chain_anchor: None,
+        additional_signatures: Vec::new(),
+        isrcs: Vec::new(),
+        upc: None,
+        deferred_attestation: None,
+})
 }
 
 fn descriptor_input_with_cache_encryption(
@@ -2560,6 +2707,11 @@ fn descriptor_input_with_cache_encryption(
         bsc_pointer: descriptor.bsc_pointer.clone(),
         tone_spans: descriptor.tone_spans.clone(),
         cache_encryption: Some(cache_encryption),
+        chain_anchor: None,
+        additional_signatures: Vec::new(),
+        isrcs: Vec::new(),
+        upc: None,
+        deferred_attestation: None,
     }
 }
 
@@ -3371,6 +3523,87 @@ pub fn decode_sidecar_from_pairs(
         capacity_bytes: capacity,
     };
     Ok((bsc1, result))
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::*;
+
+    fn item(name: &str, data: &str) -> SidecarDecodedItem {
+        SidecarDecodedItem {
+            item_type: 1,
+            item_type_name: "json".to_string(),
+            codec: 0,
+            codec_name: "raw".to_string(),
+            flags: 0,
+            raw_byte_length: None,
+            stored_byte_length: data.len() as u32,
+            decoded_byte_length: data.len(),
+            name: name.to_string(),
+            mime: "application/json".to_string(),
+            stored_data_base64: data.to_string(),
+            data_base64: data.to_string(),
+            text: None,
+            json: None,
+        }
+    }
+
+    #[test]
+    fn the_attestation_covers_every_item_but_itself() {
+        let record = [3u8; 32];
+        let items = vec![item("press", "one"), item("photo", "two")];
+        let commitment = sidecar_attestation_commitment(&record, &items);
+
+        // Adding the attestation item does not change what it signs.
+        let mut with_attestation = items.clone();
+        with_attestation.push(item(SIDECAR_ATTESTATION_ITEM_NAME, "signature"));
+        assert_eq!(
+            commitment,
+            sidecar_attestation_commitment(&record, &with_attestation),
+            "an attestation cannot be part of what it attests"
+        );
+    }
+
+    #[test]
+    fn rewriting_an_item_breaks_the_attestation() {
+        let record = [3u8; 32];
+        let items = vec![item("press", "one")];
+        let commitment = sidecar_attestation_commitment(&record, &items);
+        let rewritten = vec![item("press", "one, edited")];
+        assert_ne!(
+            commitment,
+            sidecar_attestation_commitment(&record, &rewritten),
+            "editing a sidecar must invalidate the signature over it"
+        );
+    }
+
+    #[test]
+    fn an_attestation_does_not_travel_between_records() {
+        let items = vec![item("press", "one")];
+        assert_ne!(
+            sidecar_attestation_commitment(&[3u8; 32], &items),
+            sidecar_attestation_commitment(&[4u8; 32], &items),
+            "the same sidecar on another record is another commitment"
+        );
+    }
+
+    #[test]
+    fn coverage_is_answered_without_asking_about_trust() {
+        let record = [3u8; 32];
+        let items = vec![item("press", "one")];
+        let attestation = SidecarAttestation {
+            version: SIDECAR_ATTESTATION_VERSION,
+            commitment: general_purpose::URL_SAFE_NO_PAD
+                .encode(sidecar_attestation_commitment(&record, &items)),
+            key_id: "yl.vin".to_string(),
+            signature: general_purpose::URL_SAFE_NO_PAD.encode([1u8; 64]),
+        };
+        attestation.validate().expect("a well formed attestation");
+        assert!(sidecar_attestation_covers(&attestation, &record, &items).expect("checks"));
+
+        let rewritten = vec![item("press", "edited")];
+        assert!(!sidecar_attestation_covers(&attestation, &record, &rewritten).expect("checks"));
+    }
 }
 
 #[cfg(test)]

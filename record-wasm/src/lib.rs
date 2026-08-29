@@ -134,6 +134,17 @@ pub fn wasm_decode_record_programme_map_json(png_bytes: &[u8]) -> Result<String,
     decode_record_programme_map_json(png_bytes).map_err(to_js_error)
 }
 
+/// Builds the same pre-decode programme map from an already extracted BRS1
+/// stream. Playback uses this after PNG extraction so it does not walk and
+/// decode the complete record groove a second time.
+#[wasm_bindgen(js_name = programmeMapFromChunkStreamJson)]
+pub fn wasm_programme_map_from_chunk_stream_json(
+    chunk_stream_bytes: &[u8],
+    record_profile: &str,
+) -> Result<String, JsValue> {
+    programme_map_from_chunk_stream_json(chunk_stream_bytes, record_profile).map_err(to_js_error)
+}
+
 #[wasm_bindgen(js_name = validateRecordHeaderJson)]
 pub fn wasm_validate_record_header_json(
     png_bytes: &[u8],
@@ -355,9 +366,17 @@ pub fn wasm_decode_record_png_to_payload_for_profile_with_turns_and_length(
 fn decode_record_programme_map_json(png_bytes: &[u8]) -> Result<String> {
     let decoded = decode_record_png_resolving_profile(png_bytes, None)
         .context("failed to decode Bitneedle record PNG")?;
-    let stream = record_core::parse_chunk_stream(&decoded.chunk_stream.bytes)
+    programme_map_from_chunk_stream_json(&decoded.chunk_stream.bytes, &decoded.record_profile)
+}
+
+fn programme_map_from_chunk_stream_json(
+    chunk_stream_bytes: &[u8],
+    record_profile: &str,
+) -> Result<String> {
+    let normalized_profile = record_core::normalize_record_profile_name(record_profile)?;
+    let stream = record_core::parse_chunk_stream(chunk_stream_bytes)
         .context("failed to parse decoded chunk stream")?;
-    let map = record_core::build_programme_map(&stream, Some(&decoded.record_profile))
+    let map = record_core::build_programme_map(&stream, Some(&normalized_profile))
         .context("failed to build pre-decode programme map")?;
     Ok(programme_map_to_json(&map).to_string())
 }
@@ -747,6 +766,13 @@ fn decode_record_descriptor_header_json(
             json!(descriptor.checksum_protected),
         );
         object.insert("recordProfile".to_string(), json!(resolved_profile));
+        object.insert(
+            "releaseId".to_string(),
+            descriptor
+                .release_id
+                .map(record_descriptor::release_id_to_text)
+                .map_or(serde_json::Value::Null, serde_json::Value::String),
+        );
         object.insert(
             "streamByteLength".to_string(),
             json!(descriptor.stream_byte_length),
@@ -1605,8 +1631,18 @@ fn cache_encryption_context_from_json(
 fn record_descriptor_from_json(
     descriptor_json: &str,
 ) -> Result<record_descriptor::RecordDescriptor> {
-    let descriptor: record_descriptor::RecordDescriptor =
+    let mut value: serde_json::Value =
         serde_json::from_str(descriptor_json).context("record descriptor JSON is invalid")?;
+    if let Some(release_id) = value.get_mut("releaseId") {
+        if let Some(text) = release_id.as_str() {
+            *release_id = json!(
+                record_descriptor::release_id_to_bytes(text)
+                    .context("record descriptor release ID is invalid")?
+            );
+        }
+    }
+    let descriptor: record_descriptor::RecordDescriptor =
+        serde_json::from_value(value).context("record descriptor JSON is invalid")?;
     descriptor
         .validate_cache_encryption()
         .context("record descriptor cache encryption is invalid")?;

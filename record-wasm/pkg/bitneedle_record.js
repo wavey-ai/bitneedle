@@ -638,6 +638,37 @@ export function inspectBitneedlePackageJson(package_bytes) {
 }
 
 /**
+ * Builds the same pre-decode programme map from an already extracted BRS1
+ * stream. Playback uses this after PNG extraction so it does not walk and
+ * decode the complete record groove a second time.
+ * @param {Uint8Array} chunk_stream_bytes
+ * @param {string} record_profile
+ * @returns {string}
+ */
+export function programmeMapFromChunkStreamJson(chunk_stream_bytes, record_profile) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(chunk_stream_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(record_profile, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.programmeMapFromChunkStreamJson(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
  * @returns {string}
  */
 export function recordDescriptorMagic() {

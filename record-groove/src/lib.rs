@@ -9,8 +9,71 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-static BALANCED_CACHE: OnceLock<Mutex<HashMap<([u8; 3], u64), TonedConfig>>> = OnceLock::new();
-static PALETTE_CACHE: OnceLock<Mutex<HashMap<TonedConfig, Arc<TonedPalette>>>> = OnceLock::new();
+static BALANCED_CACHE: OnceLock<Mutex<BoundedCache<([u8; 3], u64), TonedConfig>>> =
+    OnceLock::new();
+static PALETTE_CACHE: OnceLock<Mutex<BoundedCache<TonedConfig, Arc<TonedPalette>>>> =
+    OnceLock::new();
+
+/// A process-wide cache with a ceiling on it.
+///
+/// Palettes are deterministic and immutable, so caching them is free as far
+/// as correctness goes — but a palette at 16 bits per pixel is 65,536
+/// colours in a `Vec` plus the same again in a lookup map, and a record with
+/// several tone spans builds one per base tone. Left unbounded that is
+/// megabytes of resident memory that never comes back, on a device that has
+/// none to spare. Least-recently-used, capped: the working set of a single
+/// record is a handful of palettes, and anything past that is a record
+/// nobody is looking at any more.
+struct BoundedCache<K, V> {
+    entries: HashMap<K, (V, u64)>,
+    capacity: usize,
+    clock: u64,
+}
+
+impl<K: std::hash::Hash + Eq + Copy, V: Clone> BoundedCache<K, V> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+            clock: 0,
+        }
+    }
+
+    fn get(&mut self, key: &K) -> Option<V> {
+        self.clock = self.clock.wrapping_add(1);
+        let clock = self.clock;
+        let (value, used) = self.entries.get_mut(key)?;
+        *used = clock;
+        Some(value.clone())
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.clock = self.clock.wrapping_add(1);
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            if let Some(stalest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(key, _)| *key)
+            {
+                self.entries.remove(&stalest);
+            }
+        }
+        self.entries.insert(key, (value, self.clock));
+    }
+}
+
+/// The cache's lock, recovered rather than propagated.
+fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// How many palettes stay resident. A record carries a handful of tone spans
+/// at most, so this holds a whole record's worth and then some.
+const PALETTE_CACHE_CAPACITY: usize = 8;
+/// Balanced configurations are a few dozen bytes each, so this can be
+/// generous — it exists to stop unbounded growth, not to save space.
+const BALANCED_CACHE_CAPACITY: usize = 256;
 
 /// Number of RGB pixels needed to carry `byte_length` bytes at 3 bytes per pixel.
 pub fn pixel_count_for_byte_length(byte_length: usize) -> usize {
@@ -225,9 +288,13 @@ impl TonedConfig {
         }
 
         let cache_key = (base, max_size_factor.to_bits());
-        let cache = BALANCED_CACHE.get_or_init(Default::default);
-        if let Some(config) = cache.lock().unwrap().get(&cache_key) {
-            return Ok(*config);
+        let cache = BALANCED_CACHE
+            .get_or_init(|| Mutex::new(BoundedCache::with_capacity(BALANCED_CACHE_CAPACITY)));
+        // A poisoned cache is still a cache: a panic elsewhere must not take
+        // every later render down with it, least of all across the FFI
+        // boundary this is called over.
+        if let Some(config) = lock(cache).get(&cache_key) {
+            return Ok(config);
         }
 
         let bits_per_pixel = ((24.0 / max_size_factor).ceil() as u32).clamp(1, 24);
@@ -242,47 +309,8 @@ impl TonedConfig {
             .find(|&tol| iso_luma_count(base, tol) >= needed.saturating_mul(8))
             .unwrap_or(255);
 
-        // Precompute the chroma sort key once per candidate; recomputing it
-        // inside the comparator costs O(n log n) distance evaluations.
-        let base_luma = rec709_luma_of(base).round();
-        let mut candidates: Vec<(f64, f64, [u8; 3])> =
-            TonedPalette::enumerate_iso_luma(base, max_tolerance)
-                .into_iter()
-                .map(|c| {
-                    (
-                        chroma_distance(c, base),
-                        (rec709_luma_of(c) - base_luma).abs(),
-                        c,
-                    )
-                })
-                .collect();
-        candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
-
         let mut best: Option<(f64, u8)> = None;
-        for tol in LADDER.into_iter().filter(|&t| t <= max_tolerance) {
-            let mut sum = [0f64; 3];
-            let mut count = 0usize;
-            for &(_, luma_delta, color) in &candidates {
-                if luma_delta <= tol as f64 + 0.5 {
-                    for (s, &ch) in sum.iter_mut().zip(color.iter()) {
-                        *s += ch as f64;
-                    }
-                    count += 1;
-                    if count == needed {
-                        break;
-                    }
-                }
-            }
-            if count < needed {
-                continue;
-            }
-
-            let n = count as f64;
-            let mean = [
-                (sum[0] / n).round() as u8,
-                (sum[1] / n).round() as u8,
-                (sum[2] / n).round() as u8,
-            ];
+        for (tol, mean) in balanced_candidate_means(base, max_tolerance, needed, &LADDER) {
             let cost = chroma_distance(mean, base) + tol as f64 / 8.0;
             if best.is_none_or(|(best_cost, _)| cost < best_cost) {
                 best = Some((cost, tol));
@@ -302,7 +330,7 @@ impl TonedConfig {
             bits_per_pixel,
             ordering: ToneOrdering::ChromaProximity,
         };
-        cache.lock().unwrap().insert(cache_key, config);
+        lock(cache).insert(cache_key, config);
         Ok(config)
     }
 }
@@ -331,6 +359,220 @@ fn iso_luma_count(base: [u8; 3], luma_tolerance: u8) -> usize {
     count
 }
 
+const PALETTE_SELECTION_BUCKETS: usize = 16_384;
+
+#[derive(Clone, Copy)]
+struct KeyedColor {
+    key: f64,
+    color: [u8; 3],
+}
+
+fn palette_selection_key(
+    color: [u8; 3],
+    base: [u8; 3],
+    ordering: ToneOrdering,
+) -> f64 {
+    match ordering {
+        ToneOrdering::ChromaProximity => chroma_distance(color, base),
+        ToneOrdering::BaseProximity => color
+            .iter()
+            .zip(base.iter())
+            .map(|(&a, &b)| ((a as i32 - b as i32).pow(2)) as f64)
+            .sum(),
+    }
+}
+
+fn palette_selection_bucket(key: f64, ordering: ToneOrdering) -> usize {
+    let maximum = match ordering {
+        // Cb and Cr are each confined to roughly ±127.5, so the distance
+        // between any two chroma pairs is safely below 512.
+        ToneOrdering::ChromaProximity => 512.0,
+        // Three squared 8-bit channel deltas.
+        ToneOrdering::BaseProximity => 3.0 * 255.0 * 255.0,
+    };
+    ((key.clamp(0.0, maximum) / maximum) * (PALETTE_SELECTION_BUCKETS - 1) as f64)
+        .floor() as usize
+}
+
+fn compare_keyed_colors(a: &KeyedColor, b: &KeyedColor) -> std::cmp::Ordering {
+    a.key.total_cmp(&b.key).then(a.color.cmp(&b.color))
+}
+
+fn visit_iso_luma_colors(
+    base: [u8; 3],
+    luma_tolerance: u8,
+    mut visit: impl FnMut([u8; 3]),
+) {
+    let target = rec709_luma_of(base).round();
+    let min = target - luma_tolerance as f64;
+    let max = target + luma_tolerance as f64;
+
+    for r in 0..=255u16 {
+        for g in 0..=255u16 {
+            let rg = 0.2126 * r as f64 + 0.7152 * g as f64;
+            let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
+            let b_high = ((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16;
+            for b in b_low..=b_high.min(255) {
+                let luma = (rg + 0.0722 * b as f64).round();
+                if luma >= min && luma <= max {
+                    visit([r as u8, g as u8, b as u8]);
+                }
+            }
+        }
+    }
+}
+
+fn select_palette_colors(
+    base: [u8; 3],
+    luma_tolerance: u8,
+    bits_per_pixel: u32,
+    ordering: ToneOrdering,
+) -> Result<Vec<[u8; 3]>> {
+    let needed = 1usize << bits_per_pixel;
+    let available = iso_luma_count(base, luma_tolerance);
+    if available < needed {
+        bail!(
+            "only {} colours share the base tone's luma (±{}); {} bits per pixel needs {}",
+            available,
+            luma_tolerance,
+            bits_per_pixel,
+            needed
+        );
+    }
+
+    let mut histogram = vec![0u32; PALETTE_SELECTION_BUCKETS];
+    visit_iso_luma_colors(base, luma_tolerance, |color| {
+        let key = palette_selection_key(color, base, ordering);
+        histogram[palette_selection_bucket(key, ordering)] += 1;
+    });
+    let mut cumulative = 0usize;
+    let cutoff_bucket = histogram
+        .iter()
+        .position(|&count| {
+            cumulative += count as usize;
+            cumulative >= needed
+        })
+        .expect("available palette colours must occupy a selection bucket");
+
+    let mut selected = Vec::with_capacity(cumulative);
+    visit_iso_luma_colors(base, luma_tolerance, |color| {
+        let key = palette_selection_key(color, base, ordering);
+        if palette_selection_bucket(key, ordering) <= cutoff_bucket {
+            selected.push(KeyedColor { key, color });
+        }
+    });
+    if selected.len() > needed {
+        selected.select_nth_unstable_by(needed - 1, compare_keyed_colors);
+        selected.truncate(needed);
+    }
+    selected.sort_unstable_by(compare_keyed_colors);
+    Ok(selected.into_iter().map(|entry| entry.color).collect())
+}
+
+fn balanced_candidate_means(
+    base: [u8; 3],
+    max_tolerance: u8,
+    needed: usize,
+    ladder: &[u8],
+) -> Vec<(u8, [u8; 3])> {
+    let tolerances: Vec<u8> = ladder
+        .iter()
+        .copied()
+        .filter(|&tolerance| tolerance <= max_tolerance)
+        .collect();
+    // count, R sum, G sum, B sum. A complete 24-bit cube still fits each
+    // channel sum in u32: 16_777_216 * 255 < u32::MAX.
+    let mut histograms = tolerances
+        .iter()
+        .map(|_| vec![[0u32; 4]; PALETTE_SELECTION_BUCKETS])
+        .collect::<Vec<_>>();
+    let base_luma = rec709_luma_of(base).round();
+    visit_iso_luma_colors(base, max_tolerance, |color| {
+        let key = palette_selection_key(color, base, ToneOrdering::ChromaProximity);
+        let bucket = palette_selection_bucket(key, ToneOrdering::ChromaProximity);
+        let luma_delta = (rec709_luma_of(color) - base_luma).abs();
+        for (index, &tolerance) in tolerances.iter().enumerate() {
+            if luma_delta <= tolerance as f64 + 0.5 {
+                let totals = &mut histograms[index][bucket];
+                totals[0] += 1;
+                totals[1] += color[0] as u32;
+                totals[2] += color[1] as u32;
+                totals[3] += color[2] as u32;
+            }
+        }
+    });
+
+    struct Selection {
+        tolerance: u8,
+        cutoff_bucket: usize,
+        remaining: usize,
+        sums: [u64; 3],
+        boundary: Vec<KeyedColor>,
+    }
+
+    let mut selections = Vec::new();
+    for (index, &tolerance) in tolerances.iter().enumerate() {
+        let available: usize = histograms[index]
+            .iter()
+            .map(|totals| totals[0] as usize)
+            .sum();
+        if available < needed {
+            continue;
+        }
+        let mut count = 0usize;
+        let mut sums = [0u64; 3];
+        for (bucket, totals) in histograms[index].iter().enumerate() {
+            let bucket_count = totals[0] as usize;
+            if count + bucket_count >= needed {
+                selections.push(Selection {
+                    tolerance,
+                    cutoff_bucket: bucket,
+                    remaining: needed - count,
+                    sums,
+                    boundary: Vec::with_capacity(bucket_count),
+                });
+                break;
+            }
+            count += bucket_count;
+            for channel in 0..3 {
+                sums[channel] += totals[channel + 1] as u64;
+            }
+        }
+    }
+
+    visit_iso_luma_colors(base, max_tolerance, |color| {
+        let key = palette_selection_key(color, base, ToneOrdering::ChromaProximity);
+        let bucket = palette_selection_bucket(key, ToneOrdering::ChromaProximity);
+        let luma_delta = (rec709_luma_of(color) - base_luma).abs();
+        for selection in &mut selections {
+            if bucket == selection.cutoff_bucket
+                && luma_delta <= selection.tolerance as f64 + 0.5
+            {
+                selection.boundary.push(KeyedColor { key, color });
+            }
+        }
+    });
+
+    selections
+        .into_iter()
+        .map(|mut selection| {
+            selection.boundary.sort_unstable_by(compare_keyed_colors);
+            for entry in selection.boundary.iter().take(selection.remaining) {
+                for channel in 0..3 {
+                    selection.sums[channel] += entry.color[channel] as u64;
+                }
+            }
+            let count = needed as f64;
+            let mean = [
+                (selection.sums[0] as f64 / count).round() as u8,
+                (selection.sums[1] as f64 / count).round() as u8,
+                (selection.sums[2] as f64 / count).round() as u8,
+            ];
+            (selection.tolerance, mean)
+        })
+        .collect()
+}
+
 /// A palette of colours sharing (within `luma_tolerance` integer steps) the
 /// Rec. 709 luma of a base tone, ordered by closeness to that tone. Data is
 /// carried as chroma drift: each pixel encodes `bits_per_pixel` bits as an
@@ -339,32 +581,15 @@ fn iso_luma_count(base: [u8; 3], luma_tolerance: u8) -> usize {
 pub struct TonedPalette {
     config: TonedConfig,
     colors: Vec<[u8; 3]>,
-    index_of: HashMap<[u8; 3], u32>,
+    index_of: OnceLock<HashMap<[u8; 3], u32>>,
 }
 
 impl TonedPalette {
     /// Every 8-bit RGB colour whose rounded luma is within `luma_tolerance`
     /// of the base tone's, in enumeration order (unsorted).
     fn enumerate_iso_luma(base: [u8; 3], luma_tolerance: u8) -> Vec<[u8; 3]> {
-        let target = rec709_luma_of(base).round();
-        let min = target - luma_tolerance as f64;
-        let max = target + luma_tolerance as f64;
-
         let mut colors = Vec::new();
-        for r in 0..=255u16 {
-            for g in 0..=255u16 {
-                let rg = 0.2126 * r as f64 + 0.7152 * g as f64;
-                // round(rg + 0.0722 * b) must land in [min, max]
-                let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
-                let b_high = ((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16;
-                for b in b_low..=b_high.min(255) {
-                    let luma = (rg + 0.0722 * b as f64).round();
-                    if luma >= min && luma <= max {
-                        colors.push([r as u8, g as u8, b as u8]);
-                    }
-                }
-            }
-        }
+        visit_iso_luma_colors(base, luma_tolerance, |color| colors.push(color));
         colors
     }
 
@@ -401,12 +626,13 @@ impl TonedPalette {
     /// and immutable, so encode, decode and metadata layers share one build
     /// per config instead of recomputing it.
     pub fn shared(config: TonedConfig) -> Result<Arc<Self>> {
-        let cache = PALETTE_CACHE.get_or_init(Default::default);
-        if let Some(palette) = cache.lock().unwrap().get(&config) {
-            return Ok(palette.clone());
+        let cache = PALETTE_CACHE
+            .get_or_init(|| Mutex::new(BoundedCache::with_capacity(PALETTE_CACHE_CAPACITY)));
+        if let Some(palette) = lock(cache).get(&config) {
+            return Ok(palette);
         }
         let palette = Arc::new(Self::from_config(config)?);
-        cache.lock().unwrap().insert(config, palette.clone());
+        lock(cache).insert(config, palette.clone());
         Ok(palette)
     }
 
@@ -422,54 +648,22 @@ impl TonedPalette {
             bail!("bits per pixel must be between 1 and 24");
         }
 
-        // Key every candidate once, partition the needed prefix with
-        // select_nth (O(n)) and only sort that prefix — identical result to
-        // a full sort + truncate, several times faster at palette sizes.
-        let key = |c: [u8; 3]| -> f64 {
-            match ordering {
-                ToneOrdering::ChromaProximity => chroma_distance(c, base),
-                ToneOrdering::BaseProximity => c
-                    .iter()
-                    .zip(base.iter())
-                    .map(|(&a, &b)| ((a as i32 - b as i32).pow(2)) as f64)
-                    .sum(),
-            }
-        };
-        let mut keyed: Vec<(f64, [u8; 3])> = Self::enumerate_iso_luma(base, luma_tolerance)
-            .into_iter()
-            .map(|c| (key(c), c))
-            .collect();
-
-        let needed = 1usize << bits_per_pixel;
-        if keyed.len() < needed {
-            bail!(
-                "only {} colours share the base tone's luma (±{}); {} bits per pixel needs {}",
-                keyed.len(),
-                luma_tolerance,
-                bits_per_pixel,
-                needed
-            );
-        }
-        let compare =
-            |a: &(f64, [u8; 3]), b: &(f64, [u8; 3])| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
-        if keyed.len() > needed {
-            keyed.select_nth_unstable_by(needed - 1, compare);
-            keyed.truncate(needed);
-        }
-        keyed.sort_unstable_by(compare);
-        let colors: Vec<[u8; 3]> = keyed.into_iter().map(|(_, c)| c).collect();
-
-        let index_of = colors
-            .iter()
-            .enumerate()
-            .map(|(index, &color)| (color, index as u32))
-            .collect();
+        let colors = Self::select_colors(base, luma_tolerance, bits_per_pixel, ordering)?;
 
         Ok(Self {
             config,
             colors,
-            index_of,
+            index_of: OnceLock::new(),
         })
+    }
+
+    fn select_colors(
+        base: [u8; 3],
+        luma_tolerance: u8,
+        bits_per_pixel: u32,
+        ordering: ToneOrdering,
+    ) -> Result<Vec<[u8; 3]>> {
+        select_palette_colors(base, luma_tolerance, bits_per_pixel, ordering)
     }
 
     /// The configuration this palette was built from. Rebuilding from it is
@@ -510,7 +704,17 @@ impl TonedPalette {
 
     /// Palette index of an exact colour, if present.
     pub fn index_of(&self, color: [u8; 3]) -> Option<u32> {
-        self.index_of.get(&color).copied()
+        self.reverse_index().get(&color).copied()
+    }
+
+    fn reverse_index(&self) -> &HashMap<[u8; 3], u32> {
+        self.index_of.get_or_init(|| {
+            self.colors
+                .iter()
+                .enumerate()
+                .map(|(index, &color)| (color, index as u32))
+                .collect()
+        })
     }
 
     /// Number of colours in the palette (`2^bits_per_pixel`).
@@ -581,13 +785,14 @@ impl TonedPalette {
         let mut bytes = Vec::with_capacity(rgba.len() / 4 * bpp as usize / 8 + 1);
         let mut acc = 0u32;
         let mut acc_bits = 0u32;
+        let index_of = self.reverse_index();
 
         for chunk in rgba.chunks_exact(4) {
             if chunk[3] == 0 {
                 continue;
             }
 
-            let Some(&index) = self.index_of.get(&[chunk[0], chunk[1], chunk[2]]) else {
+            let Some(&index) = index_of.get(&[chunk[0], chunk[1], chunk[2]]) else {
                 bail!(
                     "pixel #{:02X}{:02X}{:02X} is not in the toned palette",
                     chunk[0],

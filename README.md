@@ -8,6 +8,30 @@ Artists, collectors, archivists, marketplaces, and developers can examine a
 Bitneedle picture record. They can make sure that the record contains its audio
 data. They can also build independent tools to play and preserve the record.
 
+## What a record attests
+
+A pressed record is immutable, and its signature says so: the release
+commitment covers the audio and everything the record says about itself —
+title, artist, label, catalogue number, copyright, credit, the palette and
+the geometry it was cut at. A signed record cannot be re-titled or
+re-attributed without becoming a different release.
+
+Three things are allowed to arrive later, and none of them may arrive
+unsigned:
+
+- **A chain anchor, an ISRC, a barcode.** None can exist at press time. They
+  sit outside the release commitment, and writing any of them requires the
+  deferred attestation that signs them, bound to the record they belong to.
+- **The sidecar.** It is meant to be rewritten — editions are issued, labels
+  are re-authored — so it carries its own attestation, replaced each time it
+  is written. Whoever writes it signs what they wrote.
+
+A release may be signed by the artist, by a platform, or by both: they are
+separate signatures over one commitment. Who a key belongs to is resolved by
+`record-verify` and its caller, never by the wire format.
+
+`bitneedle-format/README.md` sets this out in full.
+
 ## Licensing
 
 Different licenses apply to the components in this repository.
@@ -31,11 +55,11 @@ patent notice and the limited decoder pledge.
 | Crate | License | Role |
 | --- | --- | --- |
 | `record-core` | Apache-2.0 | Shared geometry, record-profile, chunk/gap, and spiral-index primitives used by both decoder and authoring tools. |
-| `record-descriptor` | Apache-2.0 | BRD1 descriptor wire format, parsing, and decoding. |
+| `record-descriptor` | Apache-2.0 | BRD1 descriptor wire format, parsing, and decoding, including the signed identity a release commitment is taken over. |
 | `record-package` | Apache-2.0 | Optional BPK1 container for exact BRD1, BRS1, and BSC1 component bytes. |
 | `record-decode` | Apache-2.0 | Decode and inspect Bitneedle picture-record images. |
 | `record-verify` | Apache-2.0 | Canonical hashing, registration receipt chains, and signature verification. |
-| `record-sidecar` | Apache-2.0 | Sidecar structures used to support recovery and inspection. |
+| `record-sidecar` | Apache-2.0 | Sidecar structures used to support recovery and inspection, and the attestation a sidecar carries over its own contents. |
 | `record-wasm` | Apache-2.0 | WebAssembly facade for decoding, verification, and sidecar inspection. |
 | `player-wasm` | Apache-2.0 | WebAssembly playback/decoding orchestration helpers for Bitneedle player apps (metadata resolution, cache keys, scratch control — no record authoring). |
 | `bytes2rgb` | Apache-2.0 | Low-level pixel-to-byte utilities used by decoder and verification tools. |

@@ -823,6 +823,60 @@ fn build_spiral_mask(
     })
 }
 
+// Exact-fit probes need only the number of addressable pixels. Building an
+// ordered `Vec<usize>` for every binary-search and sweep candidate needlessly
+// drives the WASM allocator to a large high-water mark. Count the same unique
+// traced pixels in place and reserve the ordered representation for the one
+// winning spiral that is actually rendered.
+fn count_spiral_mask_pixels(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    record_profile: &str,
+) -> Result<usize> {
+    let geometry = describe_record_profile(record_profile)?;
+    let payload_outer = payload_outer_radius(&geometry);
+    let payload_inner = payload_inner_radius(&geometry);
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let record_radius = width.min(height) as f64 / 2.0;
+    let resolved_pitch = resolve_pitch(b_value, None)?;
+    let bounded_outer_radius = (payload_outer as f64).min(record_radius - 1.0);
+    let mut occupied = vec![0_u8; width * height];
+    let mut addressable_pixel_count = 0usize;
+    let mut swept_theta = 0.0_f64;
+    let mut angle = DEFAULT_START_ANGLE;
+    let mut radius = bounded_outer_radius;
+
+    while radius >= 0.0 {
+        let x = js_round(center_x + radius * angle.cos());
+        let y = js_round(center_y - radius * angle.sin());
+
+        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+            let pixel_index = y as usize * width + x as usize;
+            if occupied[pixel_index] == 0 {
+                occupied[pixel_index] = 1;
+                let dx = x as f64 - center_x;
+                let dy = y as f64 - center_y;
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance > payload_inner as f64 && distance < payload_outer as f64 {
+                    addressable_pixel_count += 1;
+                }
+            }
+        }
+
+        let theta_step = 1.0
+            / (radius * radius + resolved_pitch * resolved_pitch)
+                .sqrt()
+                .max(1e-6);
+        swept_theta += theta_step;
+        angle = DEFAULT_START_ANGLE - swept_theta;
+        radius = bounded_outer_radius - resolved_pitch * swept_theta;
+    }
+
+    Ok(addressable_pixel_count)
+}
+
 fn count_addressable_capacity(width: usize, height: usize, record_profile: &str) -> Result<usize> {
     let geometry = describe_record_profile(record_profile)?;
     let payload_outer = payload_outer_radius(&geometry);
@@ -883,12 +937,13 @@ fn evaluate_spiral_fit(
     record_profile: &str,
     b_value: f64,
 ) -> Result<FitCandidate> {
-    let mask = build_spiral_mask(width, height, b_value, record_profile)?;
+    let addressable_pixel_count =
+        count_spiral_mask_pixels(width, height, b_value, record_profile)?;
 
     Ok(FitCandidate {
-        b_value: mask.b_value,
-        addressable_pixel_count: mask.addressable_pixel_count,
-        pixels_remaining: track_pixel_count as isize - mask.addressable_pixel_count as isize,
+        b_value,
+        addressable_pixel_count,
+        pixels_remaining: track_pixel_count as isize - addressable_pixel_count as isize,
     })
 }
 
@@ -1704,7 +1759,12 @@ fn render_payload_codes_to_transparent_spiral(
         bsc_pointer: None,
         tone_spans,
         cache_encryption,
-    };
+            chain_anchor: None,
+        additional_signatures: Vec::new(),
+        isrcs: Vec::new(),
+        upc: None,
+        deferred_attestation: None,
+};
 
     let rendered = render_track_scanline_onto_transparent_spiral(
         RECORD_WIDTH,
@@ -1997,6 +2057,23 @@ mod tests {
     use std::path::PathBuf;
 
     const WESTSIDE_DURATION_SECONDS: f64 = 208.509396;
+
+    #[test]
+    fn fit_counter_matches_materialized_spiral_mask() {
+        for profile in ["single45", "lp"] {
+            for b_value in [0.5, 1.0, 2.5, 5.0] {
+                let materialized =
+                    build_spiral_mask(RECORD_WIDTH, RECORD_HEIGHT, b_value, profile).unwrap();
+                let counted =
+                    count_spiral_mask_pixels(RECORD_WIDTH, RECORD_HEIGHT, b_value, profile)
+                        .unwrap();
+                assert_eq!(
+                    counted, materialized.addressable_pixel_count,
+                    "profile={profile} b={b_value}",
+                );
+            }
+        }
+    }
 
     const GOLDENS: &[Golden] = &[
         Golden {
