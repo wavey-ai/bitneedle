@@ -113,7 +113,16 @@ pub struct RenderOptions {
     /// modulation is. Zero glides; toward one the turns cluster into tight
     /// groups separated by wide land. Ignored for Archimedean.
     pub groove_definition: Option<f64>,
+    /// Vari-pitch sheen, 0–1: one keeps the raster's interference light
+    /// (no dither), zero is the fully dithered matte field. Defaults to
+    /// sheen 0.8 — mostly shine, lightly grained. Ignored for Archimedean.
+    pub groove_sheen: Option<f64>,
+    /// Where the fire burns: "even" (default), "inner", or "outer".
+    /// Ignored for Archimedean.
+    pub fire_placement: Option<String>,
 }
+
+const DEFAULT_GROOVE_SHEEN: f64 = 0.8;
 
 const DEFAULT_GROOVE_CHARACTER: f64 = 0.28;
 
@@ -129,6 +138,12 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
             if render_options.groove_definition.is_some() {
                 bail!("grooveDefinition is only meaningful for the variPitch spiral family");
             }
+            if render_options.groove_sheen.is_some() {
+                bail!("grooveSheen is only meaningful for the variPitch spiral family");
+            }
+            if render_options.fire_placement.is_some() {
+                bail!("firePlacement is only meaningful for the variPitch spiral family");
+            }
             SpiralFamily::Archimedean
         }
         Some("variPitch") | Some("vari-pitch") => {
@@ -138,10 +153,18 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
             let depth = render_options
                 .groove_character
                 .unwrap_or(DEFAULT_GROOVE_CHARACTER);
+            let placement = match render_options.fire_placement.as_deref() {
+                None | Some("even") => record_core::VariPitchPlacement::Even,
+                Some("inner") => record_core::VariPitchPlacement::Inner,
+                Some("outer") => record_core::VariPitchPlacement::Outer,
+                Some(other) => bail!("unknown fire placement {other:?}"),
+            };
             SpiralFamily::VariPitch {
                 depth,
                 seed,
                 definition: render_options.groove_definition.unwrap_or(0.0),
+                sheen: render_options.groove_sheen.unwrap_or(DEFAULT_GROOVE_SHEEN),
+                placement,
             }
         }
         Some(other) => bail!("unknown spiral family {other:?}"),
@@ -740,19 +763,10 @@ fn trace_record_spiral(
     let mut occupied = vec![0_u8; width * height];
     let mut ordered_pixel_indices = Vec::new();
 
-    let vari: Option<VariPitchParams> = match family {
-        SpiralFamily::Archimedean => None,
-        SpiralFamily::VariPitch {
-            depth,
-            seed,
-            definition,
-        } => Some(vari_pitch_params(
-            *depth,
-            *seed,
-            *definition,
-            ((bounded_outer_radius - bounded_inner_radius) / resolved_pitch).max(0.0),
-        )),
-    };
+    let vari: Option<VariPitchParams> = vari_pitch_params(
+        family,
+        ((bounded_outer_radius - bounded_inner_radius) / resolved_pitch).max(0.0),
+    );
 
     let mut swept_theta = 0.0_f64;
     let mut theta_effective = 0.0_f64;
@@ -952,22 +966,11 @@ fn count_spiral_mask_pixels(
     let record_radius = width.min(height) as f64 / 2.0;
     let resolved_pitch = resolve_pitch(b_value, None)?;
     let bounded_outer_radius = (payload_outer as f64).min(record_radius - 1.0);
-    let vari: Option<VariPitchParams> = match family {
-        SpiralFamily::Archimedean => None,
-        // The mask trace runs to the centre, so the sweep the banding is
-        // scaled to is the bounded outer span — identical to the figure the
-        // core trace derives for the same bounds.
-        SpiralFamily::VariPitch {
-            depth,
-            seed,
-            definition,
-        } => Some(vari_pitch_params(
-            *depth,
-            *seed,
-            *definition,
-            (bounded_outer_radius / resolved_pitch).max(0.0),
-        )),
-    };
+    // The mask trace runs to the centre, so the sweep the banding is scaled
+    // to is the bounded outer span — identical to the figure the core trace
+    // derives for the same bounds.
+    let vari: Option<VariPitchParams> =
+        vari_pitch_params(family, (bounded_outer_radius / resolved_pitch).max(0.0));
     let mut occupied = vec![0_u8; width * height];
     let mut addressable_pixel_count = 0usize;
     let mut swept_theta = 0.0_f64;
@@ -2510,6 +2513,8 @@ mod tests {
             "spiralFamily": "variPitch",
             "grooveCharacter": 0.3,
             "grooveDefinition": 0.7,
+            "grooveSheen": 0.55,
+            "firePlacement": "inner",
             "spiralSeed": 81985529216486895
         }"#;
         // render_payload_codes_to_png runs the mandatory render-time
@@ -2533,7 +2538,9 @@ mod tests {
             SpiralFamily::VariPitch {
                 depth: 0.3,
                 seed: 81985529216486895,
-                definition: 0.7
+                definition: 0.7,
+                sheen: 0.55,
+                placement: record_core::VariPitchPlacement::Inner
             }
         );
     }

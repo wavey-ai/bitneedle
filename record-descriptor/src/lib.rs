@@ -780,14 +780,18 @@ fn push_spiral_family_identity(out: &mut Vec<u8>, tag: u8, family: &SpiralFamily
         depth,
         seed,
         definition,
+        sheen,
+        placement,
     } = family
     {
         out.push(tag);
-        push_u32(out, 25);
+        push_u32(out, 34);
         push_u8(out, family.wire_code());
         push_u64(out, depth.to_bits());
         push_u64(out, *seed);
         push_u64(out, definition.to_bits());
+        push_u64(out, sheen.to_bits());
+        push_u8(out, placement.wire_code());
     }
 }
 
@@ -1829,9 +1833,11 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 if prefix.version != RECORD_DESCRIPTOR_VERSION_V3 {
                     bail!("spiral geometry segment requires descriptor version 3");
                 }
-                // 17 bytes is the first v3 shape (no definition field);
-                // 25 carries the groove definition after the seed.
-                if payload.len() != 17 && payload.len() != 25 {
+                // The segment grew as the house cut did: 17 bytes is the
+                // first v3 shape, 25 adds the groove definition, 34 adds
+                // sheen and the fire's placement. Absent fields decode to
+                // what those earlier cuts meant.
+                if payload.len() != 17 && payload.len() != 25 && payload.len() != 34 {
                     bail!("spiral geometry segment has invalid length");
                 }
                 if payload[0] != SPIRAL_FAMILY_VARI_PITCH_CODE {
@@ -1842,17 +1848,29 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                         "slice length",
                     )));
                 let seed = u64::from_be_bytes(payload[9..17].try_into().expect("slice length"));
-                let definition = if payload.len() == 25 {
+                let definition = if payload.len() >= 25 {
                     f64::from_bits(u64::from_be_bytes(
                         payload[17..25].try_into().expect("slice length"),
                     ))
                 } else {
                     0.0
                 };
+                let (sheen, placement) = if payload.len() == 34 {
+                    (
+                        f64::from_bits(u64::from_be_bytes(
+                            payload[25..33].try_into().expect("slice length"),
+                        )),
+                        record_core::VariPitchPlacement::from_wire_code(payload[33])?,
+                    )
+                } else {
+                    (0.0, record_core::VariPitchPlacement::Even)
+                };
                 let family = SpiralFamily::VariPitch {
                     depth,
                     seed,
                     definition,
+                    sheen,
+                    placement,
                 };
                 family.validate()?;
                 assign_once(&mut spiral_family, family, "spiral geometry")?;

@@ -373,6 +373,43 @@ pub const VARI_PITCH_MAX_DEPTH: f64 = 0.45;
 /// bits nudge it microscopically (±2% period, small phase drift) — so a
 /// pressing flow that keeps the high bits and re-rolls the low bits gives
 /// every pressing of the same cut its own, very slightly different, groove.
+/// Where the fire burns: how the modulation depth is enveloped across the
+/// cut. `Even` is the whole disc; `Inner` leans the depth toward the label,
+/// `Outer` toward the rim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VariPitchPlacement {
+    #[default]
+    Even,
+    Inner,
+    Outer,
+}
+
+impl VariPitchPlacement {
+    pub fn wire_code(&self) -> u8 {
+        match self {
+            VariPitchPlacement::Even => 0,
+            VariPitchPlacement::Inner => 1,
+            VariPitchPlacement::Outer => 2,
+        }
+    }
+
+    pub fn from_wire_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(VariPitchPlacement::Even),
+            1 => Ok(VariPitchPlacement::Inner),
+            2 => Ok(VariPitchPlacement::Outer),
+            other => bail!("unknown vari-pitch placement code {other}"),
+        }
+    }
+}
+
+fn default_vari_pitch_sheen() -> f64 {
+    // Absent from the wire means the first v3 cuts: full-amplitude dither,
+    // which is sheen zero.
+    0.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "family", rename_all = "camelCase")]
 pub enum SpiralFamily {
@@ -389,6 +426,17 @@ pub enum SpiralFamily {
         /// than a smooth swell.
         #[serde(default)]
         definition: f64,
+        /// Sheen, 0–1: how much of the raster's interference light the cut
+        /// keeps. One turns the de-moiré dither off entirely — the bent
+        /// fans play across the face the way light plays on vinyl; zero is
+        /// full dither, a matte field. Stored inverted from the dither
+        /// amplitude so the slider reads the way the surface does.
+        #[serde(default = "default_vari_pitch_sheen")]
+        sheen: f64,
+        /// Where the fire burns: even across the disc, leaned into the
+        /// label, or leaned out to the rim.
+        #[serde(default)]
+        placement: VariPitchPlacement,
     },
 }
 
@@ -410,7 +458,10 @@ impl SpiralFamily {
 
     pub fn validate(&self) -> Result<()> {
         if let SpiralFamily::VariPitch {
-            depth, definition, ..
+            depth,
+            definition,
+            sheen,
+            ..
         } = self
         {
             if !(depth.is_finite() && *depth > 0.0 && *depth <= VARI_PITCH_MAX_DEPTH) {
@@ -420,6 +471,9 @@ impl SpiralFamily {
             }
             if !(definition.is_finite() && (0.0..=1.0).contains(definition)) {
                 bail!("vari-pitch definition must be finite and within 0..=1");
+            }
+            if !(sheen.is_finite() && (0.0..=1.0).contains(sheen)) {
+                bail!("vari-pitch sheen must be finite and within 0..=1");
             }
         }
         Ok(())
@@ -441,6 +495,9 @@ pub struct VariPitchParams {
     pub weight_2: f64,
     pub shape: f64,
     pub dither_phase: f64,
+    pub dither_amplitude: f64,
+    pub placement: VariPitchPlacement,
+    pub sweep_theta: f64,
 }
 
 const VARI_PITCH_WEIGHT_1: f64 = 0.62;
@@ -480,12 +537,17 @@ fn unit_from_draw(draw: u64) -> f64 {
 /// The strongest waveshaping gain a definition of 1.0 maps to.
 const VARI_PITCH_MAX_SHAPE: f64 = 3.5;
 
-pub fn vari_pitch_params(
-    depth: f64,
-    seed: u64,
-    definition: f64,
-    sweep_theta: f64,
-) -> VariPitchParams {
+pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<VariPitchParams> {
+    let SpiralFamily::VariPitch {
+        depth,
+        seed,
+        definition,
+        sheen,
+        placement,
+    } = *family
+    else {
+        return None;
+    };
     let total_turns = (sweep_theta / TAU).max(1.0);
 
     let mut character = seed >> 32;
@@ -508,7 +570,7 @@ pub fn vari_pitch_params(
     let period_1_turns = (total_turns / cycles_1 * period_1_jitter).max(2.3);
     let period_2_turns = (total_turns / cycles_2 * period_2_jitter).max(3.7);
 
-    VariPitchParams {
+    Some(VariPitchParams {
         depth,
         period_1: TAU * period_1_turns,
         period_2: TAU * period_2_turns,
@@ -518,7 +580,10 @@ pub fn vari_pitch_params(
         weight_2: VARI_PITCH_WEIGHT_2,
         shape: VARI_PITCH_MAX_SHAPE * definition.clamp(0.0, 1.0),
         dither_phase: TAU * unit_from_draw(splitmix64(&mut character)),
-    }
+        dither_amplitude: VARI_PITCH_DITHER_AMPLITUDE * (1.0 - sheen.clamp(0.0, 1.0)),
+        placement,
+        sweep_theta: sweep_theta.max(1e-9),
+    })
 }
 
 /// Sub-pixel radial dither: amplitude in pixels and angular frequency in
@@ -544,14 +609,25 @@ impl VariPitchParams {
         if self.shape > 1e-9 {
             wave = (self.shape * wave).tanh() / self.shape.tanh();
         }
-        1.0 + self.depth * wave
+        // The fire's placement: a smoothstep envelope over the sweep. The
+        // trace runs outer to inner, so the sweep fraction rises toward
+        // the label.
+        let toward_label = (theta / self.sweep_theta).clamp(0.0, 1.0);
+        let envelope = match self.placement {
+            VariPitchPlacement::Even => 1.0,
+            VariPitchPlacement::Inner => toward_label * toward_label * (3.0 - 2.0 * toward_label),
+            VariPitchPlacement::Outer => {
+                let toward_rim = 1.0 - toward_label;
+                toward_rim * toward_rim * (3.0 - 2.0 * toward_rim)
+            }
+        };
+        1.0 + self.depth * envelope * wave
     }
 
     /// The sub-pixel radial wobble at `theta`; added to the drawn radius,
     /// never to the pitch integral.
     pub fn dither(&self, theta: f64) -> f64 {
-        VARI_PITCH_DITHER_AMPLITUDE
-            * (VARI_PITCH_DITHER_FREQUENCY * theta + self.dither_phase).sin()
+        self.dither_amplitude * (VARI_PITCH_DITHER_FREQUENCY * theta + self.dither_phase).sin()
     }
 }
 
@@ -900,19 +976,7 @@ pub fn trace_record_spiral_with_family(
     let mut angle = start_angle;
     let mut radius = outer;
 
-    let vari = match family {
-        SpiralFamily::Archimedean => None,
-        SpiralFamily::VariPitch {
-            depth,
-            seed,
-            definition,
-        } => Some(vari_pitch_params(
-            *depth,
-            *seed,
-            *definition,
-            ((outer - inner) / resolved_pitch).max(0.0),
-        )),
-    };
+    let vari = vari_pitch_params(family, ((outer - inner) / resolved_pitch).max(0.0));
 
     // The vari-pitch radius is the running integral of the local pitch —
     // shaped waves have no closed form — accumulated with the same steps
@@ -3361,14 +3425,23 @@ mod tests {
         validate_codec_metadata(&a).unwrap();
     }
 
+    fn vari(depth: f64, seed: u64, definition: f64) -> SpiralFamily {
+        SpiralFamily::VariPitch {
+            depth,
+            seed,
+            definition,
+            sheen: 0.8,
+            placement: VariPitchPlacement::Even,
+        }
+    }
+
     #[test]
     fn vari_pitch_params_are_deterministic_and_bounded() {
         let sweep = 2.0 * PI * 147.0; // a Westside-sized cut
-        let params = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, 0.7, sweep);
-        assert_eq!(
-            params,
-            vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, 0.7, sweep)
-        );
+        let family = vari(0.3, 0x0123_4567_89AB_CDEF, 0.7);
+        let params = vari_pitch_params(&family, sweep).unwrap();
+        assert_eq!(params, vari_pitch_params(&family, sweep).unwrap());
+        assert!(vari_pitch_params(&SpiralFamily::Archimedean, sweep).is_none());
 
         // The banding scales to the cut: the short wave runs 4.6–6.2
         // cycles across the sweep, the long 1.8–2.6 (±2% micro jitter).
@@ -3377,32 +3450,75 @@ mod tests {
         assert!((4.4..6.4).contains(&cycles_1), "short wave: {cycles_1} cycles");
         assert!((1.7..2.7).contains(&cycles_2), "long wave: {cycles_2} cycles");
 
+        // Sheen 0.8 keeps a fifth of the full dither amplitude.
+        assert!((params.dither_amplitude - 0.34 * 0.2).abs() < 1e-12);
+
         // A short dubplate keeps the roundness floors instead.
-        let short = vari_pitch_params(0.3, 1, 0.0, 2.0 * PI * 8.0);
+        let short = vari_pitch_params(&vari(0.3, 1, 0.0), 2.0 * PI * 8.0).unwrap();
         assert!(short.period_1 / (2.0 * PI) >= 2.3 - 1e-9);
         assert!(short.period_2 / (2.0 * PI) >= 3.7 - 1e-9);
 
-        // The local pitch never leaves b·[1 − depth, 1 + depth] — shaped
-        // or not — so the groove always advances inward.
+        // The local pitch never leaves b·[1 − depth, 1 + depth] — shaped,
+        // enveloped, or not — so the groove always advances inward.
         for definition in [0.0, 0.5, 1.0] {
-            let shaped = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, definition, sweep);
-            let mut theta = 0.0_f64;
-            while theta < 2_000.0 {
-                let factor = shaped.pitch_factor(theta);
-                assert!(
-                    (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
-                    "pitch factor {factor} at theta {theta}, definition {definition}"
-                );
-                theta += 0.01;
+            for placement in [
+                VariPitchPlacement::Even,
+                VariPitchPlacement::Inner,
+                VariPitchPlacement::Outer,
+            ] {
+                let family = SpiralFamily::VariPitch {
+                    depth: 0.3,
+                    seed: 0x0123_4567_89AB_CDEF,
+                    definition,
+                    sheen: 0.8,
+                    placement,
+                };
+                let shaped = vari_pitch_params(&family, sweep).unwrap();
+                let mut theta = 0.0_f64;
+                while theta < 2_000.0 {
+                    let factor = shaped.pitch_factor(theta);
+                    assert!(
+                        (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
+                        "pitch factor {factor} at theta {theta}, definition                          {definition}, placement {placement:?}"
+                    );
+                    theta += 0.01;
+                }
             }
         }
+
+        // The placement envelope actually leans the fire: at the rim the
+        // inner placement is silent, at the label the outer one is.
+        let inner = vari_pitch_params(
+            &SpiralFamily::VariPitch {
+                depth: 0.3,
+                seed: 7,
+                definition: 0.0,
+                sheen: 1.0,
+                placement: VariPitchPlacement::Inner,
+            },
+            sweep,
+        )
+        .unwrap();
+        assert!((inner.pitch_factor(0.0) - 1.0).abs() < 1e-9);
+        let outer = vari_pitch_params(
+            &SpiralFamily::VariPitch {
+                depth: 0.3,
+                seed: 7,
+                definition: 0.0,
+                sheen: 1.0,
+                placement: VariPitchPlacement::Outer,
+            },
+            sweep,
+        )
+        .unwrap();
+        assert!((outer.pitch_factor(sweep) - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn vari_pitch_micro_bits_only_nudge_the_cut() {
         let sweep = 2.0 * PI * 147.0;
-        let base = vari_pitch_params(0.3, 0xAAAA_BBBB_0000_0000, 0.5, sweep);
-        let nudged = vari_pitch_params(0.3, 0xAAAA_BBBB_FFFF_FFFF, 0.5, sweep);
+        let base = vari_pitch_params(&vari(0.3, 0xAAAA_BBBB_0000_0000, 0.5), sweep).unwrap();
+        let nudged = vari_pitch_params(&vari(0.3, 0xAAAA_BBBB_FFFF_FFFF, 0.5), sweep).unwrap();
 
         // Same high bits: the character holds — periods within the ±2%
         // micro jitter of each other, phases within the small drift.
@@ -3421,6 +3537,8 @@ mod tests {
             depth: 0.3,
             seed: 42,
             definition: 0.6,
+            sheen: 0.8,
+            placement: VariPitchPlacement::Even,
         };
         let vari =
             build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
@@ -3453,23 +3571,42 @@ mod tests {
     fn vari_pitch_rejects_nan_and_out_of_range_depth() {
         for depth in [f64::NAN, 0.0, -0.1, 0.46] {
             assert!(
-                SpiralFamily::VariPitch { depth, seed: 1, definition: 0.0 }
-                    .validate()
-                    .is_err(),
+                SpiralFamily::VariPitch {
+                    depth,
+                    seed: 1,
+                    definition: 0.0,
+                    sheen: 0.5,
+                    placement: VariPitchPlacement::Even
+                }
+                .validate()
+                .is_err(),
                 "depth {depth} must be refused"
             );
         }
         assert!(SpiralFamily::VariPitch {
             depth: 0.45,
             seed: 1,
-            definition: 1.0
+            definition: 1.0,
+            sheen: 1.0,
+            placement: VariPitchPlacement::Outer
         }
         .validate()
         .is_ok());
         assert!(SpiralFamily::VariPitch {
             depth: 0.3,
             seed: 1,
-            definition: 1.2
+            definition: 1.2,
+            sheen: 0.5,
+            placement: VariPitchPlacement::Even
+        }
+        .validate()
+        .is_err());
+        assert!(SpiralFamily::VariPitch {
+            depth: 0.3,
+            seed: 1,
+            definition: 0.5,
+            sheen: 1.4,
+            placement: VariPitchPlacement::Even
         }
         .validate()
         .is_err());
