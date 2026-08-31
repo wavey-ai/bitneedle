@@ -120,6 +120,10 @@ pub struct RenderOptions {
     /// Where the fire burns: "even" (default), "inner", or "outer".
     /// Ignored for Archimedean.
     pub fire_placement: Option<String>,
+    /// The fire's own depth, poured into the placement's aura band on top
+    /// of the base drift. `grooveCharacter + fireDepth` may not exceed
+    /// 0.45. Ignored for Archimedean.
+    pub fire_depth: Option<f64>,
 }
 
 const DEFAULT_GROOVE_SHEEN: f64 = 0.8;
@@ -165,6 +169,7 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
                 definition: render_options.groove_definition.unwrap_or(0.0),
                 sheen: render_options.groove_sheen.unwrap_or(DEFAULT_GROOVE_SHEEN),
                 placement,
+                fire: render_options.fire_depth.unwrap_or(0.0),
             }
         }
         Some(other) => bail!("unknown spiral family {other:?}"),
@@ -178,7 +183,7 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
 fn min_pitch_factor(family: &SpiralFamily) -> f64 {
     match family {
         SpiralFamily::Archimedean => 1.0,
-        SpiralFamily::VariPitch { depth, .. } => 1.0 - depth,
+        SpiralFamily::VariPitch { depth, fire, .. } => 1.0 - (depth + fire),
     }
 }
 
@@ -2540,7 +2545,8 @@ mod tests {
                 seed: 81985529216486895,
                 definition: 0.7,
                 sheen: 0.55,
-                placement: record_core::VariPitchPlacement::Inner
+                placement: record_core::VariPitchPlacement::Inner,
+                fire: 0.0,
             }
         );
     }

@@ -263,15 +263,17 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
             definition,
             sheen,
             placement,
+            fire,
         } => {
             descriptor.spiral_family.validate()?;
-            let mut payload = Vec::with_capacity(34);
+            let mut payload = Vec::with_capacity(42);
             payload.push(descriptor.spiral_family.wire_code());
             payload.extend_from_slice(&depth.to_bits().to_be_bytes());
             payload.extend_from_slice(&seed.to_be_bytes());
             payload.extend_from_slice(&definition.to_bits().to_be_bytes());
             payload.extend_from_slice(&sheen.to_bits().to_be_bytes());
             payload.push(placement.wire_code());
+            payload.extend_from_slice(&fire.to_bits().to_be_bytes());
             payload
         }
     };
@@ -446,6 +448,7 @@ mod tests {
             definition: 0.65,
             sheen: 0.8,
             placement: record_core::VariPitchPlacement::Inner,
+            fire: 0.0,
         };
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).unwrap();
@@ -481,6 +484,7 @@ mod tests {
             definition: 0.0,
             sheen: 0.0,
             placement: record_core::VariPitchPlacement::Even,
+            fire: 0.0,
         };
         assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
     }

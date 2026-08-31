@@ -437,6 +437,13 @@ pub enum SpiralFamily {
         /// label, or leaned out to the rim.
         #[serde(default)]
         placement: VariPitchPlacement,
+        /// The fire itself: extra modulation depth poured into a
+        /// concentrated aura band at the placement's end of the sweep —
+        /// the last stretch before the label for `Inner`, the first out of
+        /// the rim for `Outer`. Zero is no aura; `depth + fire` may not
+        /// exceed [`VARI_PITCH_MAX_DEPTH`]. Meaningless under `Even`.
+        #[serde(default)]
+        fire: f64,
     },
 }
 
@@ -461,12 +468,18 @@ impl SpiralFamily {
             depth,
             definition,
             sheen,
+            fire,
             ..
         } = self
         {
             if !(depth.is_finite() && *depth > 0.0 && *depth <= VARI_PITCH_MAX_DEPTH) {
                 bail!(
                     "vari-pitch depth must be finite, positive, and at most {VARI_PITCH_MAX_DEPTH}"
+                );
+            }
+            if !(fire.is_finite() && *fire >= 0.0 && depth + fire <= VARI_PITCH_MAX_DEPTH) {
+                bail!(
+                    "vari-pitch fire must be finite and non-negative, and depth + fire                      at most {VARI_PITCH_MAX_DEPTH}"
                 );
             }
             if !(definition.is_finite() && (0.0..=1.0).contains(definition)) {
@@ -497,6 +510,7 @@ pub struct VariPitchParams {
     pub dither_phase: f64,
     pub dither_amplitude: f64,
     pub placement: VariPitchPlacement,
+    pub fire: f64,
     pub sweep_theta: f64,
 }
 
@@ -544,6 +558,7 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         definition,
         sheen,
         placement,
+        fire,
     } = *family
     else {
         return None;
@@ -582,6 +597,7 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         dither_phase: TAU * unit_from_draw(splitmix64(&mut character)),
         dither_amplitude: VARI_PITCH_DITHER_AMPLITUDE * (1.0 - sheen.clamp(0.0, 1.0)),
         placement,
+        fire,
         sweep_theta: sweep_theta.max(1e-9),
     })
 }
@@ -609,19 +625,24 @@ impl VariPitchParams {
         if self.shape > 1e-9 {
             wave = (self.shape * wave).tanh() / self.shape.tanh();
         }
-        // The fire's placement: a smoothstep envelope over the sweep. The
-        // trace runs outer to inner, so the sweep fraction rises toward
-        // the label.
+        // The base drift breathes evenly; the fire is poured into a
+        // concentrated aura band — the last thirty percent of the sweep
+        // before the label for Inner, the first thirty percent out of the
+        // rim for Outer. The trace runs outer to inner, so the sweep
+        // fraction rises toward the label.
         let toward_label = (theta / self.sweep_theta).clamp(0.0, 1.0);
-        let envelope = match self.placement {
-            VariPitchPlacement::Even => 1.0,
-            VariPitchPlacement::Inner => toward_label * toward_label * (3.0 - 2.0 * toward_label),
+        let aura = match self.placement {
+            VariPitchPlacement::Even => 0.0,
+            VariPitchPlacement::Inner => {
+                let rise = ((toward_label - 0.7) / 0.3).clamp(0.0, 1.0);
+                rise * rise * (3.0 - 2.0 * rise)
+            }
             VariPitchPlacement::Outer => {
-                let toward_rim = 1.0 - toward_label;
-                toward_rim * toward_rim * (3.0 - 2.0 * toward_rim)
+                let rise = ((0.3 - toward_label) / 0.3).clamp(0.0, 1.0);
+                rise * rise * (3.0 - 2.0 * rise)
             }
         };
-        1.0 + self.depth * envelope * wave
+        1.0 + (self.depth + self.fire * aura) * wave
     }
 
     /// The sub-pixel radial wobble at `theta`; added to the drawn radius,
@@ -3432,6 +3453,7 @@ mod tests {
             definition,
             sheen: 0.8,
             placement: VariPitchPlacement::Even,
+            fire: 0.0,
         }
     }
 
@@ -3472,13 +3494,15 @@ mod tests {
                     definition,
                     sheen: 0.8,
                     placement,
+                    // The fire pushes the bound: total swing depth + fire.
+                    fire: 0.1,
                 };
                 let shaped = vari_pitch_params(&family, sweep).unwrap();
                 let mut theta = 0.0_f64;
                 while theta < 2_000.0 {
                     let factor = shaped.pitch_factor(theta);
                     assert!(
-                        (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
+                        (0.6 - 1e-9..=1.4 + 1e-9).contains(&factor),
                         "pitch factor {factor} at theta {theta}, definition                          {definition}, placement {placement:?}"
                     );
                     theta += 0.01;
@@ -3486,32 +3510,39 @@ mod tests {
             }
         }
 
-        // The placement envelope actually leans the fire: at the rim the
-        // inner placement is silent, at the label the outer one is.
-        let inner = vari_pitch_params(
-            &SpiralFamily::VariPitch {
-                depth: 0.3,
-                seed: 7,
-                definition: 0.0,
-                sheen: 1.0,
-                placement: VariPitchPlacement::Inner,
-            },
-            sweep,
-        )
-        .unwrap();
-        assert!((inner.pitch_factor(0.0) - 1.0).abs() < 1e-9);
-        let outer = vari_pitch_params(
-            &SpiralFamily::VariPitch {
-                depth: 0.3,
-                seed: 7,
-                definition: 0.0,
-                sheen: 1.0,
-                placement: VariPitchPlacement::Outer,
-            },
-            sweep,
-        )
-        .unwrap();
-        assert!((outer.pitch_factor(sweep) - 1.0).abs() < 1e-9);
+        // The fire pours only into its aura band: outside it, an inner or
+        // outer fire cuts exactly like the fireless base.
+        let with = |placement, fire| {
+            vari_pitch_params(
+                &SpiralFamily::VariPitch {
+                    depth: 0.05,
+                    seed: 7,
+                    definition: 0.0,
+                    sheen: 1.0,
+                    placement,
+                    fire,
+                },
+                sweep,
+            )
+            .unwrap()
+        };
+        let base = with(VariPitchPlacement::Even, 0.0);
+        let inner = with(VariPitchPlacement::Inner, 0.40);
+        let outer = with(VariPitchPlacement::Outer, 0.40);
+        // At the rim (theta 0) the inner fire is silent; at the label the
+        // outer fire is.
+        assert!((inner.pitch_factor(0.0) - base.pitch_factor(0.0)).abs() < 1e-9);
+        assert!((outer.pitch_factor(sweep) - base.pitch_factor(sweep)).abs() < 1e-9);
+        // And inside its band the fire actually burns: the swing away from
+        // 1.0 exceeds what the base alone can reach.
+        let deep_inner = (0..200)
+            .map(|i| (inner.pitch_factor(sweep * (0.85 + 0.15 * i as f64 / 200.0)) - 1.0).abs())
+            .fold(0.0_f64, f64::max);
+        let deep_outer = (0..200)
+            .map(|i| (outer.pitch_factor(sweep * (0.15 * i as f64 / 200.0)) - 1.0).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(deep_inner > 0.05, "inner fire never burned: {deep_inner}");
+        assert!(deep_outer > 0.05, "outer fire never burned: {deep_outer}");
     }
 
     #[test]
@@ -3539,6 +3570,7 @@ mod tests {
             definition: 0.6,
             sheen: 0.8,
             placement: VariPitchPlacement::Even,
+            fire: 0.0,
         };
         let vari =
             build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
@@ -3576,7 +3608,8 @@ mod tests {
                     seed: 1,
                     definition: 0.0,
                     sheen: 0.5,
-                    placement: VariPitchPlacement::Even
+                    placement: VariPitchPlacement::Even,
+                    fire: 0.0,
                 }
                 .validate()
                 .is_err(),
@@ -3588,7 +3621,8 @@ mod tests {
             seed: 1,
             definition: 1.0,
             sheen: 1.0,
-            placement: VariPitchPlacement::Outer
+            placement: VariPitchPlacement::Outer,
+            fire: 0.0,
         }
         .validate()
         .is_ok());
@@ -3597,7 +3631,8 @@ mod tests {
             seed: 1,
             definition: 1.2,
             sheen: 0.5,
-            placement: VariPitchPlacement::Even
+            placement: VariPitchPlacement::Even,
+            fire: 0.0,
         }
         .validate()
         .is_err());
@@ -3606,7 +3641,8 @@ mod tests {
             seed: 1,
             definition: 0.5,
             sheen: 1.4,
-            placement: VariPitchPlacement::Even
+            placement: VariPitchPlacement::Even,
+            fire: 0.0,
         }
         .validate()
         .is_err());
