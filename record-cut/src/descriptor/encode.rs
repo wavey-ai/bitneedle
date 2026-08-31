@@ -264,9 +264,10 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
             sheen,
             placement,
             fire,
+            tuning,
         } => {
             descriptor.spiral_family.validate()?;
-            let mut payload = Vec::with_capacity(42);
+            let mut payload = Vec::with_capacity(90);
             payload.push(descriptor.spiral_family.wire_code());
             payload.extend_from_slice(&depth.to_bits().to_be_bytes());
             payload.extend_from_slice(&seed.to_be_bytes());
@@ -274,6 +275,16 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
             payload.extend_from_slice(&sheen.to_bits().to_be_bytes());
             payload.push(placement.wire_code());
             payload.extend_from_slice(&fire.to_bits().to_be_bytes());
+            for value in [
+                tuning.wave_one_cycles,
+                tuning.wave_two_cycles,
+                tuning.wave_balance,
+                tuning.dither_frequency,
+                tuning.aura_width,
+                tuning.fire_cycles,
+            ] {
+                payload.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
             payload
         }
     };
@@ -449,6 +460,7 @@ mod tests {
             sheen: 0.8,
             placement: record_core::VariPitchPlacement::Inner,
             fire: 0.0,
+            tuning: record_core::VariPitchTuning::default(),
         };
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).unwrap();
@@ -485,6 +497,7 @@ mod tests {
             sheen: 0.0,
             placement: record_core::VariPitchPlacement::Even,
             fire: 0.0,
+            tuning: record_core::VariPitchTuning::default(),
         };
         assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
     }

@@ -404,6 +404,60 @@ impl VariPitchPlacement {
     }
 }
 
+/// Every low-level constant of the vari-pitch model, as a field. The
+/// defaults are the values that were frozen constants; a record carries
+/// its tuning so the decoder retraces exactly what was cut.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VariPitchTuning {
+    /// Cycles of the short banding wave across the whole sweep.
+    pub wave_one_cycles: f64,
+    /// Cycles of the long swell wave across the whole sweep.
+    pub wave_two_cycles: f64,
+    /// The short wave's share of the mix, 0–1; the long wave takes the rest.
+    pub wave_balance: f64,
+    /// Angular frequency of the de-moiré dither, radians of dither cycle
+    /// per radian of sweep.
+    pub dither_frequency: f64,
+    /// Width of the fire's aura band as a fraction of the sweep, 0.05–0.9.
+    pub aura_width: f64,
+    /// Cycles of the fire's own wave across the whole sweep.
+    pub fire_cycles: f64,
+}
+
+impl Default for VariPitchTuning {
+    fn default() -> Self {
+        VariPitchTuning {
+            wave_one_cycles: 5.4,
+            wave_two_cycles: 2.2,
+            wave_balance: 0.62,
+            dither_frequency: 397.0,
+            aura_width: 0.3,
+            fire_cycles: 14.0,
+        }
+    }
+}
+
+impl Eq for VariPitchTuning {}
+
+impl VariPitchTuning {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value, low, high) in [
+            ("waveOneCycles", self.wave_one_cycles, 0.1, 60.0),
+            ("waveTwoCycles", self.wave_two_cycles, 0.1, 60.0),
+            ("waveBalance", self.wave_balance, 0.0, 1.0),
+            ("ditherFrequency", self.dither_frequency, 1.0, 10_000.0),
+            ("auraWidth", self.aura_width, 0.05, 0.9),
+            ("fireCycles", self.fire_cycles, 0.5, 120.0),
+        ] {
+            if !(value.is_finite() && (low..=high).contains(&value)) {
+                bail!("vari-pitch tuning {name} must be finite and within {low}..={high}");
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_vari_pitch_sheen() -> f64 {
     // Absent from the wire means the first v3 cuts: full-amplitude dither,
     // which is sheen zero.
@@ -444,6 +498,9 @@ pub enum SpiralFamily {
         /// exceed [`VARI_PITCH_MAX_DEPTH`]. Meaningless under `Even`.
         #[serde(default)]
         fire: f64,
+        /// The low-level model constants this record was cut with.
+        #[serde(default)]
+        tuning: VariPitchTuning,
     },
 }
 
@@ -489,6 +546,9 @@ impl SpiralFamily {
                 bail!("vari-pitch sheen must be finite and within 0..=1");
             }
         }
+        if let SpiralFamily::VariPitch { tuning, .. } = self {
+            tuning.validate()?;
+        }
         Ok(())
     }
 }
@@ -513,6 +573,8 @@ pub struct VariPitchParams {
     pub fire: f64,
     pub fire_period: f64,
     pub fire_phase: f64,
+    pub aura_width: f64,
+    pub dither_frequency: f64,
     pub sweep_theta: f64,
 }
 
@@ -561,6 +623,7 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         sheen,
         placement,
         fire,
+        tuning,
     } = *family
     else {
         return None;
@@ -570,11 +633,10 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
     let mut character = seed >> 32;
     let phase_1 = TAU * unit_from_draw(splitmix64(&mut character));
     let phase_2 = TAU * unit_from_draw(splitmix64(&mut character));
-    // Cycles across the whole cut, seeded in non-integer, mutually
-    // incommensurate ranges: the short wave 4.6–6.2 bands, the long
-    // 1.8–2.6.
-    let cycles_1 = 4.6 + 1.6 * unit_from_draw(splitmix64(&mut character));
-    let cycles_2 = 1.8 + 0.8 * unit_from_draw(splitmix64(&mut character));
+    // The tuned cycle counts, each bent ±8% by the seed so two records
+    // tuned alike still band apart.
+    let cycles_1 = tuning.wave_one_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
+    let cycles_2 = tuning.wave_two_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
 
     let mut micro = (seed & 0xFFFF_FFFF) | 0x5EED_0000_0000_0000;
     let period_1_jitter = 1.0 + 0.02 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
@@ -593,19 +655,19 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         period_2: TAU * period_2_turns,
         phase_1: phase_1 + phase_1_drift,
         phase_2: phase_2 + phase_2_drift,
-        weight_1: VARI_PITCH_WEIGHT_1,
-        weight_2: VARI_PITCH_WEIGHT_2,
+        weight_1: tuning.wave_balance,
+        weight_2: 1.0 - tuning.wave_balance,
         shape: VARI_PITCH_MAX_SHAPE * definition.clamp(0.0, 1.0),
         dither_phase: TAU * unit_from_draw(splitmix64(&mut character)),
         dither_amplitude: VARI_PITCH_DITHER_AMPLITUDE * (1.0 - sheen.clamp(0.0, 1.0)),
         placement,
         fire,
-        // The fire's own wave: fine enough that its aura window holds
-        // several bands — roughly fourteen cycles across a full sweep,
-        // floored to stay round within a turn.
-        fire_period: TAU * (total_turns / 14.0).max(2.3)
+        // The fire's own wave, floored to stay round within a turn.
+        fire_period: TAU * (total_turns / tuning.fire_cycles.max(0.5)).max(2.3)
             * (1.0 + 0.02 * (unit_from_draw(splitmix64(&mut character)) - 0.5) * 2.0),
         fire_phase: TAU * unit_from_draw(splitmix64(&mut character)),
+        aura_width: tuning.aura_width,
+        dither_frequency: tuning.dither_frequency,
         sweep_theta: sweep_theta.max(1e-9),
     })
 }
@@ -639,14 +701,15 @@ impl VariPitchParams {
         // rim for Outer. The trace runs outer to inner, so the sweep
         // fraction rises toward the label.
         let toward_label = (theta / self.sweep_theta).clamp(0.0, 1.0);
+        let width = self.aura_width.clamp(0.05, 0.9);
         let aura = match self.placement {
             VariPitchPlacement::Even => 0.0,
             VariPitchPlacement::Inner => {
-                let rise = ((toward_label - 0.55) / 0.3).clamp(0.0, 1.0);
+                let rise = ((toward_label - (1.0 - width * 1.5)) / width).clamp(0.0, 1.0);
                 rise * rise * (3.0 - 2.0 * rise)
             }
             VariPitchPlacement::Outer => {
-                let rise = ((0.45 - toward_label) / 0.3).clamp(0.0, 1.0);
+                let rise = (((width * 1.5) - toward_label) / width).clamp(0.0, 1.0);
                 rise * rise * (3.0 - 2.0 * rise)
             }
         };
@@ -663,7 +726,7 @@ impl VariPitchParams {
     /// The sub-pixel radial wobble at `theta`; added to the drawn radius,
     /// never to the pitch integral.
     pub fn dither(&self, theta: f64) -> f64 {
-        self.dither_amplitude * (VARI_PITCH_DITHER_FREQUENCY * theta + self.dither_phase).sin()
+        self.dither_amplitude * (self.dither_frequency * theta + self.dither_phase).sin()
     }
 }
 
@@ -3469,6 +3532,7 @@ mod tests {
             sheen: 0.8,
             placement: VariPitchPlacement::Even,
             fire: 0.0,
+            tuning: VariPitchTuning::default(),
         }
     }
 
@@ -3511,6 +3575,7 @@ mod tests {
                     placement,
                     // The fire pushes the bound: total swing depth + fire.
                     fire: 0.1,
+                    tuning: VariPitchTuning::default(),
                 };
                 let shaped = vari_pitch_params(&family, sweep).unwrap();
                 let mut theta = 0.0_f64;
@@ -3536,6 +3601,7 @@ mod tests {
                     sheen: 1.0,
                     placement,
                     fire,
+                    tuning: VariPitchTuning::default(),
                 },
                 sweep,
             )
@@ -3586,6 +3652,7 @@ mod tests {
             sheen: 0.8,
             placement: VariPitchPlacement::Even,
             fire: 0.0,
+            tuning: VariPitchTuning::default(),
         };
         let vari =
             build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
@@ -3625,6 +3692,7 @@ mod tests {
                     sheen: 0.5,
                     placement: VariPitchPlacement::Even,
                     fire: 0.0,
+                    tuning: VariPitchTuning::default(),
                 }
                 .validate()
                 .is_err(),
@@ -3638,6 +3706,7 @@ mod tests {
             sheen: 1.0,
             placement: VariPitchPlacement::Outer,
             fire: 0.0,
+            tuning: VariPitchTuning::default(),
         }
         .validate()
         .is_ok());
@@ -3648,6 +3717,7 @@ mod tests {
             sheen: 0.5,
             placement: VariPitchPlacement::Even,
             fire: 0.0,
+            tuning: VariPitchTuning::default(),
         }
         .validate()
         .is_err());
@@ -3658,6 +3728,7 @@ mod tests {
             sheen: 1.4,
             placement: VariPitchPlacement::Even,
             fire: 0.0,
+            tuning: VariPitchTuning::default(),
         }
         .validate()
         .is_err());

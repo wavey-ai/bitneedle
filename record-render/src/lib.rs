@@ -124,6 +124,13 @@ pub struct RenderOptions {
     /// of the base drift. `grooveCharacter + fireDepth` may not exceed
     /// 0.45. Ignored for Archimedean.
     pub fire_depth: Option<f64>,
+    /// Low-level model tuning; absent fields keep the house defaults.
+    pub wave_one_cycles: Option<f64>,
+    pub wave_two_cycles: Option<f64>,
+    pub wave_balance: Option<f64>,
+    pub dither_frequency: Option<f64>,
+    pub aura_width: Option<f64>,
+    pub fire_cycles: Option<f64>,
 }
 
 const DEFAULT_GROOVE_SHEEN: f64 = 0.8;
@@ -163,6 +170,7 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
                 Some("outer") => record_core::VariPitchPlacement::Outer,
                 Some(other) => bail!("unknown fire placement {other:?}"),
             };
+            let defaults = record_core::VariPitchTuning::default();
             SpiralFamily::VariPitch {
                 depth,
                 seed,
@@ -170,6 +178,20 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
                 sheen: render_options.groove_sheen.unwrap_or(DEFAULT_GROOVE_SHEEN),
                 placement,
                 fire: render_options.fire_depth.unwrap_or(0.0),
+                tuning: record_core::VariPitchTuning {
+                    wave_one_cycles: render_options
+                        .wave_one_cycles
+                        .unwrap_or(defaults.wave_one_cycles),
+                    wave_two_cycles: render_options
+                        .wave_two_cycles
+                        .unwrap_or(defaults.wave_two_cycles),
+                    wave_balance: render_options.wave_balance.unwrap_or(defaults.wave_balance),
+                    dither_frequency: render_options
+                        .dither_frequency
+                        .unwrap_or(defaults.dither_frequency),
+                    aura_width: render_options.aura_width.unwrap_or(defaults.aura_width),
+                    fire_cycles: render_options.fire_cycles.unwrap_or(defaults.fire_cycles),
+                },
             }
         }
         Some(other) => bail!("unknown spiral family {other:?}"),
@@ -2547,6 +2569,7 @@ mod tests {
                 sheen: 0.55,
                 placement: record_core::VariPitchPlacement::Inner,
                 fire: 0.0,
+                tuning: record_core::VariPitchTuning::default(),
             }
         );
     }
