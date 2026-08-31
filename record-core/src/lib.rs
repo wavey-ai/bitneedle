@@ -336,6 +336,7 @@ struct RecordGeometry {
 #[derive(Debug, Clone)]
 pub struct SpiralMask {
     pub b_value: f64,
+    pub spiral_family: SpiralFamily,
     pub record_profile: String,
     pub label_radius: i32,
     pub label_clearance: i32,
@@ -343,6 +344,154 @@ pub struct SpiralMask {
     pub kinds: Vec<u8>,
     pub addressable_pixel_count: usize,
     pub ordered_pixel_indices: Vec<usize>,
+}
+
+pub const SPIRAL_FAMILY_ARCHIMEDEAN_CODE: u8 = 0;
+pub const SPIRAL_FAMILY_VARI_PITCH_CODE: u8 = 1;
+
+/// The strongest vari-pitch modulation the format admits. Above this the
+/// tightest groove spacing falls below ~55% of the base pitch and adjacent
+/// turns start to shear visually.
+pub const VARI_PITCH_MAX_DEPTH: f64 = 0.45;
+
+/// The groove geometry family a record is cut with.
+///
+/// `Archimedean` is the strict constant-pitch cut every v2 record uses:
+/// `r = outer − b·θ`. `VariPitch` is the house v3 cut: the same base pitch
+/// `b`, modulated the way a cutting lathe's vari-pitch head breathes — slow
+/// bands of tighter and wider spacing drifting across the disc. The bands
+/// come from two superimposed modulation waves whose periods span several
+/// revolutions each, so every turn stays round; only the spacing between
+/// turns moves. The periods are drawn from deliberately non-integer,
+/// mutually incommensurate ranges so spacing extremes precess around the
+/// disc instead of lining up into radial moiré rays.
+///
+/// `depth` is the groove character: the modulation amplitude as a fraction
+/// of the base pitch (0 = strict Archimedean spacing, capped at
+/// [`VARI_PITCH_MAX_DEPTH`]). `seed` makes the cut unique: the high 32 bits
+/// choose the character of the banding (periods and phases), the low 32
+/// bits nudge it microscopically (±2% period, small phase drift) — so a
+/// pressing flow that keeps the high bits and re-rolls the low bits gives
+/// every pressing of the same cut its own, very slightly different, groove.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "camelCase")]
+pub enum SpiralFamily {
+    #[default]
+    Archimedean,
+    #[serde(rename_all = "camelCase")]
+    VariPitch { depth: f64, seed: u64 },
+}
+
+/// `depth` is validated finite at every encode and decode boundary, so the
+/// NaN hole in `f64: PartialEq` cannot be observed through this type.
+impl Eq for SpiralFamily {}
+
+impl SpiralFamily {
+    pub fn wire_code(&self) -> u8 {
+        match self {
+            SpiralFamily::Archimedean => SPIRAL_FAMILY_ARCHIMEDEAN_CODE,
+            SpiralFamily::VariPitch { .. } => SPIRAL_FAMILY_VARI_PITCH_CODE,
+        }
+    }
+
+    pub fn is_archimedean(&self) -> bool {
+        matches!(self, SpiralFamily::Archimedean)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let SpiralFamily::VariPitch { depth, .. } = self {
+            if !(depth.is_finite() && *depth > 0.0 && *depth <= VARI_PITCH_MAX_DEPTH) {
+                bail!(
+                    "vari-pitch depth must be finite, positive, and at most {VARI_PITCH_MAX_DEPTH}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The resolved modulation a vari-pitch seed derives to. Periods are in
+/// radians of sweep; phases in radians; weights sum to 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VariPitchParams {
+    pub depth: f64,
+    pub period_1: f64,
+    pub period_2: f64,
+    pub phase_1: f64,
+    pub phase_2: f64,
+    pub weight_1: f64,
+    pub weight_2: f64,
+}
+
+const VARI_PITCH_WEIGHT_1: f64 = 0.62;
+const VARI_PITCH_WEIGHT_2: f64 = 0.38;
+const TAU: f64 = 2.0 * PI;
+
+/// splitmix64: the derivation PRNG behind a vari-pitch seed. Frozen: this
+/// exact sequence is part of the v3 format — a decoder regenerates the cut
+/// from the seed alone, so the mapping can never change under family code
+/// [`SPIRAL_FAMILY_VARI_PITCH_CODE`].
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn unit_from_draw(draw: u64) -> f64 {
+    (draw >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Derives the exact modulation a seed stands for. Deterministic and
+/// frozen; see [`SpiralFamily::VariPitch`] for the high/low bit split.
+pub fn vari_pitch_params(depth: f64, seed: u64) -> VariPitchParams {
+    let mut character = seed >> 32;
+    let phase_1 = TAU * unit_from_draw(splitmix64(&mut character));
+    let phase_2 = TAU * unit_from_draw(splitmix64(&mut character));
+    // Non-integer turn-count bands, mutually incommensurate: the short wave
+    // lives between 4.7 and 6.1 revolutions, the long between 11.3 and 14.3.
+    let period_1_turns = 4.7 + 1.4 * unit_from_draw(splitmix64(&mut character));
+    let period_2_turns = 11.3 + 3.0 * unit_from_draw(splitmix64(&mut character));
+
+    let mut micro = (seed & 0xFFFF_FFFF) | 0x5EED_0000_0000_0000;
+    let period_1_jitter = 1.0 + 0.02 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
+    let period_2_jitter = 1.0 + 0.02 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
+    let phase_1_drift = 0.05 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
+    let phase_2_drift = 0.05 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
+
+    VariPitchParams {
+        depth,
+        period_1: TAU * period_1_turns * period_1_jitter,
+        period_2: TAU * period_2_turns * period_2_jitter,
+        phase_1: phase_1 + phase_1_drift,
+        phase_2: phase_2 + phase_2_drift,
+        weight_1: VARI_PITCH_WEIGHT_1,
+        weight_2: VARI_PITCH_WEIGHT_2,
+    }
+}
+
+impl VariPitchParams {
+    /// The effective sweep Θ(θ): radius is `outer − b·Θ(θ)`. Built so
+    /// Θ(0) = 0 (the cut starts exactly at the outer radius) and
+    /// dΘ/dθ = 1 + depth·(w₁ sin(θ/P₁+φ₁) + w₂ sin(θ/P₂+φ₂)) ≥ 1 − depth.
+    pub fn theta_effective(&self, theta: f64) -> f64 {
+        theta
+            + self.depth
+                * (self.weight_1
+                    * self.period_1
+                    * (self.phase_1.cos() - (theta / self.period_1 + self.phase_1).cos())
+                    + self.weight_2
+                        * self.period_2
+                        * (self.phase_2.cos() - (theta / self.period_2 + self.phase_2).cos()))
+    }
+
+    /// dΘ/dθ at `theta`: the local pitch is `b` times this.
+    pub fn pitch_factor(&self, theta: f64) -> f64 {
+        1.0 + self.depth
+            * (self.weight_1 * (theta / self.period_1 + self.phase_1).sin()
+                + self.weight_2 * (theta / self.period_2 + self.phase_2).sin())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,6 +792,42 @@ pub fn trace_record_spiral(
     trace_outer_radius: f64,
     trace_inner_radius: f64,
 ) -> Result<(Vec<u8>, Vec<usize>, f64, f64)> {
+    trace_record_spiral_with_family(
+        width,
+        height,
+        b_value,
+        &SpiralFamily::Archimedean,
+        pitch,
+        start_angle,
+        pixel_gap,
+        clockwise,
+        trace_outer_radius,
+        trace_inner_radius,
+    )
+}
+
+/// Traces the groove for any [`SpiralFamily`].
+///
+/// The Archimedean arm performs arithmetic identical to the historical
+/// trace — every v2 record's pixel order is preserved bit for bit. The
+/// vari-pitch arm cuts `r = outer − b·Θ(θ)` with Θ derived from the seed
+/// (see [`vari_pitch_params`]); its mean pitch is the same `b`, so
+/// capacity fitting against `b` carries over.
+#[allow(clippy::too_many_arguments)]
+pub fn trace_record_spiral_with_family(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    pitch: Option<f64>,
+    start_angle: f64,
+    pixel_gap: f64,
+    clockwise: bool,
+    trace_outer_radius: f64,
+    trace_inner_radius: f64,
+) -> Result<(Vec<u8>, Vec<usize>, f64, f64)> {
+    family.validate()?;
+
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let resolved_pitch = resolve_pitch(b_value, pitch)?;
@@ -653,6 +838,11 @@ pub fn trace_record_spiral(
     let mut theta = 0.0;
     let mut angle = start_angle;
     let mut radius = outer;
+
+    let vari = match family {
+        SpiralFamily::Archimedean => None,
+        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+    };
 
     while radius >= inner {
         let x = js_round(center_x + radius * angle.cos());
@@ -667,14 +857,21 @@ pub fn trace_record_spiral(
             }
         }
 
+        let local_pitch = match &vari {
+            None => resolved_pitch,
+            Some(params) => resolved_pitch * params.pitch_factor(theta),
+        };
         let step = pixel_gap
-            / (radius * radius + resolved_pitch * resolved_pitch)
+            / (radius * radius + local_pitch * local_pitch)
                 .sqrt()
                 .max(1e-6);
 
         theta += step;
         angle = start_angle + if clockwise { -theta } else { theta };
-        radius = outer - resolved_pitch * theta;
+        radius = match &vari {
+            None => outer - resolved_pitch * theta,
+            Some(params) => outer - resolved_pitch * params.theta_effective(theta),
+        };
     }
 
     Ok((occupied, ordered, center_x, center_y))
@@ -777,14 +974,38 @@ pub fn build_spiral_mask(
     label_clearance: Option<i32>,
     outer_radius: Option<i32>,
 ) -> Result<SpiralMask> {
+    build_spiral_mask_with_family(
+        width,
+        height,
+        b_value,
+        &SpiralFamily::Archimedean,
+        record_profile,
+        label_radius,
+        label_clearance,
+        outer_radius,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_spiral_mask_with_family(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    label_radius: Option<i32>,
+    label_clearance: Option<i32>,
+    outer_radius: Option<i32>,
+) -> Result<SpiralMask> {
     let g = resolve_record_geometry(record_profile, label_radius, label_clearance, outer_radius)?;
     let outer = payload_outer_radius(&g);
     let inner = payload_inner_radius(&g);
 
-    let (occupied, traced, cx, cy) = trace_record_spiral(
+    let (occupied, traced, cx, cy) = trace_record_spiral_with_family(
         width,
         height,
         b_value,
+        family,
         None,
         DEFAULT_START_ANGLE,
         1.0,
@@ -818,6 +1039,7 @@ pub fn build_spiral_mask(
 
     Ok(SpiralMask {
         b_value,
+        spiral_family: *family,
         record_profile: g.record_profile,
         label_radius: g.label_radius,
         label_clearance: g.label_clearance,
@@ -3054,5 +3276,98 @@ mod tests {
         // Compact JSON: no spaces between tokens.
         assert!(!text.contains(": "));
         validate_codec_metadata(&a).unwrap();
+    }
+
+    #[test]
+    fn vari_pitch_params_are_deterministic_and_bounded() {
+        let params = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF);
+        assert_eq!(params, vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF));
+
+        // The cut starts exactly at the outer radius…
+        assert_eq!(params.theta_effective(0.0), 0.0);
+
+        // …its periods sit inside the moiré-safe non-integer turn bands
+        // (±2% micro jitter included)…
+        let turns_1 = params.period_1 / (2.0 * PI);
+        let turns_2 = params.period_2 / (2.0 * PI);
+        assert!((4.5..6.3).contains(&turns_1), "period 1: {turns_1} turns");
+        assert!((11.0..14.7).contains(&turns_2), "period 2: {turns_2} turns");
+
+        // …and the local pitch never leaves b·[1 − depth, 1 + depth], so
+        // the groove always advances inward.
+        let mut theta = 0.0_f64;
+        while theta < 2_000.0 {
+            let factor = params.pitch_factor(theta);
+            assert!(
+                (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
+                "pitch factor {factor} at theta {theta}"
+            );
+            theta += 0.01;
+        }
+    }
+
+    #[test]
+    fn vari_pitch_micro_bits_only_nudge_the_cut() {
+        let base = vari_pitch_params(0.3, 0xAAAA_BBBB_0000_0000);
+        let nudged = vari_pitch_params(0.3, 0xAAAA_BBBB_FFFF_FFFF);
+
+        // Same high bits: the character holds — periods within the ±2%
+        // micro jitter of each other, phases within the small drift.
+        assert!((base.period_1 / nudged.period_1 - 1.0).abs() < 0.05);
+        assert!((base.period_2 / nudged.period_2 - 1.0).abs() < 0.05);
+        assert!((base.phase_1 - nudged.phase_1).abs() < 0.15);
+        assert!((base.phase_2 - nudged.phase_2).abs() < 0.15);
+
+        // But the cut is not identical: every pressing is its own record.
+        assert_ne!(base, nudged);
+    }
+
+    #[test]
+    fn vari_pitch_mask_differs_from_archimedean_but_matches_itself() {
+        let family = SpiralFamily::VariPitch {
+            depth: 0.3,
+            seed: 42,
+        };
+        let vari =
+            build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
+                .unwrap();
+        let vari_again =
+            build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
+                .unwrap();
+        let archimedean = build_spiral_mask(576, 576, 0.6, "single45", None, None, None).unwrap();
+
+        assert_eq!(
+            vari.ordered_pixel_indices, vari_again.ordered_pixel_indices,
+            "the same seed must retrace the identical groove"
+        );
+        assert_ne!(
+            vari.ordered_pixel_indices, archimedean.ordered_pixel_indices,
+            "vari-pitch must actually change the cut"
+        );
+
+        // Mean pitch is the same b, so capacity stays comparable: within a
+        // few percent of the Archimedean mask at the same b.
+        let ratio =
+            vari.addressable_pixel_count as f64 / archimedean.addressable_pixel_count as f64;
+        assert!(
+            (0.9..1.1).contains(&ratio),
+            "vari-pitch capacity drifted: {ratio}"
+        );
+    }
+
+    #[test]
+    fn vari_pitch_rejects_nan_and_out_of_range_depth() {
+        for depth in [f64::NAN, 0.0, -0.1, 0.46] {
+            assert!(
+                SpiralFamily::VariPitch { depth, seed: 1 }.validate().is_err(),
+                "depth {depth} must be refused"
+            );
+        }
+        assert!(SpiralFamily::VariPitch {
+            depth: 0.45,
+            seed: 1
+        }
+        .validate()
+        .is_ok());
     }
 }

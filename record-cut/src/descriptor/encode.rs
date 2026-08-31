@@ -7,11 +7,13 @@
 
 use anyhow::{bail, Context, Result};
 
+use record_core::SpiralFamily;
 use record_descriptor::{
     compute_descriptor_crc32, encode_cache_encryption_descriptor, encode_toned_carrier_map,
     payload_encoding_code, record_profile_code, release_id_to_bytes, CacheEncryptionDescriptor,
     SignedReleaseReference, ToneSpanDescriptor, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1,
     RECORD_DESCRIPTOR_MAGIC, RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION,
+    RECORD_DESCRIPTOR_VERSION_V3,
     encode_isrc_segment, normalize_upc, TrackIsrc,
     SEGMENT_ADDITIONAL_SIGNATURES, SEGMENT_CHAIN_ANCHOR,
     SEGMENT_DEFERRED_ATTESTATION, SEGMENT_ISRC, SEGMENT_UPC,
@@ -19,8 +21,8 @@ use record_descriptor::{
     SEGMENT_CANONICAL_URL, SEGMENT_CATALOG_NUMBER, SEGMENT_COPYRIGHT_HOLDER,
     SEGMENT_COPYRIGHT_YEAR, SEGMENT_CREATED_AT, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_LABEL,
     SEGMENT_PAYLOAD_ENCODING, SEGMENT_RECORD_PROFILE, SEGMENT_RELEASE_ID,
-    SEGMENT_SIGNED_RELEASE_REFERENCE, SEGMENT_STREAM_BYTE_LENGTH, SEGMENT_TITLE,
-    SEGMENT_TONED_CARRIER_MAP,
+    SEGMENT_SIGNED_RELEASE_REFERENCE, SEGMENT_SPIRAL_GEOMETRY, SEGMENT_STREAM_BYTE_LENGTH,
+    SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP,
 };
 
 pub const RECORD_DESCRIPTOR_TEXT_LIMIT: usize = 96;
@@ -53,6 +55,11 @@ pub struct RecordDescriptorInput {
     /// Signatures beyond the first: a pressing may be attested by the
     /// artist, by yl.vin, or by both.
     pub additional_signatures: Vec<SignedReleaseReference>,
+    /// The groove geometry family. Archimedean writes a v2 descriptor,
+    /// byte-identical to every record before spiral families existed;
+    /// vari-pitch writes the house v3 descriptor with a spiral-geometry
+    /// segment.
+    pub spiral_family: SpiralFamily,
 }
 
 pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Result<Vec<u8>> {
@@ -111,9 +118,15 @@ pub fn encode_record_descriptor_stream(
         bail!("record descriptor payload is too large");
     }
 
+    let version = if descriptor.spiral_family.is_archimedean() {
+        RECORD_DESCRIPTOR_VERSION
+    } else {
+        RECORD_DESCRIPTOR_VERSION_V3
+    };
+
     let mut full = Vec::with_capacity(payload_len);
     full.extend_from_slice(RECORD_DESCRIPTOR_MAGIC);
-    full.push(RECORD_DESCRIPTOR_VERSION);
+    full.push(version);
     full.extend_from_slice(&(payload_len as u16).to_be_bytes());
     full.extend_from_slice(&segment_count.to_be_bytes());
     full.extend_from_slice(&(body.len() as u16).to_be_bytes());
@@ -242,6 +255,18 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         .transpose()?
         .unwrap_or_default();
 
+    let spiral_geometry = match descriptor.spiral_family {
+        SpiralFamily::Archimedean => Vec::new(),
+        SpiralFamily::VariPitch { depth, seed } => {
+            descriptor.spiral_family.validate()?;
+            let mut payload = Vec::with_capacity(17);
+            payload.push(descriptor.spiral_family.wire_code());
+            payload.extend_from_slice(&depth.to_bits().to_be_bytes());
+            payload.extend_from_slice(&seed.to_be_bytes());
+            payload
+        }
+    };
+
     let toned_carrier_map = match payload_encoding_text {
         PAYLOAD_ENCODING_RGB => {
             if !descriptor.tone_spans.is_empty() {
@@ -288,6 +313,7 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_UPC, upc),
         (SEGMENT_DEFERRED_ATTESTATION, deferred_attestation),
         (SEGMENT_ADDITIONAL_SIGNATURES, additional_signatures),
+        (SEGMENT_SPIRAL_GEOMETRY, spiral_geometry),
     ] {
         if payload.is_empty() {
             continue;
@@ -399,6 +425,48 @@ mod tests {
             ordering: ToneOrdering::ChromaProximity,
         });
 
+        assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
+    }
+
+    #[test]
+    fn vari_pitch_descriptor_round_trips_as_v3() {
+        let mut input = base_input();
+        input.spiral_family = SpiralFamily::VariPitch {
+            depth: 0.28,
+            seed: 0xDEC0_DE00_5EED_0001,
+        };
+
+        let bytes = encode_record_descriptor_stream(1.0, &input, 4096).unwrap();
+        assert_eq!(bytes[4], RECORD_DESCRIPTOR_VERSION_V3);
+
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).unwrap();
+        assert_eq!(decoded.version, RECORD_DESCRIPTOR_VERSION_V3);
+        assert_eq!(decoded.spiral_family, input.spiral_family);
+    }
+
+    #[test]
+    fn archimedean_descriptor_stays_v2_with_no_spiral_segment() {
+        let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).unwrap();
+        assert_eq!(bytes[4], RECORD_DESCRIPTOR_VERSION);
+        assert!(
+            !bytes.contains(&SEGMENT_SPIRAL_GEOMETRY)
+                || record_descriptor::decode_record_descriptor_bytes(&bytes)
+                    .unwrap()
+                    .spiral_family
+                    == SpiralFamily::Archimedean,
+            "archimedean descriptors must not grow a spiral geometry segment"
+        );
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).unwrap();
+        assert_eq!(decoded.spiral_family, SpiralFamily::Archimedean);
+    }
+
+    #[test]
+    fn vari_pitch_depth_out_of_range_is_refused() {
+        let mut input = base_input();
+        input.spiral_family = SpiralFamily::VariPitch {
+            depth: 0.6,
+            seed: 1,
+        };
         assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
     }
 

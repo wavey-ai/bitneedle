@@ -13,12 +13,19 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use record_core::{SpiralFamily, SPIRAL_FAMILY_VARI_PITCH_CODE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
 
 pub const RECORD_DESCRIPTOR_MAGIC: &[u8; 4] = b"BRD1";
 pub const RECORD_DESCRIPTOR_VERSION: u8 = 2;
+/// The private "house" descriptor version: identical to v2 except it may
+/// carry a [`SEGMENT_SPIRAL_GEOMETRY`] segment declaring the groove's
+/// [`SpiralFamily`]. A v3 record without that segment is strict Archimedean.
+/// Not pushed publicly; v2 remains the wire version every Archimedean record
+/// is written with.
+pub const RECORD_DESCRIPTOR_VERSION_V3: u8 = 3;
 pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 19;
 
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
@@ -91,6 +98,11 @@ pub const SEGMENT_UPC: u8 = 28;
 /// [`SEGMENT_SIGNED_RELEASE_REFERENCE`], over
 /// [`deferred_identity_bytes`].
 pub const SEGMENT_DEFERRED_ATTESTATION: u8 = 29;
+
+/// v3 only: the groove geometry family. Payload is
+/// `family_code (u8) || depth_bits (u64be) || seed (u64be)` — 17 bytes for
+/// vari-pitch. Archimedean records never write this segment.
+pub const SEGMENT_SPIRAL_GEOMETRY: u8 = 30;
 
 /// Signatures beyond the first, so a release can be attested by more than
 /// one party.
@@ -452,6 +464,7 @@ fn cache_encryption_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<
         None => push_u32(&mut out, 0),
     }
     push_len_prefixed_string(&mut out, 15, descriptor.copyright_holder.as_deref());
+    push_spiral_family_identity(&mut out, 16, &descriptor.spiral_family);
     Ok(out)
 }
 
@@ -754,7 +767,22 @@ pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result
         }
         None => push_u32(&mut out, 0),
     }
+    push_spiral_family_identity(&mut out, 16, &descriptor.spiral_family);
     Ok(out)
+}
+
+/// Appends the groove geometry family to an identity preimage — but only for
+/// a non-Archimedean cut. An Archimedean descriptor appends nothing, so every
+/// v2 identity (and the signature or cache key derived from it) is
+/// byte-identical to what it was before spiral families existed.
+fn push_spiral_family_identity(out: &mut Vec<u8>, tag: u8, family: &SpiralFamily) {
+    if let SpiralFamily::VariPitch { depth, seed } = family {
+        out.push(tag);
+        push_u32(out, 17);
+        push_u8(out, family.wire_code());
+        push_u64(out, depth.to_bits());
+        push_u64(out, *seed);
+    }
 }
 
 /// SHA-256 of [`signed_descriptor_identity_bytes`], for the release
@@ -1126,6 +1154,11 @@ pub struct RecordDescriptor {
     pub version: u8,
     pub checksum_protected: bool,
     pub b_value_bits: u64,
+    /// The groove geometry family. Always [`SpiralFamily::Archimedean`] for
+    /// v2 records; v3 records may carry vari-pitch. Defaults keep every
+    /// existing serialized form valid.
+    #[serde(default)]
+    pub spiral_family: SpiralFamily,
     pub record_profile: String,
     pub stream_byte_length: usize,
     pub payload_encoding: String,
@@ -1565,7 +1598,8 @@ pub fn decode_signed_release_reference(bytes: &[u8]) -> Result<SignedReleaseRefe
 pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> {
     let prefix = decode_descriptor_prefix(bytes)?;
 
-    if prefix.version != RECORD_DESCRIPTOR_VERSION {
+    if prefix.version != RECORD_DESCRIPTOR_VERSION && prefix.version != RECORD_DESCRIPTOR_VERSION_V3
+    {
         bail!("record descriptor version mismatch");
     }
     if prefix.payload_len != RECORD_DESCRIPTOR_PREFIX_LENGTH + prefix.segment_stream_len {
@@ -1600,6 +1634,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut isrcs = None;
     let mut upc = None;
     let mut deferred_attestation = None;
+    let mut spiral_family = None;
 
     while offset < body.len() {
         if parsed_segments >= prefix.segment_count {
@@ -1784,6 +1819,25 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 decode_signed_release_reference(payload)?,
                 "deferred attestation",
             )?,
+            SEGMENT_SPIRAL_GEOMETRY => {
+                if prefix.version != RECORD_DESCRIPTOR_VERSION_V3 {
+                    bail!("spiral geometry segment requires descriptor version 3");
+                }
+                if payload.len() != 17 {
+                    bail!("spiral geometry segment has invalid length");
+                }
+                if payload[0] != SPIRAL_FAMILY_VARI_PITCH_CODE {
+                    bail!("unsupported spiral family code {}", payload[0]);
+                }
+                let depth =
+                    f64::from_bits(u64::from_be_bytes(payload[1..9].try_into().expect(
+                        "slice length",
+                    )));
+                let seed = u64::from_be_bytes(payload[9..17].try_into().expect("slice length"));
+                let family = SpiralFamily::VariPitch { depth, seed };
+                family.validate()?;
+                assign_once(&mut spiral_family, family, "spiral geometry")?;
+            }
             // A segment type this build does not know is skipped, not
             // refused.
             //
@@ -1847,6 +1901,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         version: prefix.version,
         checksum_protected: true,
         b_value_bits: prefix.b_value_bits,
+        spiral_family: spiral_family.unwrap_or_default(),
         record_profile,
         stream_byte_length,
         payload_encoding,
@@ -2074,6 +2129,7 @@ mod tests {
             version: RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
+            spiral_family: SpiralFamily::Archimedean,
             record_profile: RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,
             payload_encoding: PAYLOAD_ENCODING_RGB.to_string(),

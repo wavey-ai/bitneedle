@@ -1135,10 +1135,12 @@ fn apply_text_avoid_spec(
 ) {
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sidecar_carrier_region_pairs(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
     regions: SidecarCarrierRegions,
     seed: u32,
@@ -1146,10 +1148,11 @@ fn build_sidecar_carrier_region_pairs(
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
     let mask = if regions.payload_intergroove || regions.lead_in_deadwax {
-        Some(record_core::build_spiral_mask(
+        Some(record_core::build_spiral_mask_with_family(
             width,
             height,
             b_value,
+            spiral_family,
             &geometry.record_profile,
             None,
             None,
@@ -1214,10 +1217,12 @@ fn build_sidecar_carrier_region_pairs(
     Ok(pairs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sidecar_carrier_pairs(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
     carriers: &[record_sidecar::SidecarCarrier],
     seed: u32,
@@ -1227,6 +1232,7 @@ fn build_sidecar_carrier_pairs(
         width,
         height,
         b_value,
+        spiral_family,
         record_profile,
         SidecarCarrierRegions {
             label: carriers.contains(&record_sidecar::SidecarCarrier::Label),
@@ -1392,6 +1398,7 @@ fn decode_record_png_sidecar_with_context(
         context.width,
         context.height,
         context.descriptor.b_value(),
+        &context.descriptor.spiral_family,
         &context.record_profile,
         &carriers,
         seed,

@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use bytes2rgb::rgba_to_bytes as track_rgba_to_bytes;
 use bytes2rgb::{decode_toned_spans, ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig};
 use record_core::{
-    build_header_spiral_indices, build_spiral_mask, build_trailer_spiral_indices,
-    known_record_profile_names, normalize_record_profile_name, RECORD_STREAM_MAGIC,
+    build_header_spiral_indices, build_spiral_mask_with_family, build_trailer_spiral_indices,
+    known_record_profile_names, normalize_record_profile_name, SpiralFamily, RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{
     resolve_tone_spans, RecordDescriptor, ToneOrdering as DescriptorToneOrdering,
@@ -134,6 +134,7 @@ fn decode_record_groove_to_track_data(
     height: usize,
     record_profile: &str,
     b_value: f64,
+    spiral_family: &SpiralFamily,
 ) -> Result<(Vec<u8>, usize)> {
     let expected_rgba_len = width
         .checked_mul(height)
@@ -144,7 +145,16 @@ fn decode_record_groove_to_track_data(
         bail!("record RGBA length does not match width * height * 4");
     }
 
-    let mask = build_spiral_mask(width, height, b_value, record_profile, None, None, None)?;
+    let mask = build_spiral_mask_with_family(
+        width,
+        height,
+        b_value,
+        spiral_family,
+        record_profile,
+        None,
+        None,
+        None,
+    )?;
     let mut track_data = Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
 
     for &pixel_index in &mask.ordered_pixel_indices {
@@ -253,6 +263,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
         height,
         &normalized_profile,
         descriptor.b_value(),
+        &descriptor.spiral_family,
     )?;
 
     let bytes = match descriptor.payload_encoding.as_str() {

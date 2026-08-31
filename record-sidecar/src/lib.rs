@@ -2269,6 +2269,7 @@ fn sidecar_descriptor_geometry(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
 ) -> Result<serde_json::Value> {
     let geometry = record_core::describe_record_profile(record_profile)?;
@@ -2281,6 +2282,7 @@ fn sidecar_descriptor_geometry(
             "y": height as f64 / 2.0,
         },
         "bValue": b_value,
+        "spiralFamily": spiral_family,
         "label": {
             "innerRadius": sidecar_label_inner_radius(&geometry),
             "outerRadius": sidecar_label_outer_radius(&geometry),
@@ -2409,6 +2411,7 @@ fn build_sidecar_carrier_region_pairs(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
     regions: SidecarCarrierRegions,
     seed: u32,
@@ -2416,10 +2419,11 @@ fn build_sidecar_carrier_region_pairs(
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
     let mask = if regions.payload_intergroove || regions.lead_in_deadwax {
-        Some(record_core::build_spiral_mask(
+        Some(record_core::build_spiral_mask_with_family(
             width,
             height,
             b_value,
+            spiral_family,
             &geometry.record_profile,
             None,
             None,
@@ -2484,10 +2488,12 @@ fn build_sidecar_carrier_region_pairs(
     Ok(pairs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sidecar_carrier_pairs(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
     carriers: &[SidecarCarrier],
     seed: u32,
@@ -2497,6 +2503,7 @@ fn build_sidecar_carrier_pairs(
         width,
         height,
         b_value,
+        spiral_family,
         record_profile,
         SidecarCarrierRegions {
             label: carriers.contains(&SidecarCarrier::Label),
@@ -2508,10 +2515,12 @@ fn build_sidecar_carrier_pairs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sidecar_capacity_entry_json(
     width: usize,
     height: usize,
     b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
     rgba: &[u8],
     scheme: &str,
@@ -2522,6 +2531,7 @@ fn sidecar_capacity_entry_json(
         width,
         height,
         b_value,
+        spiral_family,
         record_profile,
         &carriers,
         SIDECAR_DEFAULT_SEED,
@@ -2564,6 +2574,7 @@ fn decode_record_png_sidecar_with_context(
         context.width,
         context.height,
         context.descriptor.b_value(),
+        &context.descriptor.spiral_family,
         &context.record_profile,
         &carriers,
         seed,
@@ -2680,6 +2691,7 @@ fn descriptor_input_with_rewrite_options(
         isrcs: Vec::new(),
         upc: None,
         deferred_attestation: None,
+        spiral_family: descriptor.spiral_family,
 })
 }
 
@@ -2727,6 +2739,7 @@ fn descriptor_input_with_cache_encryption_option(
         upc: descriptor.upc.clone(),
         deferred_attestation: descriptor.deferred_attestation.clone(),
         additional_signatures: descriptor.additional_signatures.clone(),
+        spiral_family: descriptor.spiral_family,
     }
 }
 
@@ -2777,6 +2790,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
         )?,
         "carrierOrdering": {
@@ -2811,6 +2825,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2821,6 +2836,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2831,6 +2847,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2841,6 +2858,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2851,6 +2869,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2861,6 +2880,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.width,
             context.height,
             context.descriptor.b_value(),
+            &context.descriptor.spiral_family,
             &context.record_profile,
             &context.rgba,
             scheme,
@@ -2915,10 +2935,11 @@ pub fn restore_patternized_record_png(
         return Ok(None);
     };
     let reverse_map = decode_base64_text(&item.data_base64, "Patternize reverse map")?;
-    let mask = record_core::build_spiral_mask(
+    let mask = record_core::build_spiral_mask_with_family(
         context.width,
         context.height,
         context.descriptor.b_value(),
+        &context.descriptor.spiral_family,
         &context.record_profile,
         None,
         None,
@@ -2967,6 +2988,7 @@ pub fn rewrite_record_png(
         context.width,
         context.height,
         context.descriptor.b_value(),
+        &context.descriptor.spiral_family,
         &context.record_profile,
         SidecarCarrierRegions {
             label: sidecar.carriers.contains(&SidecarCarrier::Label),
@@ -3688,6 +3710,7 @@ mod attestation_tests {
             version: record_descriptor::RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
+            spiral_family: record_core::SpiralFamily::Archimedean,
             record_profile: record_descriptor::RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,
             payload_encoding: record_descriptor::PAYLOAD_ENCODING_RGB.to_string(),

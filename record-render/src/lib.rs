@@ -14,7 +14,10 @@ use record_groove::{
     square_side_for_pixel_count, ToneOrdering as CarrierToneOrdering, ToneSpan, TonedConfig,
     TonedPalette, TonedRender,
 };
-use record_core::{describe_record_profile, normalize_record_profile_name, RecordProfileGeometry};
+use record_core::{
+    describe_record_profile, normalize_record_profile_name, vari_pitch_params,
+    RecordProfileGeometry, SpiralFamily, VariPitchParams,
+};
 pub mod metadata_groove;
 
 use record_descriptor::{
@@ -93,6 +96,56 @@ pub struct RenderOptions {
     /// count. Final/published renders must not set this.
     #[serde(default)]
     pub fast_fit: bool,
+    /// Groove geometry family: `"archimedean"` (the default) or
+    /// `"variPitch"`. Vari-pitch is the house v3 cut — the lathe's
+    /// vari-pitch head, spacing breathing in slow bands across the disc.
+    pub spiral_family: Option<String>,
+    /// Vari-pitch groove character: modulation depth as a fraction of the
+    /// base pitch, `0 < depth <= 0.45`. Defaults to `0.28` when the family
+    /// is vari-pitch. Ignored for Archimedean.
+    pub groove_character: Option<f64>,
+    /// Vari-pitch seed. Required when `spiralFamily` is `"variPitch"`: the
+    /// caller mints and persists it (the renderer never invents
+    /// randomness), and the descriptor carries it so a decoder retraces the
+    /// identical groove.
+    pub spiral_seed: Option<u64>,
+}
+
+const DEFAULT_GROOVE_CHARACTER: f64 = 0.28;
+
+fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily> {
+    let family = match render_options.spiral_family.as_deref() {
+        None | Some("archimedean") => {
+            if render_options.spiral_seed.is_some() {
+                bail!("spiralSeed is only meaningful for the variPitch spiral family");
+            }
+            if render_options.groove_character.is_some() {
+                bail!("grooveCharacter is only meaningful for the variPitch spiral family");
+            }
+            SpiralFamily::Archimedean
+        }
+        Some("variPitch") | Some("vari-pitch") => {
+            let seed = render_options
+                .spiral_seed
+                .context("variPitch requires spiralSeed — mint one and persist it with the cut")?;
+            let depth = render_options
+                .groove_character
+                .unwrap_or(DEFAULT_GROOVE_CHARACTER);
+            SpiralFamily::VariPitch { depth, seed }
+        }
+        Some(other) => bail!("unknown spiral family {other:?}"),
+    };
+    family.validate()?;
+    Ok(family)
+}
+
+/// The tightest local pitch a family cuts, as a fraction of the base pitch
+/// — the factor the perceptible-turn-gap validation must judge against.
+fn min_pitch_factor(family: &SpiralFamily) -> f64 {
+    match family {
+        SpiralFamily::Archimedean => 1.0,
+        SpiralFamily::VariPitch { depth, .. } => 1.0 - depth,
+    }
 }
 
 pub const DEFAULT_GAP_TONE_LIGHTNESS: f64 = 0.35;
@@ -416,7 +469,13 @@ pub fn render_empty_groove_record_to_png(
         &normalized_profile,
         EMPTY_GROOVE_VISIBLE_TURNS,
     )?;
-    let spiral_mask = build_spiral_mask(RECORD_WIDTH, RECORD_HEIGHT, b_value, &normalized_profile)?;
+    let spiral_mask = build_spiral_mask(
+        RECORD_WIDTH,
+        RECORD_HEIGHT,
+        b_value,
+        &SpiralFamily::Archimedean,
+        &normalized_profile,
+    )?;
     let mut rgba = vec![0_u8; RECORD_WIDTH * RECORD_HEIGHT * 4];
 
     for pixel_index in spiral_mask.ordered_pixel_indices {
@@ -651,6 +710,7 @@ fn trace_record_spiral(
     width: usize,
     height: usize,
     b_value: f64,
+    family: &SpiralFamily,
     pitch: Option<f64>,
     start_angle: f64,
     pixel_gap: f64,
@@ -658,6 +718,8 @@ fn trace_record_spiral(
     trace_outer_radius: f64,
     trace_inner_radius: f64,
 ) -> Result<(Vec<u8>, Vec<usize>, f64, f64)> {
+    family.validate()?;
+
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let record_radius = width.min(height) as f64 / 2.0;
@@ -666,6 +728,11 @@ fn trace_record_spiral(
     let bounded_inner_radius = trace_inner_radius.max(0.0);
     let mut occupied = vec![0_u8; width * height];
     let mut ordered_pixel_indices = Vec::new();
+
+    let vari: Option<VariPitchParams> = match family {
+        SpiralFamily::Archimedean => None,
+        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+    };
 
     let mut swept_theta = 0.0_f64;
     let mut angle = start_angle;
@@ -684,14 +751,23 @@ fn trace_record_spiral(
             }
         }
 
+        let local_pitch = match &vari {
+            None => resolved_pitch,
+            Some(params) => resolved_pitch * params.pitch_factor(swept_theta),
+        };
         let theta_step = pixel_gap
-            / (radius * radius + resolved_pitch * resolved_pitch)
+            / (radius * radius + local_pitch * local_pitch)
                 .sqrt()
                 .max(1e-6);
 
         swept_theta += theta_step;
         angle = start_angle + if clockwise { -swept_theta } else { swept_theta };
-        radius = bounded_outer_radius - resolved_pitch * swept_theta;
+        radius = match &vari {
+            None => bounded_outer_radius - resolved_pitch * swept_theta,
+            Some(params) => {
+                bounded_outer_radius - resolved_pitch * params.theta_effective(swept_theta)
+            }
+        };
     }
 
     Ok((occupied, ordered_pixel_indices, center_x, center_y))
@@ -708,6 +784,10 @@ fn build_band_spiral_indices(
         width,
         height,
         band_pitch,
+        // Deadwax bands are always Archimedean: the descriptor rides here,
+        // and a decoder must be able to read it before it knows the
+        // payload's family.
+        &SpiralFamily::Archimedean,
         None,
         DEFAULT_START_ANGLE,
         1.0,
@@ -773,6 +853,7 @@ fn build_spiral_mask(
     width: usize,
     height: usize,
     b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
 ) -> Result<SpiralMask> {
     let geometry = describe_record_profile(record_profile)?;
@@ -782,6 +863,7 @@ fn build_spiral_mask(
         width,
         height,
         b_value,
+        family,
         None,
         DEFAULT_START_ANGLE,
         1.0,
@@ -832,6 +914,7 @@ fn count_spiral_mask_pixels(
     width: usize,
     height: usize,
     b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
 ) -> Result<usize> {
     let geometry = describe_record_profile(record_profile)?;
@@ -842,6 +925,10 @@ fn count_spiral_mask_pixels(
     let record_radius = width.min(height) as f64 / 2.0;
     let resolved_pitch = resolve_pitch(b_value, None)?;
     let bounded_outer_radius = (payload_outer as f64).min(record_radius - 1.0);
+    let vari: Option<VariPitchParams> = match family {
+        SpiralFamily::Archimedean => None,
+        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+    };
     let mut occupied = vec![0_u8; width * height];
     let mut addressable_pixel_count = 0usize;
     let mut swept_theta = 0.0_f64;
@@ -865,13 +952,22 @@ fn count_spiral_mask_pixels(
             }
         }
 
+        let local_pitch = match &vari {
+            None => resolved_pitch,
+            Some(params) => resolved_pitch * params.pitch_factor(swept_theta),
+        };
         let theta_step = 1.0
-            / (radius * radius + resolved_pitch * resolved_pitch)
+            / (radius * radius + local_pitch * local_pitch)
                 .sqrt()
                 .max(1e-6);
         swept_theta += theta_step;
         angle = DEFAULT_START_ANGLE - swept_theta;
-        radius = bounded_outer_radius - resolved_pitch * swept_theta;
+        radius = match &vari {
+            None => bounded_outer_radius - resolved_pitch * swept_theta,
+            Some(params) => {
+                bounded_outer_radius - resolved_pitch * params.theta_effective(swept_theta)
+            }
+        };
     }
 
     Ok(addressable_pixel_count)
@@ -934,11 +1030,12 @@ fn evaluate_spiral_fit(
     width: usize,
     height: usize,
     track_pixel_count: usize,
+    family: &SpiralFamily,
     record_profile: &str,
     b_value: f64,
 ) -> Result<FitCandidate> {
     let addressable_pixel_count =
-        count_spiral_mask_pixels(width, height, b_value, record_profile)?;
+        count_spiral_mask_pixels(width, height, b_value, family, record_profile)?;
 
     Ok(FitCandidate {
         b_value,
@@ -947,10 +1044,12 @@ fn evaluate_spiral_fit(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_optimal_b(
     width: usize,
     height: usize,
     track_pixel_count: usize,
+    family: &SpiralFamily,
     record_profile: &str,
     initial_b: Option<f64>,
     growth_factor: f64,
@@ -959,7 +1058,7 @@ fn find_optimal_b(
 ) -> Result<FitCandidate> {
     let start_b = initial_b.unwrap_or(find_b_for_partial_arc(track_pixel_count, record_profile)?);
     let addressable_capacity = count_addressable_capacity(width, height, record_profile)?;
-    let start = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, start_b)?;
+    let start = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,start_b)?;
     let mut best = start.clone();
 
     let mut update_best = |candidate: &FitCandidate| {
@@ -989,8 +1088,8 @@ fn find_optimal_b(
     for _ in 0..max_expansions {
         low_b = (low_b / growth_factor).max(MIN_B_VALUE);
         high_b *= growth_factor;
-        low = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, low_b)?;
-        high = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, high_b)?;
+        low = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,low_b)?;
+        high = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,high_b)?;
         update_best(&low);
         update_best(&high);
 
@@ -1025,7 +1124,7 @@ fn find_optimal_b(
 
     for _ in 0..max_binary_iterations {
         let mid_b = (left_b + right_b) / 2.0;
-        let mid = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, mid_b)?;
+        let mid = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,mid_b)?;
         update_best(&mid);
 
         if mid.pixels_remaining == 0 {
@@ -1049,10 +1148,12 @@ fn find_optimal_b(
     Ok(best)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_exact_fit_b(
     width: usize,
     height: usize,
     track_pixel_count: usize,
+    family: &SpiralFamily,
     record_profile: &str,
     initial_b: Option<f64>,
     growth_factor: f64,
@@ -1065,6 +1166,7 @@ fn find_exact_fit_b(
             width,
             height,
             track_pixel_count,
+            family,
             record_profile,
             None,
             growth_factor,
@@ -1074,7 +1176,7 @@ fn find_exact_fit_b(
         .b_value,
     );
 
-    let mut best = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, seed_b)?;
+    let mut best = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,seed_b)?;
     let mut low_b = seed_b;
     let mut high_b = seed_b;
     let mut low = best.clone();
@@ -1104,8 +1206,8 @@ fn find_exact_fit_b(
     for _ in 0..max_expansions {
         low_b = (low_b / growth_factor).max(MIN_B_VALUE);
         high_b *= growth_factor;
-        low = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, low_b)?;
-        high = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, high_b)?;
+        low = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,low_b)?;
+        high = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,high_b)?;
         update_best(&low);
         update_best(&high);
 
@@ -1147,7 +1249,7 @@ fn find_exact_fit_b(
 
     for _ in 0..max_binary_iterations {
         let mid_b = (left_b + right_b) / 2.0;
-        let mid = evaluate_spiral_fit(width, height, track_pixel_count, record_profile, mid_b)?;
+        let mid = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,mid_b)?;
         update_best(&mid);
 
         if mid.pixels_remaining == 0 {
@@ -1175,7 +1277,7 @@ fn find_exact_fit_b(
         for i in 0..=final_sweep_steps {
             let b_value = left_b + sweep_step * i as f64;
             let rendered =
-                evaluate_spiral_fit(width, height, track_pixel_count, record_profile, b_value)?;
+                evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,b_value)?;
             update_best(&rendered);
 
             if rendered.pixels_remaining == 0 {
@@ -1199,6 +1301,7 @@ fn find_exact_fit_with_coverage(
     width: usize,
     height: usize,
     track_pixel_count: usize,
+    family: &SpiralFamily,
     record_profile: &str,
     initial_b: Option<f64>,
 ) -> Result<FitResult> {
@@ -1206,6 +1309,7 @@ fn find_exact_fit_with_coverage(
         width,
         height,
         track_pixel_count,
+        family,
         record_profile,
         initial_b,
         1.08,
@@ -1327,10 +1431,15 @@ fn paint_record_guides(
     Ok(())
 }
 
+/// "Scanline" names how the source track buffer is consumed — linearly, as
+/// the square RGB block reads out. The write side is groove order: pixels
+/// land by walking `spiral_mask.ordered_pixel_indices`, the traced spiral.
+#[allow(clippy::too_many_arguments)]
 fn render_track_scanline_onto_transparent_spiral(
     width: usize,
     height: usize,
     b_value: f64,
+    family: &SpiralFamily,
     track_data: &[u8],
     track_pixel_count: usize,
     record_profile: &str,
@@ -1338,7 +1447,7 @@ fn render_track_scanline_onto_transparent_spiral(
     guide_outlines: bool,
     dummy_spiral_regions: &[DummySpiralPixelRegion],
 ) -> Result<TransparentRender> {
-    let spiral_mask = build_spiral_mask(width, height, b_value, record_profile)?;
+    let spiral_mask = build_spiral_mask(width, height, b_value, family, record_profile)?;
     let mut data = vec![0_u8; width * height * 4];
 
     if guide_outlines {
@@ -1489,6 +1598,7 @@ fn validate_spiral_renderable(
     track_pixel_count: usize,
     duration_seconds: f64,
     rendered: &TransparentRender,
+    min_pitch_factor: f64,
     min_perceptible_turn_gap: f64,
 ) -> Result<ValidationPayload> {
     let capacity = estimate_spiral_track_capacity(width, height, &rendered.record_profile)?;
@@ -1497,7 +1607,9 @@ fn validate_spiral_renderable(
         .saturating_sub(capacity.max_track_pixel_count_absolute)
         .max(rendered.overflow_track_pixels)
         .max(rendered.pixels_remaining.max(0) as usize);
-    let turn_gap_pixels = 2.0 * PI * rendered.b_value;
+    // Judged at the tightest point of the cut: for vari-pitch the local
+    // pitch dips to (1 − depth) of the base, and that is where turns crowd.
+    let turn_gap_pixels = 2.0 * PI * rendered.b_value * min_pitch_factor;
     let fill_ratio = if capacity.annulus_pixel_count > 0 {
         track_pixel_count as f64 / capacity.annulus_pixel_count as f64
     } else {
@@ -1708,12 +1820,14 @@ fn render_payload_codes_to_transparent_spiral(
         };
 
     let use_exact_fit = !render_options.fast_fit;
+    let spiral_family = resolve_spiral_family(render_options)?;
 
     let fit = if use_exact_fit {
         find_exact_fit_with_coverage(
             RECORD_WIDTH,
             RECORD_HEIGHT,
             resolved_fit_track_pixel_count,
+            &spiral_family,
             &normalized_profile,
             None,
         )?
@@ -1722,6 +1836,7 @@ fn render_payload_codes_to_transparent_spiral(
             RECORD_WIDTH,
             RECORD_HEIGHT,
             resolved_fit_track_pixel_count,
+            &spiral_family,
             &normalized_profile,
             None,
             1.35,
@@ -1764,12 +1879,14 @@ fn render_payload_codes_to_transparent_spiral(
         isrcs: Vec::new(),
         upc: None,
         deferred_attestation: None,
+        spiral_family,
 };
 
     let rendered = render_track_scanline_onto_transparent_spiral(
         RECORD_WIDTH,
         RECORD_HEIGHT,
         fit.b_value,
+        &spiral_family,
         &track.track_data,
         resolved_fit_track_pixel_count,
         &normalized_profile,
@@ -1787,6 +1904,7 @@ fn render_payload_codes_to_transparent_spiral(
         resolved_fit_track_pixel_count,
         duration_seconds,
         &rendered,
+        min_pitch_factor(&spiral_family),
         min_perceptible_turn_gap,
     )?;
 
@@ -2063,9 +2181,22 @@ mod tests {
         for profile in ["single45", "lp"] {
             for b_value in [0.5, 1.0, 2.5, 5.0] {
                 let materialized =
-                    build_spiral_mask(RECORD_WIDTH, RECORD_HEIGHT, b_value, profile).unwrap();
+                    build_spiral_mask(
+                        RECORD_WIDTH,
+                        RECORD_HEIGHT,
+                        b_value,
+                        &SpiralFamily::Archimedean,
+                        profile,
+                    )
+                    .unwrap();
                 let counted =
-                    count_spiral_mask_pixels(RECORD_WIDTH, RECORD_HEIGHT, b_value, profile)
+                    count_spiral_mask_pixels(
+                        RECORD_WIDTH,
+                        RECORD_HEIGHT,
+                        b_value,
+                        &SpiralFamily::Archimedean,
+                        profile,
+                    )
                         .unwrap();
                 assert_eq!(
                     counted, materialized.addressable_pixel_count,
@@ -2308,6 +2439,107 @@ mod tests {
             &payload_bytes
                 [resolved[1].byte_offset..resolved[1].byte_offset + resolved[1].byte_length],
             payload_two.as_slice()
+        );
+    }
+
+    #[test]
+    fn vari_pitch_groove_renders_and_decodes_byte_exact() {
+        let payload = vec![0xC3u8; 6_000];
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
+            tracks: vec![TrackInput {
+                title: "Vari".to_string(),
+                first_revolution_index: None,
+                revolution_count: None,
+            }],
+            track_gaps: vec![],
+        };
+        let entries = vec![PayloadEntryInput {
+            payload_descriptor_index: 0,
+            bytes: payload,
+        }];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+
+        let options = r#"{
+            "spiralFamily": "variPitch",
+            "grooveCharacter": 0.3,
+            "spiralSeed": 81985529216486895
+        }"#;
+        // render_payload_codes_to_png runs the mandatory render-time
+        // self-check (decode back to exact BRS1 bytes), so a successful
+        // render is already a round-trip proof; the assertions below
+        // re-prove it from the outside and pin the v3 descriptor.
+        let output =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(options)).unwrap();
+
+        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+            &output.png_bytes,
+            "single45",
+            Some(stream.len()),
+        )
+        .unwrap();
+        assert_eq!(decoded.bytes, stream, "vari-pitch groove did not round-trip");
+
+        assert_eq!(output.descriptor.version, 3);
+        assert_eq!(
+            output.descriptor.spiral_family,
+            SpiralFamily::VariPitch {
+                depth: 0.3,
+                seed: 81985529216486895
+            }
+        );
+    }
+
+    #[test]
+    fn vari_pitch_without_seed_is_refused() {
+        let error = resolve_spiral_family(&RenderOptions {
+            spiral_family: Some("variPitch".to_string()),
+            ..RenderOptions::default()
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("spiralSeed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn archimedean_render_ignores_family_plumbing() {
+        let payload = vec![0x5Au8; 3_000];
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
+            tracks: vec![TrackInput {
+                title: "Straight".to_string(),
+                first_revolution_index: None,
+                revolution_count: None,
+            }],
+            track_gaps: vec![],
+        };
+        let entries = vec![PayloadEntryInput {
+            payload_descriptor_index: 0,
+            bytes: payload,
+        }];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+
+        let implicit =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, None).unwrap();
+        let explicit = render_payload_codes_to_png(
+            &stream,
+            "rgb",
+            "single45",
+            208.5,
+            Some(r#"{"spiralFamily": "archimedean"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            implicit.png_bytes, explicit.png_bytes,
+            "an explicit archimedean family must not change the render"
+        );
+        assert_eq!(implicit.descriptor.version, 2);
+        assert_eq!(
+            implicit.descriptor.spiral_family,
+            SpiralFamily::Archimedean
         );
     }
 

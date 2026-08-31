@@ -303,10 +303,11 @@ fn patternize_record_png_explore(
     let (width, height) = image.dimensions();
     let (width, height) = (width as usize, height as usize);
     let mut rgba = image.into_raw();
-    let mask = record_core::build_spiral_mask(
+    let mask = record_core::build_spiral_mask_with_family(
         width,
         height,
         descriptor.b_value(),
+        &descriptor.spiral_family,
         &profile,
         None,
         None,
