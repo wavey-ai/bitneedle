@@ -511,6 +511,8 @@ pub struct VariPitchParams {
     pub dither_amplitude: f64,
     pub placement: VariPitchPlacement,
     pub fire: f64,
+    pub fire_period: f64,
+    pub fire_phase: f64,
     pub sweep_theta: f64,
 }
 
@@ -598,6 +600,12 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         dither_amplitude: VARI_PITCH_DITHER_AMPLITUDE * (1.0 - sheen.clamp(0.0, 1.0)),
         placement,
         fire,
+        // The fire's own wave: fine enough that its aura window holds
+        // several bands — roughly fourteen cycles across a full sweep,
+        // floored to stay round within a turn.
+        fire_period: TAU * (total_turns / 14.0).max(2.3)
+            * (1.0 + 0.02 * (unit_from_draw(splitmix64(&mut character)) - 0.5) * 2.0),
+        fire_phase: TAU * unit_from_draw(splitmix64(&mut character)),
         sweep_theta: sweep_theta.max(1e-9),
     })
 }
@@ -634,15 +642,22 @@ impl VariPitchParams {
         let aura = match self.placement {
             VariPitchPlacement::Even => 0.0,
             VariPitchPlacement::Inner => {
-                let rise = ((toward_label - 0.7) / 0.3).clamp(0.0, 1.0);
+                let rise = ((toward_label - 0.55) / 0.3).clamp(0.0, 1.0);
                 rise * rise * (3.0 - 2.0 * rise)
             }
             VariPitchPlacement::Outer => {
-                let rise = ((0.3 - toward_label) / 0.3).clamp(0.0, 1.0);
+                let rise = ((0.45 - toward_label) / 0.3).clamp(0.0, 1.0);
                 rise * rise * (3.0 - 2.0 * rise)
             }
         };
-        1.0 + (self.depth + self.fire * aura) * wave
+        // The fire carries its own, finer wave: the disc-wide bands are
+        // too long to put more than a lick inside the aura, and a fire of
+        // one lick reads as nothing. Shaped through the same definition.
+        let mut fire_wave = (theta / self.fire_period + self.fire_phase).sin();
+        if self.shape > 1e-9 {
+            fire_wave = (self.shape * fire_wave).tanh() / self.shape.tanh();
+        }
+        1.0 + self.depth * wave + self.fire * aura * fire_wave
     }
 
     /// The sub-pixel radial wobble at `theta`; added to the drawn radius,
