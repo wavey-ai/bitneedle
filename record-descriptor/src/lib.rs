@@ -776,12 +776,18 @@ pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result
 /// v2 identity (and the signature or cache key derived from it) is
 /// byte-identical to what it was before spiral families existed.
 fn push_spiral_family_identity(out: &mut Vec<u8>, tag: u8, family: &SpiralFamily) {
-    if let SpiralFamily::VariPitch { depth, seed } = family {
+    if let SpiralFamily::VariPitch {
+        depth,
+        seed,
+        definition,
+    } = family
+    {
         out.push(tag);
-        push_u32(out, 17);
+        push_u32(out, 25);
         push_u8(out, family.wire_code());
         push_u64(out, depth.to_bits());
         push_u64(out, *seed);
+        push_u64(out, definition.to_bits());
     }
 }
 
@@ -1823,7 +1829,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 if prefix.version != RECORD_DESCRIPTOR_VERSION_V3 {
                     bail!("spiral geometry segment requires descriptor version 3");
                 }
-                if payload.len() != 17 {
+                // 17 bytes is the first v3 shape (no definition field);
+                // 25 carries the groove definition after the seed.
+                if payload.len() != 17 && payload.len() != 25 {
                     bail!("spiral geometry segment has invalid length");
                 }
                 if payload[0] != SPIRAL_FAMILY_VARI_PITCH_CODE {
@@ -1834,7 +1842,18 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                         "slice length",
                     )));
                 let seed = u64::from_be_bytes(payload[9..17].try_into().expect("slice length"));
-                let family = SpiralFamily::VariPitch { depth, seed };
+                let definition = if payload.len() == 25 {
+                    f64::from_bits(u64::from_be_bytes(
+                        payload[17..25].try_into().expect("slice length"),
+                    ))
+                } else {
+                    0.0
+                };
+                let family = SpiralFamily::VariPitch {
+                    depth,
+                    seed,
+                    definition,
+                };
                 family.validate()?;
                 assign_once(&mut spiral_family, family, "spiral geometry")?;
             }

@@ -109,6 +109,10 @@ pub struct RenderOptions {
     /// randomness), and the descriptor carries it so a decoder retraces the
     /// identical groove.
     pub spiral_seed: Option<u64>,
+    /// Vari-pitch groove definition, 0–1: how squared-up the spacing
+    /// modulation is. Zero glides; toward one the turns cluster into tight
+    /// groups separated by wide land. Ignored for Archimedean.
+    pub groove_definition: Option<f64>,
 }
 
 const DEFAULT_GROOVE_CHARACTER: f64 = 0.28;
@@ -122,6 +126,9 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
             if render_options.groove_character.is_some() {
                 bail!("grooveCharacter is only meaningful for the variPitch spiral family");
             }
+            if render_options.groove_definition.is_some() {
+                bail!("grooveDefinition is only meaningful for the variPitch spiral family");
+            }
             SpiralFamily::Archimedean
         }
         Some("variPitch") | Some("vari-pitch") => {
@@ -131,7 +138,11 @@ fn resolve_spiral_family(render_options: &RenderOptions) -> Result<SpiralFamily>
             let depth = render_options
                 .groove_character
                 .unwrap_or(DEFAULT_GROOVE_CHARACTER);
-            SpiralFamily::VariPitch { depth, seed }
+            SpiralFamily::VariPitch {
+                depth,
+                seed,
+                definition: render_options.groove_definition.unwrap_or(0.0),
+            }
         }
         Some(other) => bail!("unknown spiral family {other:?}"),
     };
@@ -731,16 +742,30 @@ fn trace_record_spiral(
 
     let vari: Option<VariPitchParams> = match family {
         SpiralFamily::Archimedean => None,
-        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+        SpiralFamily::VariPitch {
+            depth,
+            seed,
+            definition,
+        } => Some(vari_pitch_params(
+            *depth,
+            *seed,
+            *definition,
+            ((bounded_outer_radius - bounded_inner_radius) / resolved_pitch).max(0.0),
+        )),
     };
 
     let mut swept_theta = 0.0_f64;
+    let mut theta_effective = 0.0_f64;
     let mut angle = start_angle;
     let mut radius = bounded_outer_radius;
 
     while radius >= bounded_inner_radius {
-        let x = js_round(center_x + radius * angle.cos());
-        let y = js_round(center_y - radius * angle.sin());
+        let draw_radius = match &vari {
+            None => radius,
+            Some(params) => radius + params.dither(swept_theta),
+        };
+        let x = js_round(center_x + draw_radius * angle.cos());
+        let y = js_round(center_y - draw_radius * angle.sin());
 
         if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
             let pixel_index = y as usize * width + x as usize;
@@ -751,9 +776,12 @@ fn trace_record_spiral(
             }
         }
 
-        let local_pitch = match &vari {
-            None => resolved_pitch,
-            Some(params) => resolved_pitch * params.pitch_factor(swept_theta),
+        let (local_pitch, factor) = match &vari {
+            None => (resolved_pitch, 1.0),
+            Some(params) => {
+                let factor = params.pitch_factor(swept_theta);
+                (resolved_pitch * factor, factor)
+            }
         };
         let theta_step = pixel_gap
             / (radius * radius + local_pitch * local_pitch)
@@ -761,12 +789,11 @@ fn trace_record_spiral(
                 .max(1e-6);
 
         swept_theta += theta_step;
+        theta_effective += factor * theta_step;
         angle = start_angle + if clockwise { -swept_theta } else { swept_theta };
         radius = match &vari {
             None => bounded_outer_radius - resolved_pitch * swept_theta,
-            Some(params) => {
-                bounded_outer_radius - resolved_pitch * params.theta_effective(swept_theta)
-            }
+            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
         };
     }
 
@@ -927,17 +954,34 @@ fn count_spiral_mask_pixels(
     let bounded_outer_radius = (payload_outer as f64).min(record_radius - 1.0);
     let vari: Option<VariPitchParams> = match family {
         SpiralFamily::Archimedean => None,
-        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+        // The mask trace runs to the centre, so the sweep the banding is
+        // scaled to is the bounded outer span — identical to the figure the
+        // core trace derives for the same bounds.
+        SpiralFamily::VariPitch {
+            depth,
+            seed,
+            definition,
+        } => Some(vari_pitch_params(
+            *depth,
+            *seed,
+            *definition,
+            (bounded_outer_radius / resolved_pitch).max(0.0),
+        )),
     };
     let mut occupied = vec![0_u8; width * height];
     let mut addressable_pixel_count = 0usize;
     let mut swept_theta = 0.0_f64;
+    let mut theta_effective = 0.0_f64;
     let mut angle = DEFAULT_START_ANGLE;
     let mut radius = bounded_outer_radius;
 
     while radius >= 0.0 {
-        let x = js_round(center_x + radius * angle.cos());
-        let y = js_round(center_y - radius * angle.sin());
+        let draw_radius = match &vari {
+            None => radius,
+            Some(params) => radius + params.dither(swept_theta),
+        };
+        let x = js_round(center_x + draw_radius * angle.cos());
+        let y = js_round(center_y - draw_radius * angle.sin());
 
         if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
             let pixel_index = y as usize * width + x as usize;
@@ -952,21 +996,23 @@ fn count_spiral_mask_pixels(
             }
         }
 
-        let local_pitch = match &vari {
-            None => resolved_pitch,
-            Some(params) => resolved_pitch * params.pitch_factor(swept_theta),
+        let (local_pitch, factor) = match &vari {
+            None => (resolved_pitch, 1.0),
+            Some(params) => {
+                let factor = params.pitch_factor(swept_theta);
+                (resolved_pitch * factor, factor)
+            }
         };
         let theta_step = 1.0
             / (radius * radius + local_pitch * local_pitch)
                 .sqrt()
                 .max(1e-6);
         swept_theta += theta_step;
+        theta_effective += factor * theta_step;
         angle = DEFAULT_START_ANGLE - swept_theta;
         radius = match &vari {
             None => bounded_outer_radius - resolved_pitch * swept_theta,
-            Some(params) => {
-                bounded_outer_radius - resolved_pitch * params.theta_effective(swept_theta)
-            }
+            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
         };
     }
 
@@ -2463,6 +2509,7 @@ mod tests {
         let options = r#"{
             "spiralFamily": "variPitch",
             "grooveCharacter": 0.3,
+            "grooveDefinition": 0.7,
             "spiralSeed": 81985529216486895
         }"#;
         // render_payload_codes_to_png runs the mandatory render-time
@@ -2485,7 +2532,8 @@ mod tests {
             output.descriptor.spiral_family,
             SpiralFamily::VariPitch {
                 depth: 0.3,
-                seed: 81985529216486895
+                seed: 81985529216486895,
+                definition: 0.7
             }
         );
     }

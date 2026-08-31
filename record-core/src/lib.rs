@@ -379,7 +379,17 @@ pub enum SpiralFamily {
     #[default]
     Archimedean,
     #[serde(rename_all = "camelCase")]
-    VariPitch { depth: f64, seed: u64 },
+    VariPitch {
+        depth: f64,
+        seed: u64,
+        /// How defined the groove bands are, 0–1. Zero leaves the spacing
+        /// gliding sinusoidally; toward one the modulation is waveshaped to
+        /// spend its time at the extremes, so turns cluster into tight
+        /// groups separated by wide land — the look of a cut groove rather
+        /// than a smooth swell.
+        #[serde(default)]
+        definition: f64,
+    },
 }
 
 /// `depth` is validated finite at every encode and decode boundary, so the
@@ -399,11 +409,17 @@ impl SpiralFamily {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if let SpiralFamily::VariPitch { depth, .. } = self {
+        if let SpiralFamily::VariPitch {
+            depth, definition, ..
+        } = self
+        {
             if !(depth.is_finite() && *depth > 0.0 && *depth <= VARI_PITCH_MAX_DEPTH) {
                 bail!(
                     "vari-pitch depth must be finite, positive, and at most {VARI_PITCH_MAX_DEPTH}"
                 );
+            }
+            if !(definition.is_finite() && (0.0..=1.0).contains(definition)) {
+                bail!("vari-pitch definition must be finite and within 0..=1");
             }
         }
         Ok(())
@@ -411,7 +427,9 @@ impl SpiralFamily {
 }
 
 /// The resolved modulation a vari-pitch seed derives to. Periods are in
-/// radians of sweep; phases in radians; weights sum to 1.
+/// radians of sweep; phases in radians; weights sum to 1. `shape` is the
+/// waveshaping gain: 0 leaves the combined wave sinusoidal; larger squares
+/// it up so pitch dwells at the extremes — tight turn groups, wide land.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VariPitchParams {
     pub depth: f64,
@@ -421,6 +439,8 @@ pub struct VariPitchParams {
     pub phase_2: f64,
     pub weight_1: f64,
     pub weight_2: f64,
+    pub shape: f64,
+    pub dither_phase: f64,
 }
 
 const VARI_PITCH_WEIGHT_1: f64 = 0.62;
@@ -443,16 +463,39 @@ fn unit_from_draw(draw: u64) -> f64 {
     (draw >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Derives the exact modulation a seed stands for. Deterministic and
-/// frozen; see [`SpiralFamily::VariPitch`] for the high/low bit split.
-pub fn vari_pitch_params(depth: f64, seed: u64) -> VariPitchParams {
+/// Derives the exact modulation a seed stands for, scaled to the sweep of
+/// the cut it will modulate. Deterministic and frozen; see
+/// [`SpiralFamily::VariPitch`] for the high/low bit split.
+///
+/// `sweep_theta` is the total angle the groove will sweep (radians): the
+/// radial span of the trace divided by the base pitch. The banding is cut
+/// in proportion to it — the short wave completes roughly five to six
+/// cycles across the whole disc and the long wave roughly two, whatever
+/// the record's turn count. A fourteen-turn dubplate and a
+/// three-hundred-turn side band alike, where fixed periods gave the short
+/// cut a single halo. Both waves keep a floor of a few revolutions so the
+/// modulation never advances far within one turn — spacing bands between
+/// turns, never wobble along them — and the floors differ so the two waves
+/// stay incommensurate when both are floored.
+/// The strongest waveshaping gain a definition of 1.0 maps to.
+const VARI_PITCH_MAX_SHAPE: f64 = 3.5;
+
+pub fn vari_pitch_params(
+    depth: f64,
+    seed: u64,
+    definition: f64,
+    sweep_theta: f64,
+) -> VariPitchParams {
+    let total_turns = (sweep_theta / TAU).max(1.0);
+
     let mut character = seed >> 32;
     let phase_1 = TAU * unit_from_draw(splitmix64(&mut character));
     let phase_2 = TAU * unit_from_draw(splitmix64(&mut character));
-    // Non-integer turn-count bands, mutually incommensurate: the short wave
-    // lives between 4.7 and 6.1 revolutions, the long between 11.3 and 14.3.
-    let period_1_turns = 4.7 + 1.4 * unit_from_draw(splitmix64(&mut character));
-    let period_2_turns = 11.3 + 3.0 * unit_from_draw(splitmix64(&mut character));
+    // Cycles across the whole cut, seeded in non-integer, mutually
+    // incommensurate ranges: the short wave 4.6–6.2 bands, the long
+    // 1.8–2.6.
+    let cycles_1 = 4.6 + 1.6 * unit_from_draw(splitmix64(&mut character));
+    let cycles_2 = 1.8 + 0.8 * unit_from_draw(splitmix64(&mut character));
 
     let mut micro = (seed & 0xFFFF_FFFF) | 0x5EED_0000_0000_0000;
     let period_1_jitter = 1.0 + 0.02 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
@@ -460,37 +503,55 @@ pub fn vari_pitch_params(depth: f64, seed: u64) -> VariPitchParams {
     let phase_1_drift = 0.05 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
     let phase_2_drift = 0.05 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
 
+    // The roundness floors are applied after the micro jitter, so a short
+    // cut's periods never dip below them.
+    let period_1_turns = (total_turns / cycles_1 * period_1_jitter).max(2.3);
+    let period_2_turns = (total_turns / cycles_2 * period_2_jitter).max(3.7);
+
     VariPitchParams {
         depth,
-        period_1: TAU * period_1_turns * period_1_jitter,
-        period_2: TAU * period_2_turns * period_2_jitter,
+        period_1: TAU * period_1_turns,
+        period_2: TAU * period_2_turns,
         phase_1: phase_1 + phase_1_drift,
         phase_2: phase_2 + phase_2_drift,
         weight_1: VARI_PITCH_WEIGHT_1,
         weight_2: VARI_PITCH_WEIGHT_2,
+        shape: VARI_PITCH_MAX_SHAPE * definition.clamp(0.0, 1.0),
+        dither_phase: TAU * unit_from_draw(splitmix64(&mut character)),
     }
 }
 
+/// Sub-pixel radial dither: amplitude in pixels and angular frequency in
+/// radians of dither cycle per radian of sweep. A near-Nyquist spiral
+/// quantized to the grid throws eight-fold moiré fans; a third of a pixel
+/// of fast, seeded wobble breaks the rounding coherence into fine grain
+/// without moving the groove far enough to read as displacement. Frozen:
+/// the decoder re-derives the same wobble from the same seed.
+const VARI_PITCH_DITHER_AMPLITUDE: f64 = 0.34;
+const VARI_PITCH_DITHER_FREQUENCY: f64 = 397.0;
+
 impl VariPitchParams {
-    /// The effective sweep Θ(θ): radius is `outer − b·Θ(θ)`. Built so
-    /// Θ(0) = 0 (the cut starts exactly at the outer radius) and
-    /// dΘ/dθ = 1 + depth·(w₁ sin(θ/P₁+φ₁) + w₂ sin(θ/P₂+φ₂)) ≥ 1 − depth.
-    pub fn theta_effective(&self, theta: f64) -> f64 {
-        theta
-            + self.depth
-                * (self.weight_1
-                    * self.period_1
-                    * (self.phase_1.cos() - (theta / self.period_1 + self.phase_1).cos())
-                    + self.weight_2
-                        * self.period_2
-                        * (self.phase_2.cos() - (theta / self.period_2 + self.phase_2).cos()))
+    /// The local pitch multiplier at `theta`, in `[1 − depth, 1 + depth]`.
+    ///
+    /// The combined wave is waveshaped through a normalized tanh when
+    /// `shape` is on: the swing stays inside ±1, but the wave dwells at
+    /// its extremes, cutting defined tight-and-wide groove bands instead
+    /// of a smooth swell. Shaped waves have no closed-form integral, so
+    /// the trace integrates this factor step by step.
+    pub fn pitch_factor(&self, theta: f64) -> f64 {
+        let mut wave = self.weight_1 * (theta / self.period_1 + self.phase_1).sin()
+            + self.weight_2 * (theta / self.period_2 + self.phase_2).sin();
+        if self.shape > 1e-9 {
+            wave = (self.shape * wave).tanh() / self.shape.tanh();
+        }
+        1.0 + self.depth * wave
     }
 
-    /// dΘ/dθ at `theta`: the local pitch is `b` times this.
-    pub fn pitch_factor(&self, theta: f64) -> f64 {
-        1.0 + self.depth
-            * (self.weight_1 * (theta / self.period_1 + self.phase_1).sin()
-                + self.weight_2 * (theta / self.period_2 + self.phase_2).sin())
+    /// The sub-pixel radial wobble at `theta`; added to the drawn radius,
+    /// never to the pitch integral.
+    pub fn dither(&self, theta: f64) -> f64 {
+        VARI_PITCH_DITHER_AMPLITUDE
+            * (VARI_PITCH_DITHER_FREQUENCY * theta + self.dither_phase).sin()
     }
 }
 
@@ -841,12 +902,30 @@ pub fn trace_record_spiral_with_family(
 
     let vari = match family {
         SpiralFamily::Archimedean => None,
-        SpiralFamily::VariPitch { depth, seed } => Some(vari_pitch_params(*depth, *seed)),
+        SpiralFamily::VariPitch {
+            depth,
+            seed,
+            definition,
+        } => Some(vari_pitch_params(
+            *depth,
+            *seed,
+            *definition,
+            ((outer - inner) / resolved_pitch).max(0.0),
+        )),
     };
 
+    // The vari-pitch radius is the running integral of the local pitch —
+    // shaped waves have no closed form — accumulated with the same steps
+    // on encode and decode, so the two integrate identically.
+    let mut theta_effective = 0.0_f64;
+
     while radius >= inner {
-        let x = js_round(center_x + radius * angle.cos());
-        let y = js_round(center_y - radius * angle.sin());
+        let draw_radius = match &vari {
+            None => radius,
+            Some(params) => radius + params.dither(theta),
+        };
+        let x = js_round(center_x + draw_radius * angle.cos());
+        let y = js_round(center_y - draw_radius * angle.sin());
 
         if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
             let i = y as usize * width + x as usize;
@@ -857,9 +936,12 @@ pub fn trace_record_spiral_with_family(
             }
         }
 
-        let local_pitch = match &vari {
-            None => resolved_pitch,
-            Some(params) => resolved_pitch * params.pitch_factor(theta),
+        let (local_pitch, factor) = match &vari {
+            None => (resolved_pitch, 1.0),
+            Some(params) => {
+                let factor = params.pitch_factor(theta);
+                (resolved_pitch * factor, factor)
+            }
         };
         let step = pixel_gap
             / (radius * radius + local_pitch * local_pitch)
@@ -867,10 +949,11 @@ pub fn trace_record_spiral_with_family(
                 .max(1e-6);
 
         theta += step;
+        theta_effective += factor * step;
         angle = start_angle + if clockwise { -theta } else { theta };
         radius = match &vari {
             None => outer - resolved_pitch * theta,
-            Some(params) => outer - resolved_pitch * params.theta_effective(theta),
+            Some(_) => outer - resolved_pitch * theta_effective,
         };
     }
 
@@ -3280,36 +3363,46 @@ mod tests {
 
     #[test]
     fn vari_pitch_params_are_deterministic_and_bounded() {
-        let params = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF);
-        assert_eq!(params, vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF));
+        let sweep = 2.0 * PI * 147.0; // a Westside-sized cut
+        let params = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, 0.7, sweep);
+        assert_eq!(
+            params,
+            vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, 0.7, sweep)
+        );
 
-        // The cut starts exactly at the outer radius…
-        assert_eq!(params.theta_effective(0.0), 0.0);
+        // The banding scales to the cut: the short wave runs 4.6–6.2
+        // cycles across the sweep, the long 1.8–2.6 (±2% micro jitter).
+        let cycles_1 = sweep / params.period_1;
+        let cycles_2 = sweep / params.period_2;
+        assert!((4.4..6.4).contains(&cycles_1), "short wave: {cycles_1} cycles");
+        assert!((1.7..2.7).contains(&cycles_2), "long wave: {cycles_2} cycles");
 
-        // …its periods sit inside the moiré-safe non-integer turn bands
-        // (±2% micro jitter included)…
-        let turns_1 = params.period_1 / (2.0 * PI);
-        let turns_2 = params.period_2 / (2.0 * PI);
-        assert!((4.5..6.3).contains(&turns_1), "period 1: {turns_1} turns");
-        assert!((11.0..14.7).contains(&turns_2), "period 2: {turns_2} turns");
+        // A short dubplate keeps the roundness floors instead.
+        let short = vari_pitch_params(0.3, 1, 0.0, 2.0 * PI * 8.0);
+        assert!(short.period_1 / (2.0 * PI) >= 2.3 - 1e-9);
+        assert!(short.period_2 / (2.0 * PI) >= 3.7 - 1e-9);
 
-        // …and the local pitch never leaves b·[1 − depth, 1 + depth], so
-        // the groove always advances inward.
-        let mut theta = 0.0_f64;
-        while theta < 2_000.0 {
-            let factor = params.pitch_factor(theta);
-            assert!(
-                (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
-                "pitch factor {factor} at theta {theta}"
-            );
-            theta += 0.01;
+        // The local pitch never leaves b·[1 − depth, 1 + depth] — shaped
+        // or not — so the groove always advances inward.
+        for definition in [0.0, 0.5, 1.0] {
+            let shaped = vari_pitch_params(0.3, 0x0123_4567_89AB_CDEF, definition, sweep);
+            let mut theta = 0.0_f64;
+            while theta < 2_000.0 {
+                let factor = shaped.pitch_factor(theta);
+                assert!(
+                    (0.7 - 1e-9..=1.3 + 1e-9).contains(&factor),
+                    "pitch factor {factor} at theta {theta}, definition {definition}"
+                );
+                theta += 0.01;
+            }
         }
     }
 
     #[test]
     fn vari_pitch_micro_bits_only_nudge_the_cut() {
-        let base = vari_pitch_params(0.3, 0xAAAA_BBBB_0000_0000);
-        let nudged = vari_pitch_params(0.3, 0xAAAA_BBBB_FFFF_FFFF);
+        let sweep = 2.0 * PI * 147.0;
+        let base = vari_pitch_params(0.3, 0xAAAA_BBBB_0000_0000, 0.5, sweep);
+        let nudged = vari_pitch_params(0.3, 0xAAAA_BBBB_FFFF_FFFF, 0.5, sweep);
 
         // Same high bits: the character holds — periods within the ±2%
         // micro jitter of each other, phases within the small drift.
@@ -3327,6 +3420,7 @@ mod tests {
         let family = SpiralFamily::VariPitch {
             depth: 0.3,
             seed: 42,
+            definition: 0.6,
         };
         let vari =
             build_spiral_mask_with_family(576, 576, 0.6, &family, "single45", None, None, None)
@@ -3359,15 +3453,25 @@ mod tests {
     fn vari_pitch_rejects_nan_and_out_of_range_depth() {
         for depth in [f64::NAN, 0.0, -0.1, 0.46] {
             assert!(
-                SpiralFamily::VariPitch { depth, seed: 1 }.validate().is_err(),
+                SpiralFamily::VariPitch { depth, seed: 1, definition: 0.0 }
+                    .validate()
+                    .is_err(),
                 "depth {depth} must be refused"
             );
         }
         assert!(SpiralFamily::VariPitch {
             depth: 0.45,
-            seed: 1
+            seed: 1,
+            definition: 1.0
         }
         .validate()
         .is_ok());
+        assert!(SpiralFamily::VariPitch {
+            depth: 0.3,
+            seed: 1,
+            definition: 1.2
+        }
+        .validate()
+        .is_err());
     }
 }
