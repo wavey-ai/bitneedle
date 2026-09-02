@@ -2,11 +2,6 @@
 
 Bitneedle is the public reference implementation for Bitneedle picture records.
 A Bitneedle picture record is an image that contains recoverable audio data.
-Use this code to read and validate a Bitneedle picture record.
-
-Artists, collectors, archivists, marketplaces, and developers can examine a
-Bitneedle picture record. They can make sure that the record contains its audio
-data. They can also build independent tools to play and preserve the record.
 
 ## Record geometry
 
