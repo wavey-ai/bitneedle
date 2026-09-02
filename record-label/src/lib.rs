@@ -5,7 +5,7 @@
 
 #![doc = include_str!("../README.md")]
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,11 +72,15 @@ pub struct ResolvedLabelCutoutStyle {
 
 pub fn label_profile_geometry(record_profile: &str) -> Result<LabelProfileGeometry> {
     let geometry = record_core::describe_record_profile(record_profile)?;
-    let record_profile = match geometry.record_profile.as_str() {
-        "single45" => "single45",
-        "lp" => "lp",
-        _ => bail!("unknown record profile: {}", geometry.record_profile),
-    };
+    // `describe_record_profile` has already accepted the name, so this only
+    // needs a `'static` copy of it. Matching each profile by hand meant a new
+    // carrier broke every label — and broke `known_label_profile_geometries`
+    // wholesale, since that maps over the same list this refused.
+    let record_profile = record_core::known_record_profile_names()
+        .iter()
+        .copied()
+        .find(|name| *name == geometry.record_profile)
+        .ok_or_else(|| anyhow!("unknown record profile: {}", geometry.record_profile))?;
     Ok(LabelProfileGeometry {
         record_profile,
         label_radius: geometry.label_radius,
