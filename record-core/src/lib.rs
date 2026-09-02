@@ -31,7 +31,7 @@ pub const HEADER_SPIRAL_TURNS: f64 = 2.0;
 pub const TRAILER_SPIRAL_TURNS: f64 = 4.0;
 pub const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
-pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "lp"];
+pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "ten", "lp"];
 
 pub const RECORD_STREAM_MAGIC: &[u8; 4] = b"BRS1";
 pub const RECORD_STREAM_HEADER_LENGTH: usize = 8;
@@ -743,6 +743,7 @@ pub fn known_record_profile_names() -> &'static [&'static str] {
 pub fn normalize_record_profile_name(record_profile: &str) -> Result<String> {
     let name = match record_profile.trim() {
         "single45" => "single45",
+        "ten" => "ten",
         "lp" => "lp",
         _ => bail!("Unknown record profile: {record_profile}"),
     };
@@ -778,6 +779,17 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
             label_diameter_mm: 92.1,
             spindle_hole_diameter_mm: 7.5,
             dink_diameter_mm: Some(38.1),
+            outer_radius_px: 287,
+        },
+        "ten" => PhysicalProfile {
+            name: "ten",
+            finished_diameter_mm: 250.825,
+            margin_diameter_mm: 247.0,
+            outer_recorded_diameter_mm: 241.3,
+            inner_recorded_diameter_mm: 120.65,
+            label_diameter_mm: 100.0,
+            spindle_hole_diameter_mm: 7.24,
+            dink_diameter_mm: None,
             outer_radius_px: 287,
         },
         "lp" => PhysicalProfile {
@@ -829,11 +841,12 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
     );
     let payload_inner = match physical.name {
         "single45" => label_radius + 18,
+        "ten" => label_radius + 16,
         "lp" => label_radius + 14,
         _ => authentic_inner,
     };
     let payload_outer = match physical.name {
-        "single45" | "lp" => (margin_radius - 6).max(1),
+        "single45" | "ten" | "lp" => (margin_radius - 6).max(1),
         _ => authentic_outer,
     };
 

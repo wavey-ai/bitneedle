@@ -139,6 +139,9 @@ impl GapRenderContext {
 pub fn seconds_per_revolution(record_profile: &str) -> Result<f64> {
     match record_profile {
         "single45" => Ok(4.0 / 3.0),
+        // A 10 in is cut at 45 RPM, so it shares the 7 in revolution clock and
+        // the 1333 ms encoder bundle that goes with it.
+        "ten" => Ok(4.0 / 3.0),
         "lp" => Ok(9.0 / 5.0),
         other => bail!("unknown record profile: {other}"),
     }

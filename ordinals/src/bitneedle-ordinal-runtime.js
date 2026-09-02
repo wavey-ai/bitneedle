@@ -11,8 +11,8 @@
   const DEFAULT_LABEL_STYLE = "master";
 
   // Canonical 576px Bitneedle carrier geometry, copied from record-core's
-  // single45/lp profile calculations. The runtime stays small by hard-coding
-  // these two public carrier profiles and allowing manifest-level overrides.
+  // single45/ten/lp profile calculations. The runtime stays small by hard-coding
+  // these three public carrier profiles and allowing manifest-level overrides.
   const PROFILE_GEOMETRY = Object.freeze({
     single45: Object.freeze({
       recordProfile: "single45",
@@ -20,6 +20,17 @@
       dinkRadius: 63,
       labelRadius: 151,
       payloadInnerRadius: 169,
+      payloadOuterRadius: 280,
+      outerRadius: 287,
+      outerRimThickness: 4,
+      leadInBandThickness: 6,
+    }),
+    ten: Object.freeze({
+      recordProfile: "ten",
+      spindleHoleRadius: 8,
+      dinkRadius: null,
+      labelRadius: 114,
+      payloadInnerRadius: 130,
       payloadOuterRadius: 280,
       outerRadius: 287,
       outerRimThickness: 4,
@@ -67,6 +78,7 @@
     const name = String(value || "single45").trim();
     if (name === "single45" || name === "45" || name === "single") return "single45";
     if (name === "lp" || name === "LP" || name === "album") return "lp";
+    if (name === "ten" || name === "10" || name === "ten45") return "ten";
     throw new Error(`Unknown Bitneedle record profile: ${value}`);
   }
 

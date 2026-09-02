@@ -54,8 +54,10 @@ pub const CACHE_ENCRYPTION_NONCE_DOMAIN: &[u8] = b"bitneedle-cache-nonce-v1";
 
 pub const RECORD_PROFILE_SINGLE45_CODE: u8 = 0;
 pub const RECORD_PROFILE_LP_CODE: u8 = 1;
+pub const RECORD_PROFILE_TEN_CODE: u8 = 2;
 pub const RECORD_PROFILE_SINGLE45: &str = "single45";
 pub const RECORD_PROFILE_LP: &str = "lp";
+pub const RECORD_PROFILE_TEN: &str = "ten";
 
 pub const RELEASE_ID_LENGTH: usize = 16;
 
@@ -1306,6 +1308,7 @@ pub fn record_profile_code(record_profile: &str) -> Result<u8> {
     match record_profile {
         RECORD_PROFILE_SINGLE45 => Ok(RECORD_PROFILE_SINGLE45_CODE),
         RECORD_PROFILE_LP => Ok(RECORD_PROFILE_LP_CODE),
+        RECORD_PROFILE_TEN => Ok(RECORD_PROFILE_TEN_CODE),
         other => bail!("unsupported canonical record profile {other}"),
     }
 }
@@ -1314,6 +1317,7 @@ pub fn record_profile_from_code(code: u8) -> Result<String> {
     match code {
         RECORD_PROFILE_SINGLE45_CODE => Ok(RECORD_PROFILE_SINGLE45.to_string()),
         RECORD_PROFILE_LP_CODE => Ok(RECORD_PROFILE_LP.to_string()),
+        RECORD_PROFILE_TEN_CODE => Ok(RECORD_PROFILE_TEN.to_string()),
         other => bail!("unknown record profile code {other}"),
     }
 }
@@ -2380,9 +2384,11 @@ mod tests {
     fn record_profile_codes_round_trip() {
         assert_eq!(record_profile_code("single45").unwrap(), 0);
         assert_eq!(record_profile_code("lp").unwrap(), 1);
+        assert_eq!(record_profile_code("ten").unwrap(), 2);
         assert_eq!(record_profile_from_code(0).unwrap(), "single45");
         assert_eq!(record_profile_from_code(1).unwrap(), "lp");
-        assert!(record_profile_from_code(2).is_err());
+        assert_eq!(record_profile_from_code(2).unwrap(), "ten");
+        assert!(record_profile_from_code(3).is_err());
     }
 
     #[test]

@@ -349,6 +349,7 @@ fn profile_code(profile: &str) -> Result<u8> {
     Ok(match profile {
         "single45" => 0,
         "lp" => 1,
+        "ten" => 2,
         other => bail!("unknown record profile {other} for proof config"),
     })
 }
@@ -357,6 +358,7 @@ fn profile_name(code: u8) -> Result<&'static str> {
     Ok(match code {
         0 => "single45",
         1 => "lp",
+        2 => "ten",
         other => bail!("unknown record profile code {other}"),
     })
 }

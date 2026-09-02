@@ -104,7 +104,7 @@ The runtime accepts a compact shape for wrappers:
 
 Aliases:
 
-- `p`: record profile (`single45` or `lp`)
+- `p`: record profile (`single45`, `ten`, or `lp`)
 - `r`: RGB block / track-map image
 - `a`: artwork image
 - `la`: label artwork image
