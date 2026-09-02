@@ -10,10 +10,10 @@ data. They can also build independent tools to play and preserve the record.
 
 ## Record geometry
 
-Every profile is the RIAA dimensional standard, not a house convention. The
-three sizes differ only in their outer diameter and where the recorded band
-starts; a 10 in and a 12 in share an inner recording diameter, and all three
-share a centre hole.
+Every profile takes its dimensions from the RIAA standard. The three sizes
+differ in their outer diameter and in where the recorded band starts; a 10 in
+and a 12 in share an inner recording diameter, and all three share a centre
+hole.
 
 | | 7 in `single45` | 10 in `ten` | 12 in `lp` |
 | --- | --- | --- | --- |
@@ -23,24 +23,25 @@ share a centre hole.
 | Label diameter | 92.1 mm | 100.0 mm | 100.0 mm |
 | Centre hole | 7.5 mm (+ 38.1 mm dink) | 7.24 mm | 7.24 mm |
 
-Label diameters are not RIAA — the standard does not specify one. They come
-from the curated pressing-plant template registry in `record-plant`, where the
-published trim clusters hard: 92 mm on a 7 in (25 of 44 templates), 100 mm on a
-12 in (18 of 26), and 100 mm on a 10 in (6 of 9). Most plants ship one shared
-"10/12 in label" template, and the plants that draw a dedicated 10 in file
-still specify 100 mm. A 10 in may be pressed with a 7 in label instead; that is
-a customer option, not the default.
+Label diameter is the one dimension the RIAA standard leaves to the plant, so
+these three come from the curated pressing-plant template registry in
+`record-plant`, where the published trim clusters hard: 92 mm on a 7 in (25 of
+44 templates), 100 mm on a 12 in (18 of 26), and 100 mm on a 10 in (6 of 9).
+Most plants ship one shared "10/12 in label" template, and the plants that draw
+a dedicated 10 in file still specify 100 mm. A 10 in may also be pressed with a
+7 in label, which plants offer as a customer option; 100 mm stays the default.
 
-`margin_diameter_mm` is the one value with no external source. It sets the
-outer margin band, and each profile places it proportionally within the gap
-between the outermost groove and the disc edge.
+`margin_diameter_mm` is the format's own value. It sets the outer margin band,
+and each profile places it proportionally within the gap between the outermost
+groove and the disc edge.
 
 ### How this reaches the 576 x 576 canvas
 
 The rendered disc always fills the canvas — `outer_radius_px` is **287** for
-every profile — so a profile's physical diameter never changes its drawn size.
-Format identity on screen is carried entirely by **the label-to-disc ratio**,
-because a near-constant label on a shrinking disc occupies more of it:
+every profile — so every format draws at one size whatever its physical
+diameter. Format identity on screen is carried entirely by **the
+label-to-disc ratio**, because a near-constant label on a shrinking disc
+occupies more of it:
 
 | Profile | Label radius | Ratio of canvas | Label / disc | Payload band |
 | --- | --- | --- | --- | --- |
@@ -63,30 +64,31 @@ as the truthful glyph for a format.
 
 `margin_radius` lands on 283 px for all three profiles, so every format shares
 an `outer_rim_thickness` of 4 px, a `lead_in_band_thickness` of 6 px, and a
-`payload_outer_radius` of 280 px. Only the inner edge of the payload band moves,
-and it moves with the label.
+`payload_outer_radius` of 280 px. The inner edge of the payload band is the one
+edge that moves, and it moves with the label.
 
 ## What a record attests
 
 A pressed record is immutable, and its signature says so: the release
 commitment covers the audio and everything the record says about itself —
 title, artist, label, catalogue number, copyright, credit, the palette and
-the geometry it was cut at. A signed record cannot be re-titled or
-re-attributed without becoming a different release.
+the geometry it was cut at. Re-titling or re-attributing a signed record
+produces a different release.
 
-Three things are allowed to arrive later, and none of them may arrive
-unsigned:
+Three things are allowed to arrive later, and each of them arrives signed:
 
-- **A chain anchor, an ISRC, a barcode.** None can exist at press time. They
-  sit outside the release commitment, and writing any of them requires the
-  deferred attestation that signs them, bound to the record they belong to.
+- **A chain anchor, an ISRC, a barcode.** Each is issued after the press: an
+  anchor needs a commitment to anchor, and registrars assign ISRCs and barcodes
+  on their own schedule. They sit outside the release commitment, and writing
+  any of them requires the deferred attestation that signs them, bound to the
+  record they belong to.
 - **The sidecar.** It is meant to be rewritten — editions are issued, labels
   are re-authored — so it carries its own attestation, replaced each time it
   is written. Whoever writes it signs what they wrote.
 
 A release may be signed by the artist, by a platform, or by both: they are
 separate signatures over one commitment. Who a key belongs to is resolved by
-`record-verify` and its caller, never by the wire format.
+`record-verify` and its caller, outside the wire format.
 
 `bitneedle-format/README.md` sets this out in full.
 
@@ -102,11 +104,11 @@ Different licenses apply to the components in this repository.
   make and sell their own Bitneedle records.
 - A label, platform, or other commercial user must get a separate license.
 
-The `Cargo.toml` and `LICENSE` files identify the license for each crate. Only
-the applicable component license can grant a patent license. Publication of
-this repository does not grant other patent rights. Publication does not put
-patent-pending technology in the public domain. Refer to `PATENTS.md` for the
-patent notice and the limited decoder pledge.
+The `Cargo.toml` and `LICENSE` files identify the license for each crate. A
+patent license comes from the applicable component license and from that alone.
+Every other patent right stays reserved on publication, and patent-pending
+technology stays patent pending. Refer to `PATENTS.md` for the patent notice
+and the limited decoder pledge.
 
 ## Repository scope
 
@@ -119,7 +121,7 @@ patent notice and the limited decoder pledge.
 | `record-verify` | Apache-2.0 | Canonical hashing, registration receipt chains, and signature verification. |
 | `record-sidecar` | Apache-2.0 | Sidecar structures used to support recovery and inspection, and the attestation a sidecar carries over its own contents. |
 | `record-wasm` | Apache-2.0 | WebAssembly facade for decoding, verification, and sidecar inspection. |
-| `player-wasm` | Apache-2.0 | WebAssembly playback/decoding orchestration helpers for Bitneedle player apps (metadata resolution, cache keys, scratch control — no record authoring). |
+| `player-wasm` | Apache-2.0 | WebAssembly playback/decoding orchestration helpers for Bitneedle player apps (metadata resolution, cache keys, scratch control; the playback side alone). |
 | `bytes2rgb` | Apache-2.0 | Low-level pixel-to-byte utilities used by decoder and verification tools. |
 | `bitneedle-id` | CC0-1.0 | Typed prefixed ULID identifiers for public record objects. |
 | `record-groove` | Wavey Artist Source Licence | Byte-to-pixel carrier encoding, toned palette construction, and OKLCH helpers. |
@@ -128,7 +130,8 @@ patent notice and the limited decoder pledge.
 | `record-cut` | Wavey Artist Source Licence | Canonical BRS1 record-stream authoring/encoding, BRD1 descriptor authoring (`descriptor` module), and GAP1 authoring (`gap` module). |
 | `record-cut-wasm` | Wavey Artist Source Licence | WebAssembly facade for record rendering, program assembly, and record-label profile helpers. |
 
-This repository is not the commercial Bitneedle record authoring platform.
-Only Artists and Artist Entities can use the applicable crates under the Wavey
-Artist Source Licence. Record labels, platforms, and other commercial users
-need a separate license. Refer to section 15 of `LICENSE-ARTIST`.
+This repository is the public reference implementation; the commercial
+Bitneedle record authoring platform is separate. Use of the applicable crates
+under the Wavey Artist Source Licence is limited to Artists and Artist
+Entities. Record labels, platforms, and other commercial users need a separate
+license. Refer to section 15 of `LICENSE-ARTIST`.

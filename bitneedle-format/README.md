@@ -5,7 +5,7 @@ A compact visual guide to the canonical **BRD1 + BRS1 + optional BSC1** format.
 BPK1 transports these exact components before PNG rendering.
 
 This README gives explanatory information. The normative specification is
-`draft-bitneedle-picture-record-format-03.txt`.
+`draft-bitneedle-picture-record-format-04.txt`.
 
 ## At a glance
 
@@ -102,7 +102,8 @@ radius 0                                                     radius 287
 `total` is the whole descriptor payload including this 19-byte prefix, and
 must equal `19 + seg bytes`. `segs` is the number of segments that follow,
 and a reader that parses a different number fails. `b_value` must decode
-finite and positive. The current version is `2`; a reader refuses any other.
+finite and positive. The version is `2` for an Archimedean cut and `3` for a
+record carrying a spiral-geometry segment; a reader refuses any other.
 
 ### Segment framing
 
@@ -118,29 +119,30 @@ finite and positive. The current version is `2`; a reader refuses any other.
 |---:|---|---|---|:---:|
 | 1 | Descriptor CRC-32 | `u32be`, zeroed while hashing | 4 | yes |
 | 2 | Exact BRS1 length | `u32be`, non-zero | 4 | yes |
-| 4 | Record profile | profile code (`0` single45, `1` lp) | 1 | yes |
+| 4 | Record profile | profile code (`0` single45, `1` lp, `2` ten) | 1 | yes |
 | 5 | Title | UTF-8 | ≤ 96 | no |
 | 6 | Artist | UTF-8 | ≤ 96 | no |
 | 7 | Payload encoding | encoding code (`0` rgb, `1` toned-v1) | 1 | yes |
 | 8 | Release ID | raw ULID bytes | 16 | no |
-| 9 | Catalog number | UTF-8 | ≤ 96 | no |
-| 10 | Label | UTF-8 | ≤ 96 | no |
-| 11 | Artwork credit | UTF-8 | ≤ 96 | no |
-| 13 | Canonical URL | UTF-8 | ≤ 96 | no |
-| 14 | Created at | `u64be` seconds | 8 | no |
+| 9 | Catalog number | UTF-8 | ≤ 1024 | no |
+| 10 | Label | UTF-8 | ≤ 1024 | no |
+| 11 | Artwork credit | UTF-8 | ≤ 1024 | no |
+| 13 | Canonical URL | UTF-8 | ≤ 1024 | no |
+| 14 | Created at | `u64be` milliseconds | 8 | no |
 | 16 | Signed-release reference | binary, see below | variable | no |
 | 21 | BSC1 pointer | binary, non-empty | variable | no |
 | 22 | Toned carrier map | binary, see below | variable | with `toned-v1` |
 | 23 | Cache encryption | binary, see below | 4 + 32 | no |
 | 24 | Copyright year | `u16be` | 2 | no |
-| 25 | Copyright holder | UTF-8 | ≤ 96 | no |
+| 25 | Copyright holder | UTF-8 | ≤ 1024 | no |
 | 26 | Chain anchor | binary, non-empty | variable | deferred |
 | 27 | ISRCs | count + `(track u16be, 12 ASCII)` | variable | deferred |
 | 28 | Barcode | 12–14 ASCII digits, mod-10 checked | 12–14 | deferred |
 | 29 | Deferred attestation | signature envelope | variable | with 26–28 |
+| 30 | Spiral geometry | binary, see below | 17/25/34/42/90 | with v3 |
 | 31 | Additional signatures | count + length-prefixed envelopes | variable | no |
 
-Types 3, 12, 15, 17–20, 30 and 32 upward are unallocated. A text segment written
+Types 3, 12, 15, 17–20 and 32 upward are unallocated. A text segment written
 with an empty payload is indistinguishable from an absent one: the encoder
 omits both.
 
@@ -279,7 +281,8 @@ sidecar commitment
            || SHA-256(descriptor identity)      ← binds it to this record
            || item count
            || for each item but the attestation:
-                type, codec, name, stored length, SHA-256(stored bytes) )
+                type, codec, name, stored length,
+                SHA-256(stored bytes as base64 text) )
 ```
 
 The attestation excludes itself, because it cannot contain its own
@@ -373,20 +376,25 @@ cache binding.
 | `0x01` | Chunks are encrypted and include 12-byte nonces |
 | `0x02` | Payload entries explicitly store descriptor indexes |
 | `0x04` | Tracks explicitly store payload-entry mappings |
+| `0x08` | An explicit track-gap table follows the track table |
 
 ### Payload descriptor
 
 ```text
 container code: u8
 flags:          u8
-[codec string]
-[sample rate: u32be]
-[channels: u8]
+[codec string]                  0x01
+[sample rate: u32be]            0x02
+[channels: u8]                  0x04
+[block samples: u32be,          0x08
+ output offset samples: u32be,
+ output samples: u32be]
+[codec metadata: u32be len      0x10
+ then that many bytes]
 ```
 
 | Code | Container |
 |---:|---|
-| 0 | RAW |
 | 1 | ECDC |
 | 2 | MOSSNANO |
 | 255 | Extension name follows |
