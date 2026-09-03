@@ -9,20 +9,18 @@ use anyhow::{bail, Context, Result};
 
 use record_core::SpiralFamily;
 use record_descriptor::{
-    compute_descriptor_crc32, encode_cache_encryption_descriptor, encode_toned_carrier_map,
-    payload_encoding_code, record_profile_code, release_id_to_bytes, CacheEncryptionDescriptor,
-    SignedReleaseReference, ToneSpanDescriptor, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1,
-    RECORD_DESCRIPTOR_MAGIC, RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION,
-    RECORD_DESCRIPTOR_VERSION_V3,
-    encode_isrc_segment, normalize_upc, TrackIsrc,
-    SEGMENT_ADDITIONAL_SIGNATURES, SEGMENT_CHAIN_ANCHOR,
-    SEGMENT_DEFERRED_ATTESTATION, SEGMENT_ISRC, SEGMENT_UPC,
-    SEGMENT_ARTIST, SEGMENT_ARTWORK_CREDIT, SEGMENT_BSC_POINTER, SEGMENT_CACHE_ENCRYPTION,
-    SEGMENT_CANONICAL_URL, SEGMENT_CATALOG_NUMBER, SEGMENT_COPYRIGHT_HOLDER,
-    SEGMENT_COPYRIGHT_YEAR, SEGMENT_CREATED_AT, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_LABEL,
+    compute_descriptor_crc32, encode_cache_encryption_descriptor, encode_isrc_segment,
+    encode_toned_carrier_map, normalize_upc, payload_encoding_code, record_profile_code,
+    release_id_to_bytes, CacheEncryptionDescriptor, SignedReleaseReference, ToneSpanDescriptor,
+    TrackIsrc, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1, RECORD_DESCRIPTOR_MAGIC,
+    RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION, RECORD_DESCRIPTOR_VERSION_HOUSE,
+    SEGMENT_ADDITIONAL_SIGNATURES, SEGMENT_ARTIST, SEGMENT_ARTWORK_CREDIT, SEGMENT_BSC_POINTER,
+    SEGMENT_CACHE_ENCRYPTION, SEGMENT_CANONICAL_URL, SEGMENT_CATALOG_NUMBER, SEGMENT_CHAIN_ANCHOR,
+    SEGMENT_COPYRIGHT_HOLDER, SEGMENT_COPYRIGHT_YEAR, SEGMENT_CREATED_AT,
+    SEGMENT_DEFERRED_ATTESTATION, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_ISRC, SEGMENT_LABEL,
     SEGMENT_PAYLOAD_ENCODING, SEGMENT_RECORD_PROFILE, SEGMENT_RELEASE_ID,
     SEGMENT_SIGNED_RELEASE_REFERENCE, SEGMENT_SPIRAL_GEOMETRY, SEGMENT_STREAM_BYTE_LENGTH,
-    SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP,
+    SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP, SEGMENT_UPC,
 };
 
 pub const RECORD_DESCRIPTOR_TEXT_LIMIT: usize = 96;
@@ -30,6 +28,13 @@ pub const RECORD_DESCRIPTOR_CREATOR_TEXT_LIMIT: usize = 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct RecordDescriptorInput {
+    /// The radius, in rendered pixels, at which the programme's groove stops
+    /// and the lead-out takes over. Zero for a cut that reaches the label.
+    pub cut_inner_radius: u16,
+    /// The lead-out's spiral `b`. The feed, never the turn count: a lathe's
+    /// spiral lever does not know how far it has to travel, and neither does
+    /// a reader — both derive the turns from the space that is left.
+    pub lead_out_b_value: f64,
     pub record_profile: String,
     pub stream_byte_length: usize,
     pub payload_encoding: Option<String>,
@@ -76,9 +81,7 @@ pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Re
     Ok(out)
 }
 
-pub fn encode_additional_signatures(
-    references: &[SignedReleaseReference],
-) -> Result<Vec<u8>> {
+pub fn encode_additional_signatures(references: &[SignedReleaseReference]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(
         &u16::try_from(references.len())
@@ -106,6 +109,18 @@ pub fn encode_record_descriptor_stream(
         bail!("a positive finite b_value is required");
     }
 
+    // A cut that reached the label declares no lead-out, and its feed is
+    // meaningless rather than zero — write it as such instead of letting an
+    // unset field read as an infinitely fine groove.
+    let lead_out_b_value = if descriptor.cut_inner_radius == 0 {
+        0.0
+    } else {
+        if !(descriptor.lead_out_b_value.is_finite() && descriptor.lead_out_b_value > 0.0) {
+            bail!("a cut that stops short of the label must declare a positive lead-out feed");
+        }
+        descriptor.lead_out_b_value
+    };
+
     let (body, segment_count) = encode_segmented_body(descriptor)?;
     let payload_len = RECORD_DESCRIPTOR_PREFIX_LENGTH
         .checked_add(body.len())
@@ -121,7 +136,7 @@ pub fn encode_record_descriptor_stream(
     let version = if descriptor.spiral_family.is_archimedean() {
         RECORD_DESCRIPTOR_VERSION
     } else {
-        RECORD_DESCRIPTOR_VERSION_V3
+        RECORD_DESCRIPTOR_VERSION_HOUSE
     };
 
     let mut full = Vec::with_capacity(payload_len);
@@ -131,6 +146,8 @@ pub fn encode_record_descriptor_stream(
     full.extend_from_slice(&segment_count.to_be_bytes());
     full.extend_from_slice(&(body.len() as u16).to_be_bytes());
     full.extend_from_slice(&b_value.to_bits().to_be_bytes());
+    full.extend_from_slice(&descriptor.cut_inner_radius.to_be_bytes());
+    full.extend_from_slice(&lead_out_b_value.to_bits().to_be_bytes());
     full.extend_from_slice(&body);
 
     let crc32 = compute_descriptor_crc32(&full);
@@ -464,10 +481,10 @@ mod tests {
         };
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).unwrap();
-        assert_eq!(bytes[4], RECORD_DESCRIPTOR_VERSION_V3);
+        assert_eq!(bytes[4], RECORD_DESCRIPTOR_VERSION_HOUSE);
 
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).unwrap();
-        assert_eq!(decoded.version, RECORD_DESCRIPTOR_VERSION_V3);
+        assert_eq!(decoded.version, RECORD_DESCRIPTOR_VERSION_HOUSE);
         assert_eq!(decoded.spiral_family, input.spiral_family);
     }
 

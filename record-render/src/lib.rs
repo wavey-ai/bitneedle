@@ -2286,7 +2286,22 @@ fn render_payload_codes_to_transparent_spiral(
         .map(record_descriptor::CacheEncryptionDescriptor::from_secret_base64url)
         .transpose()?;
 
+    // A cut that reaches the label declares no lead-out; anything short
+    // declares where its groove stops and what feed the rest is cut at, so a
+    // reader holding only the PNG can walk the whole spiral.
+    let declares_lead_out =
+        cut_inner_radius > payload_inner_radius(&describe_record_profile(&normalized_profile)?);
     let descriptor_input = RecordDescriptorInput {
+        cut_inner_radius: if declares_lead_out {
+            u16::try_from(cut_inner_radius).context("cut inner radius does not fit u16")?
+        } else {
+            0
+        },
+        lead_out_b_value: if declares_lead_out {
+            record_core::lead_out_spiral_pitch(&normalized_profile)?
+        } else {
+            0.0
+        },
         record_profile: normalized_profile.clone(),
         stream_byte_length: codes.len(),
         payload_encoding: Some(if rgb_tone.is_some() {
@@ -3226,7 +3241,10 @@ mod tests {
             "vari-pitch groove did not round-trip"
         );
 
-        assert_eq!(output.descriptor.version, 3);
+        assert_eq!(
+            output.descriptor.version,
+            record_descriptor::RECORD_DESCRIPTOR_VERSION_HOUSE
+        );
         assert_eq!(
             output.descriptor.spiral_family,
             SpiralFamily::VariPitch {
@@ -3287,7 +3305,10 @@ mod tests {
             implicit.png_bytes, explicit.png_bytes,
             "an explicit archimedean family must not change the render"
         );
-        assert_eq!(implicit.descriptor.version, 2);
+        assert_eq!(
+            implicit.descriptor.version,
+            record_descriptor::RECORD_DESCRIPTOR_VERSION
+        );
         assert_eq!(implicit.descriptor.spiral_family, SpiralFamily::Archimedean);
     }
 

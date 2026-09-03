@@ -10,11 +10,11 @@
 //! the canonical entry that decoder crates read back.
 
 use anyhow::{ensure, Result};
+use record_core::gap::decode_gap_header;
 use record_core::gap::{
     fill_gap_quiet_filler, gap_payload_byte_length, gap_sample_count_from_seconds,
     GapRenderContext, GAP_FLAG_PATTERNIZED, GAP_HEADER_LENGTH, GAP_MAGIC, GAP_VERSION,
 };
-use record_core::gap::decode_gap_header;
 
 /// Derive a deterministic GAP seed from stable construction context. Mixing all
 /// available identifiers keeps successive gaps in one record visually distinct

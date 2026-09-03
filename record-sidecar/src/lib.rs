@@ -591,8 +591,8 @@ pub fn sidecar_attestation(items: &[SidecarDecodedItem]) -> Result<Option<Sideca
         .json
         .as_ref()
         .context("the sidecar attestation item is not JSON")?;
-    let attestation: SidecarAttestation = serde_json::from_value(json.clone())
-        .context("the sidecar attestation is not readable")?;
+    let attestation: SidecarAttestation =
+        serde_json::from_value(json.clone()).context("the sidecar attestation is not readable")?;
     attestation.validate()?;
     Ok(Some(attestation))
 }
@@ -2664,6 +2664,8 @@ fn descriptor_input_with_rewrite_options(
     };
 
     Ok(record_cut::descriptor::RecordDescriptorInput {
+        cut_inner_radius: descriptor.cut_inner_radius,
+        lead_out_b_value: f64::from_bits(descriptor.lead_out_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -2686,13 +2688,13 @@ fn descriptor_input_with_rewrite_options(
         bsc_pointer: Some(encode_sidecar_header_pointer(&pointer)?),
         tone_spans: descriptor.tone_spans.clone(),
         cache_encryption: descriptor.cache_encryption.clone(),
-            chain_anchor: None,
+        chain_anchor: None,
         additional_signatures: Vec::new(),
         isrcs: Vec::new(),
         upc: None,
         deferred_attestation: None,
         spiral_family: descriptor.spiral_family,
-})
+    })
 }
 
 fn descriptor_input_from(
@@ -2713,6 +2715,8 @@ fn descriptor_input_with_cache_encryption_option(
     cache_encryption: Option<record_descriptor::CacheEncryptionDescriptor>,
 ) -> record_cut::descriptor::RecordDescriptorInput {
     record_cut::descriptor::RecordDescriptorInput {
+        cut_inner_radius: descriptor.cut_inner_radius,
+        lead_out_b_value: f64::from_bits(descriptor.lead_out_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -2909,6 +2913,132 @@ pub fn decode_record_png_sidecar_bytes(
     record_profile: Option<&str>,
 ) -> Result<Vec<u8>> {
     decode_record_png_sidecar_with_context(png_bytes, record_profile).map(|(bytes, _)| bytes)
+}
+
+/// Everything a pressed record carries in its sidecar, read back in one pass.
+///
+/// The sidecar is decoded in pieces all over this crate — the pointer out of
+/// BRD1, the BSC1 stream off the carrier pairs, the container's framing, the
+/// items inside it, the attestation over them. Every one of those is a place
+/// a record can be wrong, and until now nothing gathered them, so a caller
+/// wanting to *check* a sidecar rather than use one had to reimplement the
+/// walk. This is that walk, once: what was found, and what it cost to find.
+#[derive(Debug, Clone)]
+pub struct SidecarInspection {
+    /// The 48-byte pointer BRD1 carries, when the record carries one. A
+    /// record can hold a sidecar without one — the stream is then found by
+    /// its magic — and that is the difference between a sidecar that is
+    /// declared and one that is merely present.
+    pub pointer: Option<SidecarHeaderPointer>,
+    /// The raw BSC1 stream, exactly as it came off the carrier pairs.
+    pub bytes: Vec<u8>,
+    /// The carriers it was read from, and what they could have held.
+    pub decode: SidecarDecodeResult,
+    /// The items, decompressed and typed.
+    pub decoded: SidecarDecodedItems,
+    /// The attestation over those items, if the sidecar carries one.
+    pub attestation: Option<SidecarAttestation>,
+    /// Whether that attestation's digest matches the items actually present
+    /// and this record's descriptor. `None` when there is no attestation.
+    ///
+    /// This is the structural half only. Whether the key is one to trust is
+    /// a question this crate deliberately does not answer.
+    pub attestation_covers: Option<bool>,
+    /// Whether the pointer's SHA-256 matched the stream that was read. A
+    /// record with no pointer has nothing to match, and reports `None`.
+    pub pointer_digest_matches: Option<bool>,
+}
+
+impl SidecarInspection {
+    /// The item stored under `name`, if the sidecar carries one.
+    pub fn item(&self, name: &str) -> Option<&SidecarDecodedItem> {
+        self.decoded.items.iter().find(|item| item.name == name)
+    }
+
+    /// The Patternize reverse map, if the groove was permuted.
+    pub fn pattern_map(&self) -> Option<&SidecarDecodedItem> {
+        self.decoded.items.iter().find(|item| {
+            item.name == PACKAGE_PATTERN_SIDECAR_ITEM_NAME
+                || item.mime == PACKAGE_PATTERN_SIDECAR_MIME
+        })
+    }
+
+    /// Every item that is not one of the reserved, structural ones: the
+    /// arbitrary data a presser chose to carry.
+    pub fn arbitrary_items(&self) -> Vec<&SidecarDecodedItem> {
+        self.decoded
+            .items
+            .iter()
+            .filter(|item| {
+                item.name != SIDECAR_ATTESTATION_ITEM_NAME
+                    && item.name != PACKAGE_PATTERN_SIDECAR_ITEM_NAME
+                    && item.mime != PACKAGE_PATTERN_SIDECAR_MIME
+                    && item.name != DISPLAY_HEADER_NAME
+                    && item.name != PACKAGE_METADATA_ITEM_NAME
+                    && item.name != PACKAGE_COVER_ITEM_NAME
+            })
+            .collect()
+    }
+}
+
+/// Read and check a record's whole sidecar.
+///
+/// `Ok(None)` means the record carries no sidecar at all, which is a valid
+/// record and not a failure. `Err` means it carries one that does not hold
+/// together — a truncated container, an item whose payload contradicts its
+/// declared type, a stream whose digest is not the one the header promised.
+pub fn inspect_record_png_sidecar(
+    png_bytes: &[u8],
+    record_profile: Option<&str>,
+) -> Result<Option<SidecarInspection>> {
+    let context = decode_record_png_context(png_bytes, record_profile)?;
+    let pointer = sidecar_pointer_from_descriptor(&context.descriptor)?;
+
+    // No pointer and no stream is a record without a sidecar. Told apart
+    // from a broken one by asking first and only then reporting: a record
+    // that never had a sidecar must not read as a record whose sidecar
+    // failed.
+    let (bytes, decode) = match decode_record_png_sidecar_with_context(png_bytes, record_profile) {
+        Ok(found) => found,
+        Err(error) => {
+            if pointer.is_none() {
+                return Ok(None);
+            }
+            return Err(error)
+                .context("the record's BRD1 declares a sidecar that would not decode");
+        }
+    };
+
+    let decoded = decode_sidecar_container_items(&bytes)
+        .context("the record's sidecar container is invalid")?;
+
+    let pointer_digest_matches = pointer.as_ref().map(|pointer| {
+        let actual: [u8; 32] = Sha256::digest(&bytes).into();
+        actual == pointer.sha256_bytes
+    });
+
+    let attestation = sidecar_attestation(&decoded.items)?;
+    let attestation_covers = match attestation.as_ref() {
+        Some(attestation) => {
+            let commitment = record_descriptor::descriptor_commitment(&context.descriptor)?;
+            Some(sidecar_attestation_covers(
+                attestation,
+                &commitment,
+                &decoded.items,
+            )?)
+        }
+        None => None,
+    };
+
+    Ok(Some(SidecarInspection {
+        pointer,
+        bytes,
+        decode,
+        decoded,
+        attestation,
+        attestation_covers,
+        pointer_digest_matches,
+    }))
 }
 
 /// Restore a Patternize groove permutation before payload decoding.
@@ -3701,15 +3831,14 @@ mod attestation_tests {
             version: record_descriptor::SIGNED_RELEASE_REFERENCE_VERSION,
             release_commitment_sha256: [2; 32],
             key_id: b"yl.vin".to_vec(),
-            signature: vec![
-                3;
-                record_descriptor::SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH
-            ],
+            signature: vec![3; record_descriptor::SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH],
         };
         let descriptor = record_descriptor::RecordDescriptor {
             version: record_descriptor::RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
+            cut_inner_radius: 0,
+            lead_out_b_value_bits: 0,
             spiral_family: record_core::SpiralFamily::Archimedean,
             record_profile: record_descriptor::RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,

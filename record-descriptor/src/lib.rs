@@ -19,14 +19,19 @@ use sha2::{Digest, Sha256};
 use std::convert::TryInto;
 
 pub const RECORD_DESCRIPTOR_MAGIC: &[u8; 4] = b"BRD1";
-pub const RECORD_DESCRIPTOR_VERSION: u8 = 2;
+pub const RECORD_DESCRIPTOR_VERSION: u8 = 4;
 /// The private "house" descriptor version: identical to v2 except it may
 /// carry a [`SEGMENT_SPIRAL_GEOMETRY`] segment declaring the groove's
 /// [`SpiralFamily`]. A v3 record without that segment is strict Archimedean.
 /// Not pushed publicly; v2 remains the wire version every Archimedean record
 /// is written with.
-pub const RECORD_DESCRIPTOR_VERSION_V3: u8 = 3;
-pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 19;
+pub const RECORD_DESCRIPTOR_VERSION_HOUSE: u8 = 5;
+/// Magic, version, the three lengths, the payload spiral's `b`, and the cut
+/// geometry: where the programme's groove stops and what feed the lead-out
+/// is cut at. The last two are what let a reader that holds nothing but the
+/// PNG traverse the whole groove, lead-out included — it rides the header
+/// spiral at the rim, so it is known before anything else is read.
+pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
 
@@ -484,9 +489,11 @@ pub fn decode_additional_signatures(payload: &[u8]) -> Result<Vec<SignedReleaseR
         if offset + 2 > payload.len() {
             bail!("additional signature is truncated");
         }
-        let length =
-            u16::from_be_bytes(payload[offset..offset + 2].try_into().expect("slice length"))
-                as usize;
+        let length = u16::from_be_bytes(
+            payload[offset..offset + 2]
+                .try_into()
+                .expect("slice length"),
+        ) as usize;
         offset += 2;
         let end = offset
             .checked_add(length)
@@ -588,7 +595,10 @@ pub fn normalize_upc(value: &str) -> Result<String> {
 pub fn encode_isrc_segment(isrcs: &[TrackIsrc]) -> Result<Vec<u8>> {
     let mut sorted = isrcs.to_vec();
     sorted.sort_by_key(|entry| entry.track_index);
-    if sorted.windows(2).any(|pair| pair[0].track_index == pair[1].track_index) {
+    if sorted
+        .windows(2)
+        .any(|pair| pair[0].track_index == pair[1].track_index)
+    {
         bail!("two ISRCs claim the same track");
     }
     let mut out = Vec::with_capacity(2 + sorted.len() * (2 + ISRC_LENGTH));
@@ -611,7 +621,10 @@ pub fn decode_isrc_segment(payload: &[u8]) -> Result<Vec<TrackIsrc>> {
     let count = u16::from_be_bytes(payload[..2].try_into().expect("slice length")) as usize;
     let expected = 2 + count * (2 + ISRC_LENGTH);
     if payload.len() != expected {
-        bail!("ISRC segment declares {count} codes but is {} bytes", payload.len());
+        bail!(
+            "ISRC segment declares {count} codes but is {} bytes",
+            payload.len()
+        );
     }
     let mut entries = Vec::with_capacity(count);
     let mut previous: Option<u16> = None;
@@ -1175,6 +1188,13 @@ pub struct RecordDescriptor {
     pub version: u8,
     pub checksum_protected: bool,
     pub b_value_bits: u64,
+    /// Where the programme's groove stops and the lead-out takes over, in
+    /// rendered pixels. Zero for a cut that reaches the label.
+    #[serde(default)]
+    pub cut_inner_radius: u16,
+    /// The lead-out's spiral `b` — the feed, never the turn count.
+    #[serde(default)]
+    pub lead_out_b_value_bits: u64,
     /// The groove geometry family. Always [`SpiralFamily::Archimedean`] for
     /// v2 records; v3 records may carry vari-pitch. Defaults keep every
     /// existing serialized form valid.
@@ -1246,6 +1266,14 @@ pub struct DescriptorPrefix {
     pub segment_count: usize,
     pub segment_stream_len: usize,
     pub b_value_bits: u64,
+    /// The radius, in rendered pixels, at which the programme's groove stops
+    /// and the lead-out takes over. Zero means the cut ran to the label and
+    /// there is no lead-out.
+    pub cut_inner_radius: u16,
+    /// The lead-out's own spiral `b`. Declared rather than assumed, because
+    /// the turn count is never stored: a reader derives it the way a lathe
+    /// produces it, from the travel left over and this feed.
+    pub lead_out_b_value_bits: u64,
 }
 
 pub fn metadata_pixel_count_for_byte_length(byte_length: usize) -> usize {
@@ -1402,6 +1430,8 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
     let segment_stream_len =
         u16::from_be_bytes(bytes[9..11].try_into().expect("slice length")) as usize;
     let b_value_bits = u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
+    let cut_inner_radius = u16::from_be_bytes(bytes[19..21].try_into().expect("slice length"));
+    let lead_out_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
 
     if payload_len < RECORD_DESCRIPTOR_PREFIX_LENGTH || payload_len > bytes.len() {
         bail!("record descriptor payload length is invalid");
@@ -1413,6 +1443,8 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         segment_count,
         segment_stream_len,
         b_value_bits,
+        cut_inner_radius,
+        lead_out_b_value_bits,
     })
 }
 
@@ -1621,7 +1653,8 @@ pub fn decode_signed_release_reference(bytes: &[u8]) -> Result<SignedReleaseRefe
 pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> {
     let prefix = decode_descriptor_prefix(bytes)?;
 
-    if prefix.version != RECORD_DESCRIPTOR_VERSION && prefix.version != RECORD_DESCRIPTOR_VERSION_V3
+    if prefix.version != RECORD_DESCRIPTOR_VERSION
+        && prefix.version != RECORD_DESCRIPTOR_VERSION_HOUSE
     {
         bail!("record descriptor version mismatch");
     }
@@ -1843,7 +1876,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 "deferred attestation",
             )?,
             SEGMENT_SPIRAL_GEOMETRY => {
-                if prefix.version != RECORD_DESCRIPTOR_VERSION_V3 {
+                if prefix.version != RECORD_DESCRIPTOR_VERSION_HOUSE {
                     bail!("spiral geometry segment requires descriptor version 3");
                 }
                 // The segment grew as the house cut did: 17 bytes is the
@@ -1856,10 +1889,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 if payload[0] != SPIRAL_FAMILY_VARI_PITCH_CODE {
                     bail!("unsupported spiral family code {}", payload[0]);
                 }
-                let depth =
-                    f64::from_bits(u64::from_be_bytes(payload[1..9].try_into().expect(
-                        "slice length",
-                    )));
+                let depth = f64::from_bits(u64::from_be_bytes(
+                    payload[1..9].try_into().expect("slice length"),
+                ));
                 let seed = u64::from_be_bytes(payload[9..17].try_into().expect("slice length"));
                 let definition = if payload.len() >= 25 {
                     f64::from_bits(u64::from_be_bytes(
@@ -1977,6 +2009,8 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         version: prefix.version,
         checksum_protected: true,
         b_value_bits: prefix.b_value_bits,
+        cut_inner_radius: prefix.cut_inner_radius,
+        lead_out_b_value_bits: prefix.lead_out_b_value_bits,
         spiral_family: spiral_family.unwrap_or_default(),
         record_profile,
         stream_byte_length,
@@ -2142,8 +2176,18 @@ mod tests {
             body.extend_from_slice(payload);
             *segments += 1;
         };
-        push(&mut body, SEGMENT_DESCRIPTOR_CRC32, &0u32.to_be_bytes(), &mut segments);
-        push(&mut body, SEGMENT_STREAM_BYTE_LENGTH, &4096u32.to_be_bytes(), &mut segments);
+        push(
+            &mut body,
+            SEGMENT_DESCRIPTOR_CRC32,
+            &0u32.to_be_bytes(),
+            &mut segments,
+        );
+        push(
+            &mut body,
+            SEGMENT_STREAM_BYTE_LENGTH,
+            &4096u32.to_be_bytes(),
+            &mut segments,
+        );
         push(
             &mut body,
             SEGMENT_RECORD_PROFILE,
@@ -2169,6 +2213,9 @@ mod tests {
         full.extend_from_slice(&segments.to_be_bytes());
         full.extend_from_slice(&(body.len() as u16).to_be_bytes());
         full.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
+        // A cut that reached the label: no lead-out band, so no feed either.
+        full.extend_from_slice(&0u16.to_be_bytes());
+        full.extend_from_slice(&0f64.to_bits().to_be_bytes());
         full.extend_from_slice(&body);
 
         let crc = compute_descriptor_crc32(&full);
@@ -2205,6 +2252,8 @@ mod tests {
             version: RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
+            cut_inner_radius: 0,
+            lead_out_b_value_bits: 0,
             spiral_family: SpiralFamily::Archimedean,
             record_profile: RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,
@@ -2252,15 +2301,24 @@ mod tests {
             "GBABC2400001"
         );
         assert!(normalize_isrc("GBABC240000").is_err(), "too short");
-        assert!(normalize_isrc("1BABC2400001").is_err(), "country is letters");
+        assert!(
+            normalize_isrc("1BABC2400001").is_err(),
+            "country is letters"
+        );
         assert!(normalize_isrc("GBABCX400001").is_err(), "year is digits");
     }
 
     #[test]
     fn isrcs_round_trip_in_track_order() {
         let isrcs = vec![
-            TrackIsrc { track_index: 3, code: "GBABC2400004".to_string() },
-            TrackIsrc { track_index: 0, code: "gb-abc-24-00001".to_string() },
+            TrackIsrc {
+                track_index: 3,
+                code: "GBABC2400004".to_string(),
+            },
+            TrackIsrc {
+                track_index: 0,
+                code: "gb-abc-24-00001".to_string(),
+            },
         ];
         let encoded = encode_isrc_segment(&isrcs).expect("encodes");
         let decoded = decode_isrc_segment(&encoded).expect("decodes");
@@ -2272,8 +2330,14 @@ mod tests {
     #[test]
     fn two_isrcs_cannot_claim_one_track() {
         let isrcs = vec![
-            TrackIsrc { track_index: 1, code: "GBABC2400001".to_string() },
-            TrackIsrc { track_index: 1, code: "GBABC2400002".to_string() },
+            TrackIsrc {
+                track_index: 1,
+                code: "GBABC2400001".to_string(),
+            },
+            TrackIsrc {
+                track_index: 1,
+                code: "GBABC2400002".to_string(),
+            },
         ];
         assert!(encode_isrc_segment(&isrcs).is_err());
     }
@@ -2281,7 +2345,10 @@ mod tests {
     #[test]
     fn barcodes_are_checked_by_their_last_digit() {
         // A real EAN-13 check digit, and the same barcode with it wrong.
-        assert_eq!(normalize_upc("5-060204-800016").expect("valid"), "5060204800016");
+        assert_eq!(
+            normalize_upc("5-060204-800016").expect("valid"),
+            "5060204800016"
+        );
         assert!(normalize_upc("5060204800017").is_err(), "check digit");
         assert!(normalize_upc("50602048000").is_err(), "wrong length");
     }

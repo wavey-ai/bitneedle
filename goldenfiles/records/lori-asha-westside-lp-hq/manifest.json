@@ -29,7 +29,7 @@
   },
   "id": "lori-asha-westside-lp-hq",
   "payload": {
-    "bytes": 255295,
+    "bytes": 255100,
     "kind": "ecdc",
     "path": "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.ecdc",
     "sha256": "e5a665a9f25032131e146099391d05c629b6e48f73ba699fea961240044c5d1e"

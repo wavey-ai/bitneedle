@@ -415,6 +415,13 @@ The header metadata band lies between the payload outer radius and the header
 outer radius, that is between radii 280 and 286. The trailer metadata band lies
 between the label radius and the payload inner radius.
 
+A cut need not carry its programme across the whole payload band. The radius
+at which the programme's groove stops is the cut inner radius, declared in the
+BRD1 prefix; it lies at or above the payload inner radius. Everything between
+the cut inner radius and the payload inner radius is the lead-out band, cut
+per Section 6.5. A record whose programme reaches the payload inner radius
+declares a cut inner radius of zero and has no lead-out band.
+
 ### 5.2 Registered Profile Codes
 
     +------+----------+
@@ -641,6 +648,36 @@ traced pixels strictly between its two radii.
 BRD1 is one logical byte stream written to the header first and then continued
 in the trailer.
 
+### 6.5 Lead-Out Spiral
+
+Where a record declares a non-zero cut inner radius, the groove continues past
+the programme as the lead-out: a single Archimedean spiral from the cut inner
+radius inward to the payload inner radius, at the pitch the prefix declares.
+
+The lead-out is a continuation of the payload groove, not a second spiral. It
+begins at the cut inner radius on the angle the payload walk of Section 6.1
+has reached by the time its radius crosses that value, so a traversal passes
+from the last payload pixel into the first lead-out pixel without a
+discontinuity. A decoder MUST obtain that angle by performing the payload walk
+itself, since a shaped vari-pitch radius is a running integral with no closed
+form and no other method reproduces the phase.
+
+Unlike the header and trailer bands, the lead-out band keeps the pixel on its
+outer edge: the walk begins on that radius, so there is nothing above it to
+discard, and rejecting it would drop the whole first turn to pixel rounding.
+Pixels at distance at most the payload inner radius are discarded.
+
+The declared value is a pitch, never a turn count. The turns a record has are
+whatever the remaining travel yields:
+
+    lead_out_turns = (cut_inner_radius - payload_inner_radius)
+                     / (2 * PI * lead_out_b_value)
+
+The lead-out carries no payload. It is nonetheless a carrier: its pixel
+sequence is ordered, addressable, and reproducible from the prefix alone, and
+a future revision may write into it without moving any pixel of the payload,
+the header, or the trailer.
+
 ## 7. BRD1 Record Descriptor
 
 ### 7.1 Pixel Encoding
@@ -661,23 +698,41 @@ BRD1 prefix.
     | Offset | Size | Type  | Meaning                 |
     +--------+------+-------+-------------------------+
     | 0      | 4    | bytes | ASCII BRD1              |
-    | 4      | 1    | u8    | version, value 2 or 3   |
+    | 4      | 1    | u8    | version, value 4 or 5   |
     | 5      | 2    | u16be | total descriptor length |
     | 7      | 2    | u16be | segment count           |
     | 9      | 2    | u16be | segment-stream length   |
     | 11     | 8    | f64be | main-groove b_value     |
+    | 19     | 2    | u16be | cut inner radius        |
+    | 21     | 8    | f64be | lead-out b_value        |
     +--------+------+-------+-------------------------+
 
-The total descriptor length includes the 19-byte prefix and MUST equal 19 plus
+The total descriptor length includes the 29-byte prefix and MUST equal 29 plus
 the segment-stream length. A decoder MUST parse exactly the declared segment
-count and MUST reject a descriptor whose parsed count differs. The b_value MUST
-decode finite and positive.
+count and MUST reject a descriptor whose parsed count differs. The main-groove
+b_value MUST decode finite and positive.
 
-An encoder writes version 2 for an Archimedean record and version 3 for a
+The cut inner radius is the radius at which the programme's groove stops, in
+the same pixel units as the profile geometry of Section 5.1. A value of zero
+declares that the programme reached the payload inner radius and that the
+record has no lead-out band; a decoder MUST then ignore the lead-out b_value.
+A non-zero value MUST be greater than the profile's payload inner radius and
+at most its payload outer radius, and the lead-out b_value MUST decode finite
+and positive.
+
+The lead-out b_value is a pitch and not a turn count, for the same reason the
+main groove declares one: the number of turns a lead-out has is a consequence
+of how much travel the programme left, and storing it would let the two
+disagree. Section 6.5 gives the derivation.
+
+An encoder writes version 4 for an Archimedean record and version 5 for a
 record carrying any other geometry family. A decoder MUST accept both versions
-and MUST reject any other value.
+and MUST reject any other value. Versions 2 and 3 named the same two families
+under a 19-octet prefix carrying no cut geometry; they are not produced by
+this revision and a decoder that accepts them MUST treat the cut inner radius
+as zero.
 
-The prefix layout is identical at both versions. Version 3 adds the segment
+The prefix layout is identical at both versions. Version 5 adds the segment
 types a non-Archimedean groove requires, which Section 7.11 defines.
 
 ### 7.3 Segment Framing
@@ -2069,14 +2124,17 @@ A conforming decoder performs:
 1. Decode exact RGBA.
 2. Select a record profile, or infer one per Section 15.1.
 3. Trace the header spiral.
-4. Recover the 19-byte BRD1 prefix.
-5. Parse the descriptor version, length, and b_value.
+4. Recover the 29-byte BRD1 prefix.
+5. Parse the descriptor version, length, b_value, cut inner radius, and
+   lead-out b_value.
 6. Trace the trailer spiral.
 7. Recover the complete BRD1 stream.
 8. Verify BRD1 framing, segment count, and CRC-32, skipping unknown segments.
 9. Read record profile, payload encoding, BRS1 length, and geometry family.
 10. Verify the deferred-group and signature-set rules of Sections 7.7 and 7.9.
-11. Trace the main payload spiral using b_value and the declared family.
+11. Trace the main payload spiral using b_value and the declared family. Where
+    the cut inner radius is non-zero, the payload occupies only the band above
+    it and the lead-out of Section 6.5 continues the groove below it.
 12. Recover exactly the declared number of BRS1 bytes using the selected
     payload encoding.
 13. Reject the record if the traced payload capacity cannot supply that
