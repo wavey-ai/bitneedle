@@ -31,7 +31,6 @@ export const renderPayloadCodesToPng: (a: number, b: number, c: number, d: numbe
 export const renderPayloadContainerToPng: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
 export const renderPayloadEntriesToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
 export const renderPayloadEntriesWithDescriptorToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
-export const renderPayloadEntriesWithDescriptorToPngFast: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
 export const renderRecordProgrammeToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
 export const resolvePackageBestFitCacheKeyJson: (a: number, b: number) => [number, number, number, number];
 export const resolvePackageImageEncodeCacheKeyJson: (a: number, b: number) => [number, number, number, number];

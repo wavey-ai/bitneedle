@@ -85,16 +85,6 @@ pub struct RenderOptions {
     pub gap_tone_lightness: Option<f64>,
     #[serde(default)]
     pub guide_outlines: bool,
-    /// Use a cheap, low-iteration spiral b-value fit instead of the exact
-    /// fit search. Intended for progressive/streaming previews (e.g. the
-    /// first small ECDC chunk of an in-progress encode), where a slightly
-    /// imprecise groove fit is an acceptable trade for staying well inside
-    /// the Worker CPU budget — the exact-fit search's iteration cost is
-    /// dominated by full-canvas geometry evaluation per iteration and is
-    /// unbounded in *wall time* even though it is bounded in iteration
-    /// count. Final/published renders must not set this.
-    #[serde(default)]
-    pub fast_fit: bool,
     /// How much of the payload band this cut lays its programme across,
     /// measured outward-in from the rim, `0 < fraction <= 1`. Defaults to
     /// `record_core::DEFAULT_GROOVE_SPAN_FRACTION`. The pitch is fitted so
@@ -270,6 +260,8 @@ pub struct RenderPayload {
     /// in over its nominal runs past this, inward, toward
     /// `payloadInnerRadius`.
     pub cut_inner_radius: i32,
+    /// Turns of lead-out the cut left behind, at the lathe's spiral feed.
+    pub lead_out_turns: f64,
     pub source_width: usize,
     pub source_height: usize,
     pub source_pixel_count: usize,
@@ -369,6 +361,7 @@ struct TransparentRenderResult {
     b_value: f64,
     groove_span_fraction: f64,
     cut_inner_radius: i32,
+    lead_out_turns: f64,
     source_width: usize,
     source_height: usize,
     source_pixel_count: usize,
@@ -476,6 +469,7 @@ pub fn render_payload_codes_to_png(
         b_value: result.b_value,
         groove_span_fraction: result.groove_span_fraction,
         cut_inner_radius: result.cut_inner_radius,
+        lead_out_turns: result.lead_out_turns,
         source_width: result.source_width,
         source_height: result.source_height,
         source_pixel_count: result.source_pixel_count,
@@ -939,6 +933,46 @@ fn build_trailer_spiral_indices(
         geometry.label_radius as f64,
         trailer_spiral_pitch_for_geometry(&geometry),
     )
+}
+
+/// The lead-out: the groove the head keeps cutting after the programme has
+/// finished, from where the cut stopped in to the descriptor's own band.
+///
+/// It is unmodulated, which is not an omission — a real lead-out carries no
+/// signal either. It is a groove because the cutter head was still down, and
+/// it is the reason a record has a wide silver run-out instead of a blank
+/// annulus. The pitch is the lathe's spiral feed, so the turn count is
+/// whatever the remaining travel yields rather than a number chosen here.
+fn build_lead_out_spiral_indices(
+    width: usize,
+    height: usize,
+    record_profile: &str,
+    cut_inner_radius: i32,
+) -> Result<Vec<usize>> {
+    let geometry = describe_record_profile(record_profile)?;
+    let band_inner = payload_inner_radius(&geometry) as f64;
+    let band_outer = cut_inner_radius as f64;
+
+    if band_outer <= band_inner + 1.0 {
+        return Ok(Vec::new());
+    }
+
+    build_band_spiral_indices(
+        width,
+        height,
+        band_outer,
+        band_inner,
+        record_core::lead_out_spiral_pitch(record_profile)?,
+    )
+}
+
+/// How many turns of lead-out a cut that stopped at `cut_inner_radius`
+/// leaves behind, at the lathe's spiral feed.
+fn lead_out_turns(record_profile: &str, cut_inner_radius: i32) -> Result<f64> {
+    let geometry = describe_record_profile(record_profile)?;
+    let travel = (cut_inner_radius - payload_inner_radius(&geometry)).max(0) as f64;
+
+    Ok(travel / record_core::lead_out_turn_separation_px(record_profile)?)
 }
 
 fn build_spiral_mask(
@@ -1545,7 +1579,6 @@ fn solve_cut(
     family: &SpiralFamily,
     record_profile: &str,
     requested_span_fraction: f64,
-    fast_fit: bool,
 ) -> Result<CutFit> {
     let geometry = describe_record_profile(record_profile)?;
     let mut span_fraction = record_core::validate_groove_span_fraction(requested_span_fraction)?
@@ -1553,31 +1586,15 @@ fn solve_cut(
         .min(1.0);
 
     loop {
-        let fit = if fast_fit {
-            find_exact_fit_b(
-                width,
-                height,
-                track_pixel_count,
-                family,
-                record_profile,
-                span_fraction,
-                None,
-                1.35,
-                6,
-                10,
-                0,
-            )?
-        } else {
-            find_exact_fit_with_coverage(
-                width,
-                height,
-                track_pixel_count,
-                family,
-                record_profile,
-                span_fraction,
-                None,
-            )?
-        };
+        let fit = find_exact_fit_with_coverage(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            None,
+        )?;
 
         let cleared =
             record_core::turn_separation_px(fit.b_value) >= record_core::MIN_TURN_SEPARATION_PX;
@@ -1756,6 +1773,7 @@ fn render_track_scanline_onto_transparent_spiral(
     track_data: &[u8],
     track_pixel_count: usize,
     record_profile: &str,
+    cut_inner_radius: i32,
     descriptor_input: &RecordDescriptorInput,
     guide_outlines: bool,
     dummy_spiral_regions: &[DummySpiralPixelRegion],
@@ -1766,6 +1784,13 @@ fn render_track_scanline_onto_transparent_spiral(
     if guide_outlines {
         paint_record_guides(&mut data, width, height, record_profile)?;
     }
+
+    // Cut before the programme so that a payload which overran its nominal
+    // paints over its own lead-out rather than the other way round — the
+    // groove that carries something always wins the pixel.
+    let lead_out_indices =
+        build_lead_out_spiral_indices(width, height, record_profile, cut_inner_radius)?;
+    paint_unused_metadata_groove(&mut data, &lead_out_indices, 0, 53, 0);
 
     let mut track_offset = 0usize;
     let mut carrier_pixels_written = 0usize;
@@ -2143,7 +2168,6 @@ fn render_payload_codes_to_transparent_spiral(
         &spiral_family,
         &normalized_profile,
         resolve_groove_span_fraction(render_options)?,
-        render_options.fast_fit,
     )?;
     let CutFit {
         span_fraction: groove_span_fraction,
@@ -2198,6 +2222,7 @@ fn render_payload_codes_to_transparent_spiral(
         &track.track_data,
         resolved_fit_track_pixel_count,
         &normalized_profile,
+        cut_inner_radius,
         &descriptor_input,
         render_options.guide_outlines,
         &dummy_spiral_regions,
@@ -2221,6 +2246,7 @@ fn render_payload_codes_to_transparent_spiral(
         b_value: fit.b_value,
         groove_span_fraction,
         cut_inner_radius,
+        lead_out_turns: lead_out_turns(&normalized_profile, cut_inner_radius)?,
         source_width: source_dimensions.0,
         source_height: source_dimensions.1,
         source_pixel_count: source_dimensions.2,
@@ -2644,6 +2670,64 @@ mod tests {
         assert!(
             short.b_value < full.b_value,
             "packing the same payload into less band must tighten the pitch",
+        );
+    }
+
+    /// The lead-out is a feed rate, not a turn count. A lathe's spiral lever
+    /// does not know how far it has to travel, so a programme that stops
+    /// early leaves more turns at the same spacing — never the same turns
+    /// spread thinner. Pin the count to the physical pitch so it can only
+    /// move if the feed does.
+    #[test]
+    fn the_lead_out_is_cut_at_the_lathes_spiral_feed() {
+        let px_per_mm = record_core::pixels_per_mm("lp").unwrap();
+        let separation = record_core::LEAD_OUT_PITCH_MM * px_per_mm;
+        assert!(
+            (record_core::lead_out_turn_separation_px("lp").unwrap() - separation).abs() < 1e-9,
+        );
+
+        let geometry = describe_record_profile("lp").unwrap();
+        let mut previous = f64::INFINITY;
+
+        for span in [0.25_f64, 0.33, 0.50, 0.67, 1.0] {
+            let cut = render_lp(
+                &rgb_code_block(60_000),
+                &format!(r#"{{"grooveSpanFraction":{span}}}"#),
+            );
+            let travel = (cut.cut_inner_radius - geometry.payload_inner_radius).max(0) as f64;
+
+            assert!(
+                (cut.lead_out_turns - travel / separation).abs() < 1e-6,
+                "span {span} reported {} turns over {travel} px of travel",
+                cut.lead_out_turns,
+            );
+            assert!(
+                cut.lead_out_turns < previous,
+                "a wider cut must leave less lead-out, not more: {span} gave {} after {previous}",
+                cut.lead_out_turns,
+            );
+            previous = cut.lead_out_turns;
+        }
+
+        assert_eq!(
+            previous, 0.0,
+            "a cut that reaches the label has no travel left"
+        );
+    }
+
+    /// A dubplate's lead-out is tens of turns, not a handful. One four-minute
+    /// track leaves about 66 mm of travel on a 12", which at the spiral feed
+    /// is some sixty turns — the broad ladder you can see on a real one. If
+    /// this ever falls to single figures the run-out has stopped being a
+    /// run-out and gone back to being three rings near the label.
+    #[test]
+    fn a_dubplate_sized_cut_leaves_a_lead_out_of_the_right_order() {
+        let cut = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
+
+        assert!(
+            (40.0..90.0).contains(&cut.lead_out_turns),
+            "expected a real dubplate's lead-out, got {} turns",
+            cut.lead_out_turns,
         );
     }
 

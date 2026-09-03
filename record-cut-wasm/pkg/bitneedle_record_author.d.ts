@@ -75,17 +75,6 @@ export function renderPayloadEntriesToPng(payload_entries: any, payload_containe
 export function renderPayloadEntriesWithDescriptorToPng(payload_entries: any, payload_descriptor_json: string, code_format: string, record_profile: string, duration_seconds: number, render_options_json: string): WasmRenderResult;
 
 /**
- * Public, always-shipped fast-preview render: same shape as
- * `renderPayloadEntriesWithDescriptorToPng`, but forces `fastFit` on
- * (see record-render's `RenderOptions::fast_fit`) regardless of what the
- * caller passes. Intended for progressive/streaming previews only — the
- * precise exact-fit spiral search (`record-render`'s `exact-fit` feature)
- * is compiled out of the public wasm build entirely, so this function
- * physically cannot run it even if asked to.
- */
-export function renderPayloadEntriesWithDescriptorToPngFast(payload_entries: any, payload_descriptor_json: string, code_format: string, record_profile: string, duration_seconds: number, render_options_json: string): WasmRenderResult;
-
-/**
  * Render headerless payload entries that reference one of several shared
  * `PayloadDescriptor`s (e.g. one ECDC descriptor for song audio plus one GAP
  * descriptor for inter-track silence placeholders), with an explicit track
@@ -145,7 +134,6 @@ export interface InitOutput {
     readonly renderPayloadContainerToPng: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly renderPayloadEntriesToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly renderPayloadEntriesWithDescriptorToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
-    readonly renderPayloadEntriesWithDescriptorToPngFast: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly renderRecordProgrammeToPng: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly resolvePackageBestFitCacheKeyJson: (a: number, b: number) => [number, number, number, number];
     readonly resolvePackageImageEncodeCacheKeyJson: (a: number, b: number) => [number, number, number, number];

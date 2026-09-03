@@ -757,38 +757,6 @@ export function renderPayloadEntriesWithDescriptorToPng(payload_entries, payload
 }
 
 /**
- * Public, always-shipped fast-preview render: same shape as
- * `renderPayloadEntriesWithDescriptorToPng`, but forces `fastFit` on
- * (see record-render's `RenderOptions::fast_fit`) regardless of what the
- * caller passes. Intended for progressive/streaming previews only — the
- * precise exact-fit spiral search (`record-render`'s `exact-fit` feature)
- * is compiled out of the public wasm build entirely, so this function
- * physically cannot run it even if asked to.
- * @param {any} payload_entries
- * @param {string} payload_descriptor_json
- * @param {string} code_format
- * @param {string} record_profile
- * @param {number} duration_seconds
- * @param {string} render_options_json
- * @returns {WasmRenderResult}
- */
-export function renderPayloadEntriesWithDescriptorToPngFast(payload_entries, payload_descriptor_json, code_format, record_profile, duration_seconds, render_options_json) {
-    const ptr0 = passStringToWasm0(payload_descriptor_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(code_format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(record_profile, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(render_options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.renderPayloadEntriesWithDescriptorToPngFast(payload_entries, ptr0, len0, ptr1, len1, ptr2, len2, duration_seconds, ptr3, len3);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return WasmRenderResult.__wrap(ret[0]);
-}
-
-/**
  * Render headerless payload entries that reference one of several shared
  * `PayloadDescriptor`s (e.g. one ECDC descriptor for song audio plus one GAP
  * descriptor for inter-track silence placeholders), with an explicit track

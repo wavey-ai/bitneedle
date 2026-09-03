@@ -6,7 +6,10 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = args.get(1).cloned().unwrap_or_else(|| "/tmp/cut-spans".into());
+    let out_dir = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "/tmp/cut-spans".into());
     let payload_path = args.get(2).cloned().expect("payload path required");
     let profile = args.get(3).cloned().unwrap_or_else(|| "lp".into());
 
@@ -22,7 +25,10 @@ fn main() -> Result<()> {
             100.0,
             Some(&options),
         )?;
-        let name = format!("{out_dir}/span-{:03}.png", (requested * 100.0).round() as i32);
+        let name = format!(
+            "{out_dir}/span-{:03}.png",
+            (requested * 100.0).round() as i32
+        );
         std::fs::write(&name, &out.png_bytes)?;
         println!(
             "{requested:.2}\t{:.3}\t{:.4}\t{:.2}\t{}\t{}",

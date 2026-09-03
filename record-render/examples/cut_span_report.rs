@@ -27,8 +27,8 @@ fn main() -> Result<()> {
         geometry.payload_outer_radius,
     );
     println!(
-        "{:>10} {:>10} {:>10} {:>12} {:>10} {:>8}",
-        "requested", "resolved", "b", "turn gap px", "ends at", "status"
+        "{:>10} {:>10} {:>10} {:>12} {:>10} {:>10} {:>8}",
+        "requested", "resolved", "b", "turn gap px", "ends at", "leadout", "status"
     );
 
     for requested in [0.25_f64, 0.30, 0.33, 0.40, 0.50, 0.67, 1.0] {
@@ -43,11 +43,12 @@ fn main() -> Result<()> {
             Ok(out) => {
                 let p = out.payload;
                 println!(
-                    "{requested:>10.2} {:>10.3} {:>10.4} {:>12.2} {:>10} {:>8}",
+                    "{requested:>10.2} {:>10.3} {:>10.4} {:>12.2} {:>10} {:>10.1} {:>8}",
                     p.groove_span_fraction,
                     p.b_value,
                     record_core::turn_separation_px(p.b_value),
                     p.cut_inner_radius,
+                    p.lead_out_turns,
                     p.status,
                 );
             }

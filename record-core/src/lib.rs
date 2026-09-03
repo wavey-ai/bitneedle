@@ -44,6 +44,23 @@ pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
 /// This is the density ceiling. [`MIN_B_VALUE`] is only a divide-by-zero
 /// guard and says nothing about whether a cut is legible.
 pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
+
+/// The pitch a cutting lathe feeds the head at through the lead-out, in
+/// millimetres per turn.
+///
+/// This is the spiral lever's own feed rate, and it is a *rate*, not a turn
+/// count: the head does not know how far it has to travel, so a programme
+/// that ends early simply yields more turns at the same spacing. Music sits
+/// at roughly 0.1–0.2 mm per turn and the spiral feed around 1 mm, so a
+/// lead-out reads five to ten times coarser than the programme it follows.
+///
+/// The turn counts that fall out of it are the ones a real disc has. A 12"
+/// LP whose programme ends near 127 mm diameter, with its lock groove at
+/// 107 mm, has 10 mm of travel left — about ten turns. A dubplate carrying
+/// one four-minute track ends near 239 mm and has 66 mm left — about sixty
+/// turns, which is the broad ladder of concentric lines on any clip of one
+/// spinning.
+pub const LEAD_OUT_PITCH_MM: f64 = 1.0;
 pub const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
 pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "ten", "lp"];
@@ -131,6 +148,7 @@ struct RecordProfileDef {
     outer_radius: i32,
     outer_rim_thickness: i32,
     lead_in_band_thickness: i32,
+    pixels_per_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -869,6 +887,7 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
     };
 
     Ok(RecordProfileDef {
+        pixels_per_mm: physical.outer_radius_px as f64 / (physical.finished_diameter_mm / 2.0),
         name: physical.name,
         spindle_hole_radius,
         dink_radius,
@@ -971,6 +990,27 @@ pub fn spiral_b_value_for_visible_turns(record_profile: &str, turns: f64) -> Res
             / (2.0 * PI * turns))
             .max(MIN_B_VALUE),
     )
+}
+
+/// Rendered pixels per millimetre of the finished disc, for this profile.
+pub fn pixels_per_mm(record_profile: &str) -> Result<f64> {
+    Ok(record_profile_def(record_profile)?.pixels_per_mm)
+}
+
+/// Centre-to-centre distance between lead-out turns, in rendered pixels.
+///
+/// Derived from [`LEAD_OUT_PITCH_MM`] and the profile's own scale, so the
+/// lead-out is cut at true physical pitch even though the programme groove
+/// cannot be — a real music groove is a third of a pixel at this raster, and
+/// the payload spiral is some fifteen times coarser than one. The lead-out
+/// is the one band of the record rendered at life size.
+pub fn lead_out_turn_separation_px(record_profile: &str) -> Result<f64> {
+    Ok(LEAD_OUT_PITCH_MM * pixels_per_mm(record_profile)?)
+}
+
+/// The lead-out's pitch as a spiral `b`, for [`trace_record_spiral`].
+pub fn lead_out_spiral_pitch(record_profile: &str) -> Result<f64> {
+    Ok((lead_out_turn_separation_px(record_profile)? / (2.0 * PI)).max(MIN_B_VALUE))
 }
 
 pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {

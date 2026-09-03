@@ -741,50 +741,6 @@ pub fn wasm_render_payload_entries_to_png(
     .map_err(to_js_error)
 }
 
-/// Public, always-shipped fast-preview render: same shape as
-/// `renderPayloadEntriesWithDescriptorToPng`, but forces `fastFit` on
-/// (see record-render's `RenderOptions::fast_fit`) regardless of what the
-/// caller passes. Intended for progressive/streaming previews only — the
-/// precise exact-fit spiral search (`record-render`'s `exact-fit` feature)
-/// is compiled out of the public wasm build entirely, so this function
-/// physically cannot run it even if asked to.
-#[wasm_bindgen(js_name = renderPayloadEntriesWithDescriptorToPngFast)]
-pub fn wasm_render_payload_entries_with_descriptor_to_png_fast(
-    payload_entries: &JsValue,
-    payload_descriptor_json: &str,
-    code_format: &str,
-    record_profile: &str,
-    duration_seconds: f64,
-    render_options_json: &str,
-) -> Result<WasmRenderResult, JsValue> {
-    let entries = js_payload_entries(payload_entries).map_err(to_js_error)?;
-    let forced_render_options_json =
-        force_fast_fit_render_options_json(render_options_json).map_err(to_js_error)?;
-    render_payload_entries_with_descriptor_to_png(
-        entries,
-        payload_descriptor_json,
-        code_format,
-        record_profile,
-        duration_seconds,
-        &forced_render_options_json,
-    )
-    .map_err(to_js_error)
-}
-
-fn force_fast_fit_render_options_json(render_options_json: &str) -> Result<String> {
-    let mut value: serde_json::Value = match render_options_json.trim() {
-        "" => json!({}),
-        raw => serde_json::from_str(raw).context("render options JSON is invalid")?,
-    };
-    if !value.is_object() {
-        value = json!({});
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.insert("fastFit".to_string(), serde_json::Value::Bool(true));
-    }
-    serde_json::to_string(&value).context("failed to serialize forced-fast-fit render options")
-}
-
 /// Render headerless payload entries that all share one `PayloadDescriptor`
 /// (provided as JSON). The descriptor is stored once in the BRS1 metadata and
 /// every entry references descriptor index 0; the RGB groove stores only the
@@ -1083,26 +1039,6 @@ pub fn render_payload_entries_with_descriptor_to_png_native(
         record_profile,
         duration_seconds,
         render_options_json,
-    )
-    .map(Into::into)
-}
-
-pub fn render_payload_entries_with_descriptor_to_png_fast_native(
-    payload_entries: Vec<Vec<u8>>,
-    payload_descriptor_json: &str,
-    code_format: &str,
-    record_profile: &str,
-    duration_seconds: f64,
-    render_options_json: &str,
-) -> Result<NativeRenderResult> {
-    let forced_render_options_json = force_fast_fit_render_options_json(render_options_json)?;
-    render_payload_entries_with_descriptor_to_png(
-        payload_entries,
-        payload_descriptor_json,
-        code_format,
-        record_profile,
-        duration_seconds,
-        &forced_render_options_json,
     )
     .map(Into::into)
 }
@@ -2446,7 +2382,7 @@ mod tests {
             142, 224, 150, 228, 184, 207, 69, 0,
         ];
         let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,34,109,34,58,34,101,110,99,111,100,101,99,95,52,56,107,104,122,34,44,34,97,108,34,58,54,52,48,48,48,44,34,110,99,34,58,56,44,34,108,109,34,58,116,114,117,101,44,34,102,112,34,58,56,49,57,50,44,34,109,114,34,58,50,44,34,97,99,118,34,58,50,44,34,116,97,117,34,58,49,46,48,44,34,108,109,104,34,58,34,98,56,99,50,49,100,54,54,53,48,98,54,50,97,48,98,56,99,100,50,49,48,99,54,101,54,50,52,100,102,98,98,51,48,99,51,97,51,57,56,57,52,54,54,53,52,52,98,49,102,53,101,49,100,102,57,54,51,101,99,97,53,49,55,34,44,34,102,108,34,58,50,48,51,125]}"##;
-        let render_options_json = r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}],"fastFit":true}"##;
+        let render_options_json = r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}]}"##;
 
         let started = std::time::Instant::now();
         let result = render_payload_entries_with_descriptor_to_png(
@@ -2482,7 +2418,7 @@ mod tests {
             "rgb",
             "single45",
             211.33060416666666,
-            r##"{"fastFit":true,"fitTrackPixelCount":12000}"##,
+            r##"{"fitTrackPixelCount":12000}"##,
         )
         .expect("progressive fast-fit render should accept a fixed track-pixel target");
         let payload: serde_json::Value =
@@ -2504,7 +2440,7 @@ mod tests {
             "rgb",
             "single45",
             211.33060416666666,
-            r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}],"fastFit":true}"##,
+            r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}]}"##,
         )
         .expect("fixture record should render");
         let original = record_decode::decode_record_png_to_chunk_stream_for_profile(
@@ -2903,7 +2839,7 @@ mod tests {
             142, 224, 150, 228, 184, 207, 69, 0,
         ];
         let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,34,109,34,58,34,101,110,99,111,100,101,99,95,52,56,107,104,122,34,44,34,97,108,34,58,54,52,48,48,48,44,34,110,99,34,58,56,44,34,108,109,34,58,116,114,117,101,44,34,102,112,34,58,56,49,57,50,44,34,109,114,34,58,50,44,34,97,99,118,34,58,50,44,34,116,97,117,34,58,49,46,48,44,34,108,109,104,34,58,34,98,56,99,50,49,100,54,54,53,48,98,54,50,97,48,98,56,99,100,50,49,48,99,54,101,54,50,52,100,102,98,98,51,48,99,51,97,51,57,56,57,52,54,54,53,52,52,98,49,102,53,101,49,100,102,57,54,51,101,99,97,53,49,55,34,44,34,102,108,34,58,50,48,51,125]}"##;
-        let render_options_json = r##"{"payloadEncoding":"rgb","headerTitle":"new wonder inst mix ab oz","headerArtist":null,"headerReleaseId":"rel_01KWHTPBQA2ESWCTB45VZ4YTP9","cacheEncryptionSecretBase64url":"O9hHI7Rr0C2qvgh9Cuq6ifasY_-W0l8xksztWWnwoDo","headerGenerationVersion":"20260606a","guideOutlines":false,"trackListing":[{"number":1,"title":"new wonder inst mix ab oz","durationSeconds":0,"startSeconds":0,"endSeconds":0,"source":"cut-source"}],"dummySpiralRegions":[],"headerArbitraryMetadata":"{\"trackListing\":[{\"number\":1,\"title\":\"new wonder inst mix ab oz\",\"durationSeconds\":0,\"startSeconds\":0,\"endSeconds\":0,\"source\":\"cut-source\"}]}","grooveToneColor":"#1E0B2E","fastFit":true}"##;
+        let render_options_json = r##"{"payloadEncoding":"rgb","headerTitle":"new wonder inst mix ab oz","headerArtist":null,"headerReleaseId":"rel_01KWHTPBQA2ESWCTB45VZ4YTP9","cacheEncryptionSecretBase64url":"O9hHI7Rr0C2qvgh9Cuq6ifasY_-W0l8xksztWWnwoDo","headerGenerationVersion":"20260606a","guideOutlines":false,"trackListing":[{"number":1,"title":"new wonder inst mix ab oz","durationSeconds":0,"startSeconds":0,"endSeconds":0,"source":"cut-source"}],"dummySpiralRegions":[],"headerArbitraryMetadata":"{\"trackListing\":[{\"number\":1,\"title\":\"new wonder inst mix ab oz\",\"durationSeconds\":0,\"startSeconds\":0,\"endSeconds\":0,\"source\":\"cut-source\"}]}","grooveToneColor":"#1E0B2E"}"##;
 
         let result = render_payload_entries_with_descriptor_to_png_native(
             vec![payload_entries],
