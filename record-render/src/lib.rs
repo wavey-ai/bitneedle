@@ -262,6 +262,9 @@ pub struct RenderPayload {
     pub cut_inner_radius: i32,
     /// Turns of lead-out the cut left behind, at the lathe's spiral feed.
     pub lead_out_turns: f64,
+    /// Addressable pixels in the lead-out carrier. Empty today; addressable
+    /// regardless, which is the point.
+    pub lead_out_pixel_capacity: usize,
     pub source_width: usize,
     pub source_height: usize,
     pub source_pixel_count: usize,
@@ -326,6 +329,14 @@ struct TransparentRender {
     pixels_remaining: isize,
     unused_spiral_pixels: usize,
     overflow_track_pixels: usize,
+    /// Addressable pixels in the lead-out. It carries nothing today, but it
+    /// is a carrier: the indices are ordered, continuous with the programme
+    /// groove, and reproducible from the same figures a decoder already
+    /// has, so anything that wants to write there can.
+    lead_out_pixel_capacity: usize,
+    /// The lead-out's first and last pixel, so a traversal can be checked
+    /// to join the programme rather than restart inside it.
+    lead_out_bounds: Option<(usize, usize)>,
     descriptor: RecordDescriptor,
 }
 
@@ -470,6 +481,7 @@ pub fn render_payload_codes_to_png(
         groove_span_fraction: result.groove_span_fraction,
         cut_inner_radius: result.cut_inner_radius,
         lead_out_turns: result.lead_out_turns,
+        lead_out_pixel_capacity: result.rendered.lead_out_pixel_capacity,
         source_width: result.source_width,
         source_height: result.source_height,
         source_pixel_count: result.source_pixel_count,
@@ -865,6 +877,13 @@ fn build_band_spiral_indices(
     band_outer_radius: f64,
     band_inner_radius: f64,
     band_pitch: f64,
+    start_angle: f64,
+    // The header and trailer sit *inside* their bands, so their outer edge is
+    // exclusive. The lead-out instead begins exactly on its outer edge — it
+    // is the same groove continuing — and dropping that first turn would put
+    // its first addressable pixel most of a revolution away from the
+    // programme's last.
+    include_outer_edge: bool,
 ) -> Result<Vec<usize>> {
     let (occupied, traced_pixel_indices, center_x, center_y) = trace_record_spiral(
         width,
@@ -875,7 +894,7 @@ fn build_band_spiral_indices(
         // payload's family.
         &SpiralFamily::Archimedean,
         None,
-        DEFAULT_START_ANGLE,
+        start_angle,
         1.0,
         true,
         band_outer_radius,
@@ -895,7 +914,13 @@ fn build_band_spiral_indices(
         let dy = y as f64 - center_y;
         let distance = (dx * dx + dy * dy).sqrt();
 
-        if distance > band_inner_radius && distance < band_outer_radius {
+        // The trace begins on the outer edge, so for the lead-out there is
+        // nothing above it to exclude — and testing the radius would drop the
+        // whole first turn to rounding, putting the carrier's first pixel a
+        // third of a revolution away from the programme's last.
+        let within_outer = include_outer_edge || distance < band_outer_radius;
+
+        if distance > band_inner_radius && within_outer {
             ordered.push(pixel_index);
         }
     }
@@ -916,6 +941,8 @@ fn build_header_spiral_indices(
         header_outer_radius(&geometry) as f64,
         payload_outer_radius(&geometry) as f64,
         header_spiral_pitch_for_geometry(&geometry),
+        DEFAULT_START_ANGLE,
+        false,
     )
 }
 
@@ -932,6 +959,8 @@ fn build_trailer_spiral_indices(
         payload_inner_radius(&geometry) as f64,
         geometry.label_radius as f64,
         trailer_spiral_pitch_for_geometry(&geometry),
+        DEFAULT_START_ANGLE,
+        false,
     )
 }
 
@@ -943,9 +972,60 @@ fn build_trailer_spiral_indices(
 /// it is the reason a record has a wide silver run-out instead of a blank
 /// annulus. The pitch is the lathe's spiral feed, so the turn count is
 /// whatever the remaining travel yields rather than a number chosen here.
+/// The angle the programme's groove has reached by the time it crosses
+/// `target_radius`, walked with the same arithmetic the mask is traced with.
+///
+/// This is what makes the lead-out a continuation rather than a second
+/// spiral that happens to sit inside the first. The vari-pitch radius is a
+/// running integral with no closed form, so the only way to land on the
+/// same phase is to take the same steps.
+fn groove_angle_at_radius(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    target_radius: f64,
+) -> Result<f64> {
+    let geometry = describe_record_profile(record_profile)?;
+    let record_radius = width.min(height) as f64 / 2.0;
+    let resolved_pitch = resolve_pitch(b_value, None)?;
+    let bounded_outer_radius = (payload_outer_radius(&geometry) as f64).min(record_radius - 1.0);
+    let vari = vari_pitch_params(family, (bounded_outer_radius / resolved_pitch).max(0.0));
+    let mut swept_theta = 0.0_f64;
+    let mut theta_effective = 0.0_f64;
+    let mut angle = DEFAULT_START_ANGLE;
+    let mut radius = bounded_outer_radius;
+
+    while radius > target_radius && radius >= 0.0 {
+        let (local_pitch, factor) = match &vari {
+            None => (resolved_pitch, 1.0),
+            Some(params) => {
+                let factor = params.pitch_factor(swept_theta);
+                (resolved_pitch * factor, factor)
+            }
+        };
+        let theta_step = 1.0
+            / (radius * radius + local_pitch * local_pitch)
+                .sqrt()
+                .max(1e-6);
+        swept_theta += theta_step;
+        theta_effective += factor * theta_step;
+        angle = DEFAULT_START_ANGLE - swept_theta;
+        radius = match &vari {
+            None => bounded_outer_radius - resolved_pitch * swept_theta,
+            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
+        };
+    }
+
+    Ok(angle)
+}
+
 fn build_lead_out_spiral_indices(
     width: usize,
     height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
     cut_inner_radius: i32,
 ) -> Result<Vec<usize>> {
@@ -957,12 +1037,21 @@ fn build_lead_out_spiral_indices(
         return Ok(Vec::new());
     }
 
+    // Pick the groove up where the programme put it down. Without this the
+    // lead-out is a second spiral that happens to sit inside the first, and
+    // nothing can walk from the last programme pixel into the first lead-out
+    // one — which is the whole point of it being a carrier.
+    let start_angle =
+        groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
+
     build_band_spiral_indices(
         width,
         height,
         band_outer,
         band_inner,
         record_core::lead_out_spiral_pitch(record_profile)?,
+        start_angle,
+        true,
     )
 }
 
@@ -1788,8 +1877,19 @@ fn render_track_scanline_onto_transparent_spiral(
     // Cut before the programme so that a payload which overran its nominal
     // paints over its own lead-out rather than the other way round — the
     // groove that carries something always wins the pixel.
-    let lead_out_indices =
-        build_lead_out_spiral_indices(width, height, record_profile, cut_inner_radius)?;
+    let lead_out_indices = build_lead_out_spiral_indices(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+    )?;
+    let lead_out_pixel_capacity = lead_out_indices.len();
+    let lead_out_bounds = lead_out_indices
+        .first()
+        .zip(lead_out_indices.last())
+        .map(|(first, last)| (*first, *last));
     paint_unused_metadata_groove(&mut data, &lead_out_indices, 0, 53, 0);
 
     let mut track_offset = 0usize;
@@ -1861,6 +1961,8 @@ fn render_track_scanline_onto_transparent_spiral(
             .saturating_sub(track_pixel_count),
         overflow_track_pixels: track_pixel_count
             .saturating_sub(spiral_mask.addressable_pixel_count),
+        lead_out_pixel_capacity,
+        lead_out_bounds,
         descriptor,
     })
 }
@@ -2728,6 +2830,119 @@ mod tests {
             (40.0..90.0).contains(&cut.lead_out_turns),
             "expected a real dubplate's lead-out, got {} turns",
             cut.lead_out_turns,
+        );
+    }
+
+    fn radius_of(pixel_index: usize) -> f64 {
+        let cx = RECORD_WIDTH as f64 / 2.0;
+        let cy = RECORD_HEIGHT as f64 / 2.0;
+        let x = (pixel_index % RECORD_WIDTH) as f64 - cx;
+        let y = (pixel_index / RECORD_WIDTH) as f64 - cy;
+        (x * x + y * y).sqrt()
+    }
+
+    fn angle_of(pixel_index: usize) -> f64 {
+        let cx = RECORD_WIDTH as f64 / 2.0;
+        let cy = RECORD_HEIGHT as f64 / 2.0;
+        let x = (pixel_index % RECORD_WIDTH) as f64 - cx;
+        let y = cy - (pixel_index / RECORD_WIDTH) as f64;
+        y.atan2(x)
+    }
+
+    fn wrapped_angle(angle: f64) -> f64 {
+        angle.rem_euclid(std::f64::consts::TAU)
+    }
+
+    fn angle_difference(a: f64, b: f64) -> f64 {
+        let raw = (a - b).rem_euclid(std::f64::consts::TAU);
+        if raw > std::f64::consts::PI {
+            raw - std::f64::consts::TAU
+        } else {
+            raw
+        }
+    }
+
+    /// One groove, rim to label. The lead-out picks the head up exactly
+    /// where the programme put it down — same radius, same angle, new feed —
+    /// so a traversal walks straight out of the payload and into the
+    /// lead-out. Without the phase carried across it restarts at the top of
+    /// the disc and the join is most of a revolution.
+    ///
+    /// Measured against the analytic crossing rather than against a
+    /// neighbouring mask pixel: pixel radii quantise to about ±0.7 px, so
+    /// "the last pixel above the transition" can sit a fifth of a turn from
+    /// where the groove actually crosses.
+    #[test]
+    fn the_lead_out_picks_the_groove_up_where_the_programme_left_it() {
+        for span in [0.25_f64, 0.33, 0.50] {
+            let cut = render_lp(
+                &rgb_code_block(60_000),
+                &format!(r#"{{"grooveSpanFraction":{span}}}"#),
+            );
+
+            let crossing = groove_angle_at_radius(
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+                cut.b_value,
+                &SpiralFamily::Archimedean,
+                "lp",
+                cut.cut_inner_radius as f64,
+            )
+            .unwrap();
+
+            let lead_out = build_lead_out_spiral_indices(
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+                cut.b_value,
+                &SpiralFamily::Archimedean,
+                "lp",
+                cut.cut_inner_radius,
+            )
+            .unwrap();
+            let first = *lead_out.first().expect("a short cut has a lead-out");
+
+            let radius = radius_of(first);
+            assert!(
+                (radius - cut.cut_inner_radius as f64).abs() <= 1.5,
+                "span {span}: the lead-out starts at r={radius:.1}, not on the transition at {}",
+                cut.cut_inner_radius,
+            );
+
+            let expected = wrapped_angle(crossing);
+            let actual = wrapped_angle(angle_of(first));
+            let drift = angle_difference(expected, actual).to_degrees();
+            assert!(
+                drift.abs() <= 2.0,
+                "span {span}: the lead-out starts {drift:.1} degrees off the programme's crossing",
+            );
+        }
+    }
+
+    /// Empty is not the same as absent. The lead-out is a carrier whose
+    /// addresses exist whether or not anything has been written into them,
+    /// and its capacity grows as the programme leaves more room.
+    #[test]
+    fn the_lead_out_is_an_addressable_carrier_even_while_it_holds_nothing() {
+        let mut previous = 0usize;
+
+        for span in [0.67_f64, 0.50, 0.33, 0.25] {
+            let cut = render_lp(
+                &rgb_code_block(60_000),
+                &format!(r#"{{"grooveSpanFraction":{span}}}"#),
+            );
+
+            assert!(
+                cut.lead_out_pixel_capacity > previous,
+                "a shorter cut must leave more lead-out to address: span {span} gave {} after {previous}",
+                cut.lead_out_pixel_capacity,
+            );
+            previous = cut.lead_out_pixel_capacity;
+        }
+
+        let full = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":1.0}"#);
+        assert_eq!(
+            full.lead_out_pixel_capacity, 0,
+            "a cut that reaches the label leaves no lead-out to carry anything",
         );
     }
 
