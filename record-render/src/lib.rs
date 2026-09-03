@@ -9,22 +9,21 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
-use record_groove::{
-    adaptive_gap_tone_lightness, lighten_base_oklch, oklch_lightness,
-    square_side_for_pixel_count, ToneOrdering as CarrierToneOrdering, ToneSpan, TonedConfig,
-    TonedPalette, TonedRender,
-};
 use record_core::{
     describe_record_profile, normalize_record_profile_name, vari_pitch_params,
     RecordProfileGeometry, SpiralFamily, VariPitchParams,
 };
+use record_groove::{
+    adaptive_gap_tone_lightness, lighten_base_oklch, oklch_lightness, square_side_for_pixel_count,
+    ToneOrdering as CarrierToneOrdering, ToneSpan, TonedConfig, TonedPalette, TonedRender,
+};
 pub mod metadata_groove;
 
+use record_cut::descriptor::{paint_metadata_bytes_as_grayscale, RecordDescriptorInput};
 use record_descriptor::{
     RecordDescriptor, SignedReleaseReference, ToneOrdering, ToneSpanDescriptor,
     SIGNED_RELEASE_REFERENCE_HASH_LENGTH, SIGNED_RELEASE_REFERENCE_VERSION,
 };
-use record_cut::descriptor::{paint_metadata_bytes_as_grayscale, RecordDescriptorInput};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 
@@ -96,6 +95,13 @@ pub struct RenderOptions {
     /// count. Final/published renders must not set this.
     #[serde(default)]
     pub fast_fit: bool,
+    /// How much of the payload band this cut lays its programme across,
+    /// measured outward-in from the rim, `0 < fraction <= 1`. Defaults to
+    /// `record_core::DEFAULT_GROOVE_SPAN_FRACTION`. The pitch is fitted so
+    /// the nominal fills exactly this much of the band; whatever is left
+    /// inside it stays deadwax, the way a lathe leaves a side it did not
+    /// fill. `1.0` is the historical cut that always ran to the label.
+    pub groove_span_fraction: Option<f64>,
     /// Groove geometry family: `"archimedean"` (the default) or
     /// `"variPitch"`. Vari-pitch is the house v3 cut — the lathe's
     /// vari-pitch head, spacing breathing in slow bands across the disc.
@@ -257,6 +263,13 @@ pub struct RenderPayload {
     pub spiral_fit_mode: Option<String>,
     pub exact: bool,
     pub b_value: f64,
+    /// The span the pitch was actually fitted against, after any widening
+    /// forced by the density floor.
+    pub groove_span_fraction: f64,
+    /// The radius the nominal was laid out to stop on. A payload that comes
+    /// in over its nominal runs past this, inward, toward
+    /// `payloadInnerRadius`.
+    pub cut_inner_radius: i32,
     pub source_width: usize,
     pub source_height: usize,
     pub source_pixel_count: usize,
@@ -354,6 +367,8 @@ struct SpiralTrackCapacity {
 struct TransparentRenderResult {
     exact: bool,
     b_value: f64,
+    groove_span_fraction: f64,
+    cut_inner_radius: i32,
     source_width: usize,
     source_height: usize,
     source_pixel_count: usize,
@@ -459,6 +474,8 @@ pub fn render_payload_codes_to_png(
         spiral_fit_mode: None,
         exact: result.exact,
         b_value: result.b_value,
+        groove_span_fraction: result.groove_span_fraction,
+        cut_inner_radius: result.cut_inner_radius,
         source_width: result.source_width,
         source_height: result.source_height,
         source_pixel_count: result.source_pixel_count,
@@ -740,6 +757,13 @@ fn payload_inner_radius(geometry: &RecordProfileGeometry) -> i32 {
     geometry.payload_inner_radius
 }
 
+/// The radius this cut's pitch is fitted against. Only the fit sees it:
+/// the painting mask still spans the whole band, so a payload that overruns
+/// its nominal runs on inward instead of being truncated.
+fn cut_inner_radius(geometry: &RecordProfileGeometry, span_fraction: f64) -> Result<i32> {
+    record_core::cut_inner_radius_from_geometry(geometry, span_fraction)
+}
+
 fn header_outer_radius(geometry: &RecordProfileGeometry) -> i32 {
     (geometry.outer_radius - HEADER_SPIRAL_OUTER_EDGE_INSET).max(1)
 }
@@ -984,10 +1008,11 @@ fn count_spiral_mask_pixels(
     b_value: f64,
     family: &SpiralFamily,
     record_profile: &str,
+    span_fraction: f64,
 ) -> Result<usize> {
     let geometry = describe_record_profile(record_profile)?;
     let payload_outer = payload_outer_radius(&geometry);
-    let payload_inner = payload_inner_radius(&geometry);
+    let payload_inner = cut_inner_radius(&geometry, span_fraction)?;
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let record_radius = width.min(height) as f64 / 2.0;
@@ -1093,9 +1118,13 @@ fn estimate_spiral_track_capacity(
     })
 }
 
-fn find_b_for_partial_arc(track_pixel_count: usize, record_profile: &str) -> Result<f64> {
+fn find_b_for_partial_arc(
+    track_pixel_count: usize,
+    record_profile: &str,
+    span_fraction: f64,
+) -> Result<f64> {
     let geometry = describe_record_profile(record_profile)?;
-    let inner_radius = payload_inner_radius(&geometry) as f64;
+    let inner_radius = cut_inner_radius(&geometry, span_fraction)? as f64;
     let outer = payload_outer_radius(&geometry) as f64;
     let annulus_area = (outer * outer - inner_radius * inner_radius).max(1.0);
 
@@ -1108,10 +1137,17 @@ fn evaluate_spiral_fit(
     track_pixel_count: usize,
     family: &SpiralFamily,
     record_profile: &str,
+    span_fraction: f64,
     b_value: f64,
 ) -> Result<FitCandidate> {
-    let addressable_pixel_count =
-        count_spiral_mask_pixels(width, height, b_value, family, record_profile)?;
+    let addressable_pixel_count = count_spiral_mask_pixels(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        span_fraction,
+    )?;
 
     Ok(FitCandidate {
         b_value,
@@ -1127,14 +1163,27 @@ fn find_optimal_b(
     track_pixel_count: usize,
     family: &SpiralFamily,
     record_profile: &str,
+    span_fraction: f64,
     initial_b: Option<f64>,
     growth_factor: f64,
     max_expansions: usize,
     max_binary_iterations: usize,
 ) -> Result<FitCandidate> {
-    let start_b = initial_b.unwrap_or(find_b_for_partial_arc(track_pixel_count, record_profile)?);
+    let start_b = initial_b.unwrap_or(find_b_for_partial_arc(
+        track_pixel_count,
+        record_profile,
+        span_fraction,
+    )?);
     let addressable_capacity = count_addressable_capacity(width, height, record_profile)?;
-    let start = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,start_b)?;
+    let start = evaluate_spiral_fit(
+        width,
+        height,
+        track_pixel_count,
+        family,
+        record_profile,
+        span_fraction,
+        start_b,
+    )?;
     let mut best = start.clone();
 
     let mut update_best = |candidate: &FitCandidate| {
@@ -1164,8 +1213,24 @@ fn find_optimal_b(
     for _ in 0..max_expansions {
         low_b = (low_b / growth_factor).max(MIN_B_VALUE);
         high_b *= growth_factor;
-        low = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,low_b)?;
-        high = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,high_b)?;
+        low = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            low_b,
+        )?;
+        high = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            high_b,
+        )?;
         update_best(&low);
         update_best(&high);
 
@@ -1200,7 +1265,15 @@ fn find_optimal_b(
 
     for _ in 0..max_binary_iterations {
         let mid_b = (left_b + right_b) / 2.0;
-        let mid = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,mid_b)?;
+        let mid = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            mid_b,
+        )?;
         update_best(&mid);
 
         if mid.pixels_remaining == 0 {
@@ -1231,6 +1304,7 @@ fn find_exact_fit_b(
     track_pixel_count: usize,
     family: &SpiralFamily,
     record_profile: &str,
+    span_fraction: f64,
     initial_b: Option<f64>,
     growth_factor: f64,
     max_expansions: usize,
@@ -1244,6 +1318,7 @@ fn find_exact_fit_b(
             track_pixel_count,
             family,
             record_profile,
+            span_fraction,
             None,
             growth_factor,
             max_expansions,
@@ -1252,7 +1327,15 @@ fn find_exact_fit_b(
         .b_value,
     );
 
-    let mut best = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,seed_b)?;
+    let mut best = evaluate_spiral_fit(
+        width,
+        height,
+        track_pixel_count,
+        family,
+        record_profile,
+        span_fraction,
+        seed_b,
+    )?;
     let mut low_b = seed_b;
     let mut high_b = seed_b;
     let mut low = best.clone();
@@ -1282,8 +1365,24 @@ fn find_exact_fit_b(
     for _ in 0..max_expansions {
         low_b = (low_b / growth_factor).max(MIN_B_VALUE);
         high_b *= growth_factor;
-        low = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,low_b)?;
-        high = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,high_b)?;
+        low = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            low_b,
+        )?;
+        high = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            high_b,
+        )?;
         update_best(&low);
         update_best(&high);
 
@@ -1325,7 +1424,15 @@ fn find_exact_fit_b(
 
     for _ in 0..max_binary_iterations {
         let mid_b = (left_b + right_b) / 2.0;
-        let mid = evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,mid_b)?;
+        let mid = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            span_fraction,
+            mid_b,
+        )?;
         update_best(&mid);
 
         if mid.pixels_remaining == 0 {
@@ -1352,8 +1459,15 @@ fn find_exact_fit_b(
     if sweep_step > 0.0 {
         for i in 0..=final_sweep_steps {
             let b_value = left_b + sweep_step * i as f64;
-            let rendered =
-                evaluate_spiral_fit(width, height, track_pixel_count, family, record_profile,b_value)?;
+            let rendered = evaluate_spiral_fit(
+                width,
+                height,
+                track_pixel_count,
+                family,
+                record_profile,
+                span_fraction,
+                b_value,
+            )?;
             update_best(&rendered);
 
             if rendered.pixels_remaining == 0 {
@@ -1373,12 +1487,124 @@ fn find_exact_fit_b(
     })
 }
 
+/// How much wider the cut reaches each time the density floor turns it
+/// back. The search starts from a closed-form estimate of where the floor
+/// bites, so this only has to walk off the few percent the estimate loses to
+/// diagonal steps — small steps, and few of them.
+const CUT_SPAN_WIDEN_FACTOR: f64 = 1.08;
+
+/// The narrowest span whose turns could clear [`MIN_TURN_SEPARATION_PX`],
+/// in closed form.
+///
+/// A spiral of pitch `p` running from `R_out` in to `R_end` has an arc
+/// length of about `PI * (R_out^2 - R_end^2) / p`, so the radius at which a
+/// given pixel count runs out at the floor pitch falls straight out of it.
+/// The traced groove loses a few percent to diagonal steps and duplicate
+/// pixels, so this is a floor to start the search from, not the answer.
+/// Seeding with it keeps `solve_cut` monotone in the requested span: without
+/// it a geometric ladder can overshoot a narrower request past a wider one
+/// that would have fitted.
+fn span_fraction_floor_estimate(track_pixel_count: usize, geometry: &RecordProfileGeometry) -> f64 {
+    let outer = payload_outer_radius(geometry) as f64;
+    let inner = payload_inner_radius(geometry) as f64;
+    let band = (outer - inner).max(1.0);
+    let swept = outer * outer - track_pixel_count as f64 * record_core::MIN_TURN_SEPARATION_PX / PI;
+
+    if swept <= inner * inner {
+        return 1.0;
+    }
+
+    ((outer - swept.sqrt()) / band).clamp(0.0, 1.0)
+}
+
+#[derive(Debug, Clone)]
+struct CutFit {
+    span_fraction: f64,
+    fit: FitResult,
+}
+
+/// Lay out the cut: the pitch that puts `track_pixel_count` across
+/// `requested_span_fraction` of the band, widened only if that pitch would
+/// pack the turns tighter than `MIN_TURN_SEPARATION_PX`.
+///
+/// `track_pixel_count` is the nominal — the caller's declared final size,
+/// not what this render happens to be holding. A progressive load passes the
+/// same nominal for every chunk and so resolves the identical pitch each
+/// time, which is what lets a partial render be a prefix of the finished cut
+/// rather than a smaller record of its own.
+///
+/// If the floor cannot be cleared even across the whole band, the widest
+/// attempt is returned and `validate_spiral_renderable` is left to say so:
+/// the floor is a preference about where to cut, not a second opinion on
+/// whether a record is renderable.
+#[allow(clippy::too_many_arguments)]
+fn solve_cut(
+    width: usize,
+    height: usize,
+    track_pixel_count: usize,
+    family: &SpiralFamily,
+    record_profile: &str,
+    requested_span_fraction: f64,
+    fast_fit: bool,
+) -> Result<CutFit> {
+    let geometry = describe_record_profile(record_profile)?;
+    let mut span_fraction = record_core::validate_groove_span_fraction(requested_span_fraction)?
+        .max(span_fraction_floor_estimate(track_pixel_count, &geometry))
+        .min(1.0);
+
+    loop {
+        let fit = if fast_fit {
+            find_exact_fit_b(
+                width,
+                height,
+                track_pixel_count,
+                family,
+                record_profile,
+                span_fraction,
+                None,
+                1.35,
+                6,
+                10,
+                0,
+            )?
+        } else {
+            find_exact_fit_with_coverage(
+                width,
+                height,
+                track_pixel_count,
+                family,
+                record_profile,
+                span_fraction,
+                None,
+            )?
+        };
+
+        let cleared =
+            record_core::turn_separation_px(fit.b_value) >= record_core::MIN_TURN_SEPARATION_PX;
+
+        if cleared || span_fraction >= 1.0 {
+            return Ok(CutFit { span_fraction, fit });
+        }
+
+        span_fraction = (span_fraction * CUT_SPAN_WIDEN_FACTOR).min(1.0);
+    }
+}
+
+fn resolve_groove_span_fraction(render_options: &RenderOptions) -> Result<f64> {
+    record_core::validate_groove_span_fraction(
+        render_options
+            .groove_span_fraction
+            .unwrap_or(record_core::DEFAULT_GROOVE_SPAN_FRACTION),
+    )
+}
+
 fn find_exact_fit_with_coverage(
     width: usize,
     height: usize,
     track_pixel_count: usize,
     family: &SpiralFamily,
     record_profile: &str,
+    span_fraction: f64,
     initial_b: Option<f64>,
 ) -> Result<FitResult> {
     find_exact_fit_b(
@@ -1387,6 +1613,7 @@ fn find_exact_fit_with_coverage(
         track_pixel_count,
         family,
         record_profile,
+        span_fraction,
         initial_b,
         1.08,
         48,
@@ -1413,10 +1640,14 @@ fn paint_descriptor_spiral(
     let byte_capacity =
         record_descriptor::metadata_byte_capacity_for_pixel_count(metadata_indices.len());
 
-    let descriptor_bytes =
-        record_cut::descriptor::encode_record_descriptor_stream(main_b_value, descriptor, byte_capacity)?;
+    let descriptor_bytes = record_cut::descriptor::encode_record_descriptor_stream(
+        main_b_value,
+        descriptor,
+        byte_capacity,
+    )?;
 
-    let written_pixels = paint_metadata_bytes_as_grayscale(data, &metadata_indices, &descriptor_bytes);
+    let written_pixels =
+        paint_metadata_bytes_as_grayscale(data, &metadata_indices, &descriptor_bytes);
 
     let header_fade_pixels = metadata_fade_pixel_count(header_indices.len(), HEADER_SPIRAL_TURNS);
     let trailer_fade_pixels =
@@ -1428,7 +1659,13 @@ fn paint_descriptor_spiral(
         trailer_fade_pixels
     };
 
-    paint_unused_metadata_groove(data, &metadata_indices, written_pixels, 17, boundary_fade_pixels);
+    paint_unused_metadata_groove(
+        data,
+        &metadata_indices,
+        written_pixels,
+        17,
+        boundary_fade_pixels,
+    );
 
     if written_pixels < trailer_start {
         paint_unused_metadata_groove(data, &metadata_indices, trailer_start, 31, 0);
@@ -1878,49 +2115,44 @@ fn render_payload_codes_to_transparent_spiral(
         .map(|region| region.pixel_count)
         .sum::<usize>();
     let required_track_pixel_count = track.pixel_count.saturating_add(dummy_spiral_pixel_count);
-    let preview_fit_track_pixel_count = render_options
+    // The nominal the cut is laid out against: the caller's declared final
+    // size, not what this render is holding. A progressive load passes the
+    // same nominal for every chunk, so every partial render resolves the
+    // same pitch and paints a prefix of one groove — nothing already cut
+    // ever moves. It is floored at what we actually have, so a payload that
+    // comes in over its nominal is laid out for its real size rather than
+    // being cut off.
+    let nominal_track_pixel_count = render_options
         .fit_track_pixel_count
         .filter(|value| *value > 0);
-    if preview_fit_track_pixel_count.is_some() && !render_options.fast_fit {
-        bail!("fitTrackPixelCount is only supported for fast-fit previews");
-    }
     normalize_spiral_fit_mode(render_options.spiral_fit_mode.as_deref())?;
-    let resolved_fit_track_pixel_count =
-        if let Some(explicit) = fit_track_pixel_count
-            .filter(|value| *value > 0)
-            .or(preview_fit_track_pixel_count)
-        {
-            explicit.max(required_track_pixel_count)
-        } else {
-            required_track_pixel_count
-        };
-
-    let use_exact_fit = !render_options.fast_fit;
-    let spiral_family = resolve_spiral_family(render_options)?;
-
-    let fit = if use_exact_fit {
-        find_exact_fit_with_coverage(
-            RECORD_WIDTH,
-            RECORD_HEIGHT,
-            resolved_fit_track_pixel_count,
-            &spiral_family,
-            &normalized_profile,
-            None,
-        )?
+    let resolved_fit_track_pixel_count = if let Some(explicit) = fit_track_pixel_count
+        .filter(|value| *value > 0)
+        .or(nominal_track_pixel_count)
+    {
+        explicit.max(required_track_pixel_count)
     } else {
-        find_exact_fit_b(
-            RECORD_WIDTH,
-            RECORD_HEIGHT,
-            resolved_fit_track_pixel_count,
-            &spiral_family,
-            &normalized_profile,
-            None,
-            1.35,
-            6,
-            10,
-            0,
-        )?
+        required_track_pixel_count
     };
+
+    let spiral_family = resolve_spiral_family(render_options)?;
+    let cut = solve_cut(
+        RECORD_WIDTH,
+        RECORD_HEIGHT,
+        resolved_fit_track_pixel_count,
+        &spiral_family,
+        &normalized_profile,
+        resolve_groove_span_fraction(render_options)?,
+        render_options.fast_fit,
+    )?;
+    let CutFit {
+        span_fraction: groove_span_fraction,
+        fit,
+    } = cut;
+    let cut_inner_radius = cut_inner_radius(
+        &describe_record_profile(&normalized_profile)?,
+        groove_span_fraction,
+    )?;
 
     let cache_encryption = render_options
         .cache_encryption_secret_base64url
@@ -1950,13 +2182,13 @@ fn render_payload_codes_to_transparent_spiral(
         bsc_pointer: None,
         tone_spans,
         cache_encryption,
-            chain_anchor: None,
+        chain_anchor: None,
         additional_signatures: Vec::new(),
         isrcs: Vec::new(),
         upc: None,
         deferred_attestation: None,
         spiral_family,
-};
+    };
 
     let rendered = render_track_scanline_onto_transparent_spiral(
         RECORD_WIDTH,
@@ -1987,6 +2219,8 @@ fn render_payload_codes_to_transparent_spiral(
     Ok(TransparentRenderResult {
         exact: fit.exact,
         b_value: fit.b_value,
+        groove_span_fraction,
+        cut_inner_radius,
         source_width: source_dimensions.0,
         source_height: source_dimensions.1,
         source_pixel_count: source_dimensions.2,
@@ -2241,11 +2475,11 @@ pub fn write_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use record_core::parse_chunk_stream;
     use record_cut::{
         encode_record_stream, PayloadDescriptorInput, PayloadEntryInput, RecordStreamInput,
         TrackGapInput, TrackInput,
     };
-    use record_core::parse_chunk_stream;
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
@@ -2256,30 +2490,161 @@ mod tests {
     fn fit_counter_matches_materialized_spiral_mask() {
         for profile in ["single45", "lp"] {
             for b_value in [0.5, 1.0, 2.5, 5.0] {
-                let materialized =
-                    build_spiral_mask(
-                        RECORD_WIDTH,
-                        RECORD_HEIGHT,
-                        b_value,
-                        &SpiralFamily::Archimedean,
-                        profile,
-                    )
-                    .unwrap();
-                let counted =
-                    count_spiral_mask_pixels(
-                        RECORD_WIDTH,
-                        RECORD_HEIGHT,
-                        b_value,
-                        &SpiralFamily::Archimedean,
-                        profile,
-                    )
-                        .unwrap();
+                let materialized = build_spiral_mask(
+                    RECORD_WIDTH,
+                    RECORD_HEIGHT,
+                    b_value,
+                    &SpiralFamily::Archimedean,
+                    profile,
+                )
+                .unwrap();
+                // The painting mask always spans the whole band; only the
+                // fit counter is bounded, so the two agree at span 1.0.
+                let counted = count_spiral_mask_pixels(
+                    RECORD_WIDTH,
+                    RECORD_HEIGHT,
+                    b_value,
+                    &SpiralFamily::Archimedean,
+                    profile,
+                    1.0,
+                )
+                .unwrap();
                 assert_eq!(
                     counted, materialized.addressable_pixel_count,
                     "profile={profile} b={b_value}",
                 );
             }
         }
+    }
+
+    /// A raw RGB code block of `byte_length`, taken from a golden payload so
+    /// the pixel content is realistic. Sliced off the BRS1 magic so the
+    /// renderer treats it as a code block rather than a chunk stream, which
+    /// is what lets the size be chosen freely.
+    fn rgb_code_block(byte_length: usize) -> Vec<u8> {
+        let payload = fixture_bytes("lori-asha-westside-lp-hq", "lori-asha-westside-lp-hq.ecdc");
+        assert!(payload.len() > 64 + byte_length);
+        payload[64..64 + byte_length].to_vec()
+    }
+
+    fn render_lp(codes: &[u8], options_json: &str) -> RenderPayload {
+        render_payload_codes_to_png(
+            codes,
+            PAYLOAD_CODE_FORMAT_RGB,
+            "lp",
+            100.0,
+            Some(options_json),
+        )
+        .expect("render should succeed")
+        .payload
+    }
+
+    /// The cut a progressive load lays down must be the finished cut, not a
+    /// smaller record that happens to be on the way to it. Pin the nominal
+    /// and the pitch must not move as chunks arrive — that is the whole
+    /// invariant behind rendering a record the way a lathe cuts one.
+    #[test]
+    fn a_pinned_nominal_holds_the_pitch_still_while_the_payload_grows() {
+        let nominal_bytes = 90_000;
+        let nominal_pixels = record_core::rgb24_pixel_count_for_byte_length(nominal_bytes);
+        let options =
+            format!(r#"{{"grooveSpanFraction":0.33,"fitTrackPixelCount":{nominal_pixels}}}"#);
+
+        let finished = render_lp(&rgb_code_block(nominal_bytes), &options);
+
+        for arrived in [9_000, 30_000, 60_000, nominal_bytes] {
+            let partial = render_lp(&rgb_code_block(arrived), &options);
+
+            assert_eq!(
+                partial.b_value, finished.b_value,
+                "pitch moved at {arrived} bytes of a {nominal_bytes}-byte nominal",
+            );
+            assert_eq!(
+                partial.groove_span_fraction, finished.groove_span_fraction,
+                "span moved at {arrived} bytes",
+            );
+            assert_eq!(
+                partial.cut_inner_radius, finished.cut_inner_radius,
+                "the radius the cut is laid out to end on moved at {arrived} bytes",
+            );
+            assert!(
+                partial.pixels_added <= finished.pixels_added,
+                "a partial cut painted more than the finished one",
+            );
+        }
+    }
+
+    /// Without a nominal the fit has only what has arrived to go on, so each
+    /// partial render is a complete small record at its own pitch. This is
+    /// the behaviour the nominal exists to replace; pin it so the two paths
+    /// cannot quietly converge.
+    #[test]
+    fn without_a_nominal_the_pitch_tracks_whatever_has_arrived() {
+        let options = r#"{"grooveSpanFraction":0.33}"#;
+        let small = render_lp(&rgb_code_block(30_000), options);
+        let large = render_lp(&rgb_code_block(90_000), options);
+
+        assert!(
+            small.b_value > large.b_value,
+            "a shorter payload should cut a looser groove, got {} then {}",
+            small.b_value,
+            large.b_value,
+        );
+    }
+
+    /// The span is honoured when the payload fits inside it, and widened —
+    /// never packed tighter — when it does not.
+    #[test]
+    fn the_density_floor_widens_the_span_rather_than_packing_tighter() {
+        for requested in [0.25_f64, 0.33, 0.5] {
+            let options = format!(r#"{{"grooveSpanFraction":{requested}}}"#);
+
+            let roomy = render_lp(&rgb_code_block(60_000), &options);
+            assert!(
+                (roomy.groove_span_fraction - requested).abs() < 1e-9,
+                "a payload that fits should get the span it asked for, got {}",
+                roomy.groove_span_fraction,
+            );
+            assert!(
+                record_core::turn_separation_px(roomy.b_value)
+                    >= record_core::MIN_TURN_SEPARATION_PX,
+            );
+
+            let crowded = render_lp(&rgb_code_block(240_000), &options);
+            assert!(
+                crowded.groove_span_fraction > requested,
+                "a payload that does not fit should widen past {requested}, got {}",
+                crowded.groove_span_fraction,
+            );
+            assert!(
+                record_core::turn_separation_px(crowded.b_value)
+                    >= record_core::MIN_TURN_SEPARATION_PX,
+                "widening should have cleared the density floor",
+            );
+        }
+    }
+
+    /// A cut that does not fill its band stops short of the label and leaves
+    /// the rest as deadwax, which is the whole point of the span.
+    #[test]
+    fn a_short_cut_stops_short_of_the_label() {
+        let geometry = describe_record_profile("lp").unwrap();
+        let short = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
+        let full = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":1.0}"#);
+
+        assert!(
+            short.cut_inner_radius > geometry.payload_inner_radius,
+            "a 0.33 cut should leave deadwax, but ended on {}",
+            short.cut_inner_radius,
+        );
+        assert_eq!(
+            full.cut_inner_radius, geometry.payload_inner_radius,
+            "a 1.0 cut is the historical fit-to-fill and must still reach the label",
+        );
+        assert!(
+            short.b_value < full.b_value,
+            "packing the same payload into less band must tighten the pitch",
+        );
     }
 
     const GOLDENS: &[Golden] = &[
@@ -2557,7 +2922,10 @@ mod tests {
             Some(stream.len()),
         )
         .unwrap();
-        assert_eq!(decoded.bytes, stream, "vari-pitch groove did not round-trip");
+        assert_eq!(
+            decoded.bytes, stream,
+            "vari-pitch groove did not round-trip"
+        );
 
         assert_eq!(output.descriptor.version, 3);
         assert_eq!(
@@ -2621,10 +2989,7 @@ mod tests {
             "an explicit archimedean family must not change the render"
         );
         assert_eq!(implicit.descriptor.version, 2);
-        assert_eq!(
-            implicit.descriptor.spiral_family,
-            SpiralFamily::Archimedean
-        );
+        assert_eq!(implicit.descriptor.spiral_family, SpiralFamily::Archimedean);
     }
 
     #[test]
@@ -2765,11 +3130,8 @@ mod tests {
 
         let base = TonedConfig::from_hex("#FFC0CB", 0, 1).base;
         let base_lightness = oklch_lightness(base);
-        let effective_amount = adaptive_gap_tone_lightness(
-            base_lightness,
-            DEFAULT_GAP_TONE_LIGHTNESS,
-        )
-        .unwrap();
+        let effective_amount =
+            adaptive_gap_tone_lightness(base_lightness, DEFAULT_GAP_TONE_LIGHTNESS).unwrap();
         let expected_gap_base = lighten_base_oklch(base, effective_amount).unwrap();
         assert_eq!(
             output

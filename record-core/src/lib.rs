@@ -29,6 +29,21 @@ pub const PAYLOAD_CODE_FORMAT_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
 pub const HEADER_SPIRAL_TURNS: f64 = 2.0;
 pub const TRAILER_SPIRAL_TURNS: f64 = 4.0;
+
+/// How much of the payload band a cut is allowed to use, measured
+/// outward-in from `payload_outer_radius`. A lathe does not pack a side to
+/// the label: it cuts at a set pitch from the rim and stops where the
+/// programme stops, and everything it did not reach stays deadwax. `1.0`
+/// restores the historical fit-to-fill cut, whose spiral always terminated
+/// on `payload_inner_radius` no matter how little it carried.
+pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
+
+/// The tightest adjacent turns of a cut may sit in the rendered PNG, centre
+/// to centre, in pixels. Below this the turns stop resolving as separate and
+/// the band collapses into flat noise, taking the artwork under it with it.
+/// This is the density ceiling. [`MIN_B_VALUE`] is only a divide-by-zero
+/// guard and says nothing about whether a cut is legible.
+pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 pub const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
 pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "ten", "lp"];
@@ -635,8 +650,10 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
     let phase_2 = TAU * unit_from_draw(splitmix64(&mut character));
     // The tuned cycle counts, each bent ±8% by the seed so two records
     // tuned alike still band apart.
-    let cycles_1 = tuning.wave_one_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
-    let cycles_2 = tuning.wave_two_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
+    let cycles_1 =
+        tuning.wave_one_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
+    let cycles_2 =
+        tuning.wave_two_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
 
     let mut micro = (seed & 0xFFFF_FFFF) | 0x5EED_0000_0000_0000;
     let period_1_jitter = 1.0 + 0.02 * (unit_from_draw(splitmix64(&mut micro)) - 0.5) * 2.0;
@@ -663,7 +680,8 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
         placement,
         fire,
         // The fire's own wave, floored to stay round within a turn.
-        fire_period: TAU * (total_turns / tuning.fire_cycles.max(0.5)).max(2.3)
+        fire_period: TAU
+            * (total_turns / tuning.fire_cycles.max(0.5)).max(2.3)
             * (1.0 + 0.02 * (unit_from_draw(splitmix64(&mut character)) - 0.5) * 2.0),
         fire_phase: TAU * unit_from_draw(splitmix64(&mut character)),
         aura_width: tuning.aura_width,
@@ -953,6 +971,39 @@ pub fn spiral_b_value_for_visible_turns(record_profile: &str, turns: f64) -> Res
             / (2.0 * PI * turns))
             .max(MIN_B_VALUE),
     )
+}
+
+pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {
+    if !(span_fraction.is_finite() && span_fraction > 0.0 && span_fraction <= 1.0) {
+        bail!("a groove span fraction within 0..=1 is required, got {span_fraction}");
+    }
+
+    Ok(span_fraction)
+}
+
+/// The radius a cut of `span_fraction` is laid out to stop on.
+///
+/// This bounds the band the spiral's *pitch* is fitted against — not the
+/// groove trace itself, which still runs from `payload_outer_radius` on the
+/// same `b`. A decoder rebuilding the full-band mask from the descriptor's
+/// `b_value` therefore reads an identical prefix, and a cut whose payload
+/// overruns its nominal simply runs on inward the way a long side eats into
+/// the run-out.
+pub fn cut_inner_radius_from_geometry(
+    g: &RecordProfileGeometry,
+    span_fraction: f64,
+) -> Result<i32> {
+    let fraction = validate_groove_span_fraction(span_fraction)?;
+    let outer = g.payload_outer_radius as f64;
+    let span = (outer - g.payload_inner_radius as f64).max(0.0);
+
+    Ok(js_round(outer - span * fraction).max(g.payload_inner_radius))
+}
+
+/// Centre-to-centre distance between adjacent turns of an Archimedean cut,
+/// in rendered pixels. Compare against [`MIN_TURN_SEPARATION_PX`].
+pub fn turn_separation_px(b_value: f64) -> f64 {
+    2.0 * PI * b_value
 }
 
 pub fn resolve_pitch(b_value: f64, pitch: Option<f64>) -> Result<f64> {
@@ -3561,8 +3612,14 @@ mod tests {
         // cycles across the sweep, the long 1.8–2.6 (±2% micro jitter).
         let cycles_1 = sweep / params.period_1;
         let cycles_2 = sweep / params.period_2;
-        assert!((4.4..6.4).contains(&cycles_1), "short wave: {cycles_1} cycles");
-        assert!((1.7..2.7).contains(&cycles_2), "long wave: {cycles_2} cycles");
+        assert!(
+            (4.4..6.4).contains(&cycles_1),
+            "short wave: {cycles_1} cycles"
+        );
+        assert!(
+            (1.7..2.7).contains(&cycles_2),
+            "long wave: {cycles_2} cycles"
+        );
 
         // Sheen 0.8 keeps a fifth of the full dither amplitude.
         assert!((params.dither_amplitude - 0.34 * 0.2).abs() < 1e-12);
