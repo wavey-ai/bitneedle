@@ -126,12 +126,54 @@ pub const SEGMENT_SPIRAL_GEOMETRY: u8 = 30;
 /// skipped.
 pub const SEGMENT_ADDITIONAL_SIGNATURES: u8 = 31;
 
+/// toned-v2 only: the clockface the groove is toned by. The disc is divided
+/// into equal angular slots from a rotation, each cut in its own tone; which
+/// slot a pixel is in follows from where it sits on the disc, so the map is
+/// the wheel itself and nothing per pixel. See [`encode_tone_clock_map`].
+pub const SEGMENT_TONE_CLOCK_MAP: u8 = 32;
+
+/// The deadwax: the groove between where the programme stopped and the
+/// descriptor's inner band, and what may be written into it.
+///
+/// The band itself is not new and its geometry is already known — the prefix
+/// carries `cut_inner_radius` and the lead-out's feed, which is all a reader
+/// needs to walk it. What was missing was a claim: whether anything is in
+/// there, who put it there, and how much room a writer has if it is empty.
+///
+/// It is a declaration, not a container. The bytes live in the groove; this
+/// says where they are and who owns them, the way a partition table is not
+/// the partition. A record whose programme runs to the label has no deadwax
+/// and writes no segment at all.
+///
+/// Payload: `outer(u16be) || inner(u16be) || pixel_capacity(u32be) ||
+/// encoding(u8) || byte_capacity(u32be)`, 13 bytes, and a claimed band adds
+/// `claim(4) || claimed_byte_length(u32be)` for 21. Sized rather than
+/// versioned, as [`SEGMENT_SPIRAL_GEOMETRY`] is: a longer payload from a
+/// later writer decodes to what these mean.
+pub const SEGMENT_DEADWAX_EXTENT: u8 = 33;
+
+/// The deadwax is a groove with nothing painted into it: whatever a writer
+/// puts there is between that writer and whoever reads it back.
+pub const DEADWAX_ENCODING_UNPAINTED: u8 = 0;
+/// One nibble per pixel as a grey step, the way the descriptor's own bands
+/// are painted ([`METADATA_GRAYSCALE_NIBBLE_BASE`]).
+pub const DEADWAX_ENCODING_GRAYSCALE_NIBBLE: u8 = 1;
+/// The carrier's own encoding: an iso-luma palette around the groove tone,
+/// at the clock's bits per pixel. A band written this way is the record's
+/// colour and carries several times what the grey encoding does.
+pub const DEADWAX_ENCODING_TONED: u8 = 2;
+
+/// Nothing has claimed the band: it is free, and its whole capacity is.
+pub const DEADWAX_CLAIM_FREE: Option<[u8; 4]> = None;
+
 pub const ISRC_LENGTH: usize = 12;
 
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
 pub const PAYLOAD_ENCODING_RGB_CODE: u8 = 0;
 pub const PAYLOAD_ENCODING_TONED_V1_CODE: u8 = 1;
+pub const PAYLOAD_ENCODING_TONED_V2: &str = "toned-v2";
+pub const PAYLOAD_ENCODING_TONED_V2_CODE: u8 = 2;
 
 pub const TONED_CARRIER_MAP_VERSION: u8 = 1;
 pub const TONED_ORDERING_BASE_PROXIMITY: u8 = 0;
@@ -139,6 +181,24 @@ pub const TONED_ORDERING_CHROMA_PROXIMITY: u8 = 1;
 pub const TONED_MIN_BITS_PER_PIXEL: u8 = 1;
 pub const TONED_MAX_BITS_PER_PIXEL: u8 = 24;
 pub const TONED_MAX_SPAN_COUNT: usize = u16::MAX as usize;
+/// Version 1 is a wheel of wedges: one ring, running the whole depth of the
+/// groove. Version 2 adds the rings — a slot count per ring and the band
+/// they divide. A v1 map still decodes, as the one-ring wheel it always was,
+/// and a one-ring wheel is still written as v1, so a record that does not
+/// need rings is byte for byte the record it was.
+pub const TONE_CLOCK_MAP_VERSION: u8 = 2;
+pub const TONE_CLOCK_MAP_VERSION_WEDGES: u8 = 1;
+pub const TONE_CLOCK_MIN_SLOTS: usize = 2;
+pub const TONE_CLOCK_MAX_SLOTS: usize = 64;
+/// Pockets in the whole wheel, across every ring.
+pub const TONE_CLOCK_MAX_CELLS: usize = 256;
+pub const TONE_CLOCK_MAX_RINGS: usize = 8;
+/// The band the rings divide, in ten-thousandths of the half-side.
+pub const TONE_CLOCK_SPAN_UNITS: u32 = 10_000;
+/// Clock rotation is carried in hundredths of a degree, clockwise from
+/// twelve o'clock, so encoder and decoder derive identical radians from one
+/// integer.
+pub const TONE_CLOCK_ROTATION_UNITS_PER_TURN: u32 = 36_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheEncryptionAlgorithm {
@@ -472,6 +532,7 @@ fn cache_encryption_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<
     }
     push_len_prefixed_string(&mut out, 15, descriptor.copyright_holder.as_deref());
     push_spiral_family_identity(&mut out, 16, &descriptor.spiral_family);
+    push_tone_clock_identity(&mut out, 17, descriptor.tone_clock.as_ref())?;
     Ok(out)
 }
 
@@ -783,7 +844,30 @@ pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result
         None => push_u32(&mut out, 0),
     }
     push_spiral_family_identity(&mut out, 16, &descriptor.spiral_family);
+    push_tone_clock_identity(&mut out, 17, descriptor.tone_clock.as_ref())?;
     Ok(out)
+}
+
+/// Appends the tone clock to an identity preimage — but only when there is
+/// one. A record without a clock appends nothing, so every identity (and the
+/// signature or cache key derived from it) is byte-identical to what it was
+/// before clocks existed. The clock is inside the commitment for the same
+/// reason the toned palette is: a different wheel is a different pressing.
+fn push_tone_clock_identity(
+    out: &mut Vec<u8>,
+    tag: u8,
+    clock: Option<&ToneClockDescriptor>,
+) -> Result<()> {
+    if let Some(clock) = clock {
+        let encoded = encode_tone_clock_map(clock, None)?;
+        out.push(tag);
+        push_u32(
+            out,
+            u32::try_from(encoded.len()).context("tone clock map exceeds u32")?,
+        );
+        out.extend_from_slice(&encoded);
+    }
+    Ok(())
 }
 
 /// Appends the groove geometry family to an identity preimage — but only for
@@ -1104,6 +1188,83 @@ pub struct ResolvedToneSpan {
     pub ordering: ToneOrdering,
 }
 
+/// One pocket of a tone clock: the tone the track is cut in there and the
+/// lighter tone its track gaps are cut in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToneClockSlotDescriptor {
+    pub base: [u8; 3],
+    pub luma_tolerance: u8,
+    pub gap_base: [u8; 3],
+    pub gap_luma_tolerance: u8,
+}
+
+/// The toned-v2 carrier map: a wheel of equal angular slots, each in its own
+/// tone. A pixel's slot follows from its angle about the disc's centre (in
+/// the record's frame, clockwise from twelve) and its groove index, both of
+/// which a decoder has once it has walked the spiral. Bits per pixel and
+/// ordering are shared by every slot, so the bit stream is one stream and
+/// the groove is exactly as long as a single-tone cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToneClockDescriptor {
+    /// Where each ring's slot zero begins, in hundredths of a degree
+    /// clockwise from twelve, innermost first; the rest of a ring's slots
+    /// follow clockwise. One entry is a wheel turned as one piece, which is
+    /// what a version 1 map carries.
+    pub rotation_centidegrees: Vec<u16>,
+    /// Whether pixels near a slot boundary may take the neighbouring slot's
+    /// tone in proportion to their nearness (a deterministic per-pixel
+    /// choice), so tones run into each other rather than stepping.
+    pub blend: bool,
+    pub bits_per_pixel: u8,
+    pub ordering: ToneOrdering,
+    /// The slots in each ring, innermost first. `[8, 16]` is eight pockets
+    /// across the inside of the groove band and sixteen around the outside.
+    /// One entry is a wheel of wedges, which is what every clock was before
+    /// rings, and is written as a version 1 map.
+    #[serde(default = "one_ring")]
+    pub rings: Vec<u32>,
+    /// The band the rings divide, in ten-thousandths of the half-side:
+    /// where the groove starts and where it ends.
+    #[serde(default = "whole_disc")]
+    pub span: (u16, u16),
+    /// Every pocket's tones: innermost ring first, and clockwise from twelve
+    /// within each ring.
+    pub slots: Vec<ToneClockSlotDescriptor>,
+    /// Byte offsets at which the groove alternates between track and gap
+    /// tone, starting in track tone at offset zero. Strictly increasing.
+    pub gap_switch_offsets: Vec<usize>,
+}
+
+/// What a map with no rings written in it means: one, holding every slot.
+fn one_ring() -> Vec<u32> {
+    Vec::new()
+}
+
+/// What a map with no band written in it means: the whole record, which is
+/// the only band a wheel of wedges could have been describing.
+fn whole_disc() -> (u16, u16) {
+    (0, TONE_CLOCK_SPAN_UNITS as u16)
+}
+
+impl ToneClockDescriptor {
+    /// The slots in each ring, with an unwritten `rings` read as the one
+    /// ring holding every slot.
+    pub fn ring_slots(&self) -> Vec<u32> {
+        if self.rings.is_empty() {
+            vec![self.slots.len() as u32]
+        } else {
+            self.rings.clone()
+        }
+    }
+
+    /// Whether this wheel needs the rings written down at all.
+    pub fn has_rings(&self) -> bool {
+        self.ring_slots().len() > 1
+    }
+}
+
 /// One blanket signed-release reference covering the release commitment
 /// (see `record_core::commitment::release_commitment`). SHA-256 and Ed25519
 /// are fixed by `SIGNED_RELEASE_REFERENCE_VERSION`; there is no per-reference
@@ -1176,6 +1337,130 @@ pub fn decode_cache_encryption_descriptor(bytes: &[u8]) -> Result<CacheEncryptio
     Ok(descriptor)
 }
 
+/// What the deadwax holds, or that it holds nothing.
+///
+/// Radii are in rendered pixels, from the centre, and bound the band the
+/// same way the cut does: `outer` is where the programme's groove stopped,
+/// `inner` is where the descriptor's own band begins. `pixel_capacity` is
+/// how many pixels the spiral lays down between them, which is a property of
+/// the lathe's feed and not of anything written there.
+///
+/// `byte_capacity` is what those pixels hold under `encoding`. It is stored
+/// rather than derived so a reader that does not implement an encoding can
+/// still say how much room a band has, and so a later encoding does not
+/// silently change the meaning of an old record's number.
+///
+/// `claim` is a four-byte tag naming whoever wrote the band — a sidecar's
+/// own, by its own convention. `None` means free. A claim without bytes is
+/// still a claim: it reserves the band.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadwaxExtent {
+    pub outer_radius: u16,
+    pub inner_radius: u16,
+    pub pixel_capacity: u32,
+    pub encoding: u8,
+    pub byte_capacity: u32,
+    /// Four bytes naming the owner, or `None` while the band is free.
+    #[serde(default)]
+    pub claim: Option<[u8; 4]>,
+    /// How much of `byte_capacity` the claim has actually used.
+    #[serde(default)]
+    pub claimed_byte_length: u32,
+}
+
+impl DeadwaxExtent {
+    /// Whether anything has claimed the band.
+    pub fn is_free(&self) -> bool {
+        self.claim.is_none()
+    }
+
+    /// What is left for a writer, in bytes.
+    pub fn free_byte_capacity(&self) -> u32 {
+        self.byte_capacity
+            .saturating_sub(self.claimed_byte_length)
+    }
+}
+
+/// One deadwax extent segment, as written.
+///
+/// Two shapes: 13 bytes for a free band, 21 for a claimed one. A longer
+/// payload is a later writer's and its tail is ignored, which is the same
+/// bargain every other sized segment strikes.
+pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
+    const FREE_LENGTH: usize = 13;
+    const CLAIMED_LENGTH: usize = 21;
+
+    if payload.len() < FREE_LENGTH {
+        bail!("deadwax extent segment is too short");
+    }
+
+    let outer_radius = u16::from_be_bytes(payload[0..2].try_into().expect("slice length"));
+    let inner_radius = u16::from_be_bytes(payload[2..4].try_into().expect("slice length"));
+    if inner_radius >= outer_radius {
+        bail!("deadwax extent inner radius is not inside its outer radius");
+    }
+
+    let pixel_capacity = u32::from_be_bytes(payload[4..8].try_into().expect("slice length"));
+    let encoding = payload[8];
+    let byte_capacity = u32::from_be_bytes(payload[9..13].try_into().expect("slice length"));
+
+    let (claim, claimed_byte_length) = if payload.len() >= CLAIMED_LENGTH {
+        let tag: [u8; 4] = payload[13..17].try_into().expect("slice length");
+        let used = u32::from_be_bytes(payload[17..21].try_into().expect("slice length"));
+        if used > byte_capacity {
+            bail!("deadwax claim is longer than the band it claims");
+        }
+        // All-zero is not a tag. A writer that wants the band without naming
+        // itself has to say so by writing the free shape.
+        if tag == [0, 0, 0, 0] {
+            bail!("deadwax claim tag is empty");
+        }
+        (Some(tag), used)
+    } else {
+        (None, 0)
+    };
+
+    Ok(DeadwaxExtent {
+        outer_radius,
+        inner_radius,
+        pixel_capacity,
+        encoding,
+        byte_capacity,
+        claim,
+        claimed_byte_length,
+    })
+}
+
+/// The same, as bytes.
+pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
+    if extent.inner_radius >= extent.outer_radius {
+        bail!("deadwax extent inner radius is not inside its outer radius");
+    }
+    if extent.claimed_byte_length > extent.byte_capacity {
+        bail!("deadwax claim is longer than the band it claims");
+    }
+
+    let mut bytes = Vec::with_capacity(21);
+    bytes.extend_from_slice(&extent.outer_radius.to_be_bytes());
+    bytes.extend_from_slice(&extent.inner_radius.to_be_bytes());
+    bytes.extend_from_slice(&extent.pixel_capacity.to_be_bytes());
+    bytes.push(extent.encoding);
+    bytes.extend_from_slice(&extent.byte_capacity.to_be_bytes());
+
+    if let Some(tag) = extent.claim {
+        if tag == [0, 0, 0, 0] {
+            bail!("deadwax claim tag is empty");
+        }
+        bytes.extend_from_slice(&tag);
+        bytes.extend_from_slice(&extent.claimed_byte_length.to_be_bytes());
+    } else if extent.claimed_byte_length != 0 {
+        bail!("deadwax extent has claimed bytes but no claim");
+    }
+
+    Ok(bytes)
+}
+
 /// Decoded BRD1 carrier descriptor.
 ///
 /// `record_profile` identifies the canonical Bitneedle carrier profile used to
@@ -1219,6 +1504,9 @@ pub struct RecordDescriptor {
     pub signed_release_reference: Option<SignedReleaseReference>,
     pub bsc_pointer: Option<Vec<u8>>,
     pub tone_spans: Vec<ToneSpanDescriptor>,
+    /// The clockface for a toned-v2 groove; absent for every other encoding.
+    #[serde(default)]
+    pub tone_clock: Option<ToneClockDescriptor>,
     pub cache_encryption: Option<CacheEncryptionDescriptor>,
     /// The on-chain anchor, written after pressing. Opaque here: what a
     /// chain reference means is a matter for the chain, not for BRD1.
@@ -1232,6 +1520,11 @@ pub struct RecordDescriptor {
     /// The signature covering everything above that was added after the
     /// press. Required whenever any of them is present.
     pub deferred_attestation: Option<SignedReleaseReference>,
+    /// The deadwax, if the cut left any: how much groove is standing between
+    /// the programme and the descriptor's inner band, and whether anything
+    /// has claimed it. Absent on a record whose programme ran to the label.
+    #[serde(default)]
+    pub deadwax: Option<DeadwaxExtent>,
 }
 
 /// One recording's ISRC, against the track it belongs to.
@@ -1354,6 +1647,7 @@ pub fn payload_encoding_code(payload_encoding: &str) -> Result<u8> {
     match payload_encoding {
         PAYLOAD_ENCODING_RGB => Ok(PAYLOAD_ENCODING_RGB_CODE),
         PAYLOAD_ENCODING_TONED_V1 => Ok(PAYLOAD_ENCODING_TONED_V1_CODE),
+        PAYLOAD_ENCODING_TONED_V2 => Ok(PAYLOAD_ENCODING_TONED_V2_CODE),
         other => bail!("unsupported canonical payload encoding {other}"),
     }
 }
@@ -1362,6 +1656,7 @@ pub fn payload_encoding_from_code(code: u8) -> Result<String> {
     match code {
         PAYLOAD_ENCODING_RGB_CODE => Ok(PAYLOAD_ENCODING_RGB.to_string()),
         PAYLOAD_ENCODING_TONED_V1_CODE => Ok(PAYLOAD_ENCODING_TONED_V1.to_string()),
+        PAYLOAD_ENCODING_TONED_V2_CODE => Ok(PAYLOAD_ENCODING_TONED_V2.to_string()),
         other => bail!("unknown payload encoding code {other}"),
     }
 }
@@ -1602,6 +1897,248 @@ pub fn decode_toned_carrier_map(
     Ok(spans)
 }
 
+/// Checks a clock is well formed, and — given the stream length — that its
+/// gap switches all fall inside the stream.
+pub fn validate_tone_clock(
+    clock: &ToneClockDescriptor,
+    expected_byte_length: Option<usize>,
+) -> Result<()> {
+    let rings = clock.ring_slots();
+    if rings.is_empty() || rings.len() > TONE_CLOCK_MAX_RINGS {
+        bail!(
+            "tone clock needs between 1 and {TONE_CLOCK_MAX_RINGS} rings, got {}",
+            rings.len()
+        );
+    }
+    for (index, &slots) in rings.iter().enumerate() {
+        if !(TONE_CLOCK_MIN_SLOTS..=TONE_CLOCK_MAX_SLOTS).contains(&(slots as usize)) {
+            bail!(
+                "tone clock ring {index} needs between {TONE_CLOCK_MIN_SLOTS} and \
+                 {TONE_CLOCK_MAX_SLOTS} slots, got {slots}"
+            );
+        }
+    }
+    let cells: usize = rings.iter().map(|&slots| slots as usize).sum();
+    if cells > TONE_CLOCK_MAX_CELLS {
+        bail!("tone clock has {cells} pockets, more than {TONE_CLOCK_MAX_CELLS}");
+    }
+    if clock.slots.len() != cells {
+        bail!(
+            "tone clock has {} tones for {cells} pockets; every pocket takes one",
+            clock.slots.len()
+        );
+    }
+    if clock.span.0 >= clock.span.1 {
+        bail!(
+            "tone clock band runs from {} to {}, which is not a band",
+            clock.span.0, clock.span.1
+        );
+    }
+    if u32::from(clock.span.1) > TONE_CLOCK_SPAN_UNITS {
+        bail!("tone clock band ends at {}, past the record", clock.span.1);
+    }
+    if clock.rotation_centidegrees.is_empty() || clock.rotation_centidegrees.len() > rings.len() {
+        bail!(
+            "tone clock has {} rotations for {} rings",
+            clock.rotation_centidegrees.len(),
+            rings.len()
+        );
+    }
+    for &turn in &clock.rotation_centidegrees {
+        if u32::from(turn) >= TONE_CLOCK_ROTATION_UNITS_PER_TURN {
+            bail!("tone clock rotation {turn} is a full turn or more");
+        }
+    }
+    if !(TONED_MIN_BITS_PER_PIXEL..=TONED_MAX_BITS_PER_PIXEL).contains(&clock.bits_per_pixel) {
+        bail!(
+            "tone clock bits per pixel must be between {TONED_MIN_BITS_PER_PIXEL} and {TONED_MAX_BITS_PER_PIXEL}"
+        );
+    }
+    if clock.gap_switch_offsets.first() == Some(&0) {
+        bail!("tone clock cannot switch to gap tone at byte offset zero");
+    }
+    for pair in clock.gap_switch_offsets.windows(2) {
+        if pair[1] <= pair[0] {
+            bail!("tone clock gap switch offsets must be strictly increasing");
+        }
+    }
+    if let (Some(expected), Some(&last)) = (expected_byte_length, clock.gap_switch_offsets.last())
+    {
+        if last >= expected {
+            bail!("tone clock gap switch at byte {last} is beyond the {expected}-byte stream");
+        }
+    }
+    Ok(())
+}
+
+/// Pixels a toned-v2 groove of `byte_length` bytes occupies.
+pub fn tone_clock_pixel_count(clock: &ToneClockDescriptor, byte_length: usize) -> Result<usize> {
+    byte_length
+        .checked_mul(8)
+        .map(|bits| bits.div_ceil(usize::from(clock.bits_per_pixel)))
+        .context("tone clock bit length overflow")
+}
+
+/// Version 1, a wheel of wedges:
+/// `1 || bits_per_pixel || ordering || blend || rotation (u16be) ||
+/// slot_count || slots (base[3] tol gap_base[3] gap_tol)* || gap_switch_count
+/// (varuint) || gap_switch_offsets (varuint)*`.
+///
+/// Version 2, a wheel of rings, differs only in what stands where the slot
+/// count did:
+/// `2 || bits_per_pixel || ordering || blend || rotation (u16be) ||
+/// ring_count || ring_slots (u8)* || span_inner (u16be) || span_outer (u16be)
+/// || pockets (base[3] tol gap_base[3] gap_tol)* || …`
+///
+/// A wheel of one ring is written as version 1, so a record that does not
+/// need rings is byte for byte the record it was and every player that could
+/// read it still can.
+pub fn encode_tone_clock_map(
+    clock: &ToneClockDescriptor,
+    expected_byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    validate_tone_clock(clock, expected_byte_length)?;
+
+    let rings = clock.ring_slots();
+    let ringed = clock.has_rings();
+    let mut out = Vec::with_capacity(12 + clock.slots.len() * 8);
+    out.push(if ringed {
+        TONE_CLOCK_MAP_VERSION
+    } else {
+        TONE_CLOCK_MAP_VERSION_WEDGES
+    });
+    out.push(clock.bits_per_pixel);
+    out.push(clock.ordering.wire_code());
+    out.push(u8::from(clock.blend));
+    if ringed {
+        out.push(rings.len() as u8);
+        for &slots in &rings {
+            out.push(slots as u8);
+        }
+        // One rotation per ring, padded from the last given: the rings turn
+        // at their own rates and the map has to say where each one starts.
+        for ring in 0..rings.len() {
+            let at = ring.min(clock.rotation_centidegrees.len() - 1);
+            out.extend_from_slice(&clock.rotation_centidegrees[at].to_be_bytes());
+        }
+        out.extend_from_slice(&clock.span.0.to_be_bytes());
+        out.extend_from_slice(&clock.span.1.to_be_bytes());
+    } else {
+        out.extend_from_slice(&clock.rotation_centidegrees[0].to_be_bytes());
+        out.push(clock.slots.len() as u8);
+    }
+    for slot in &clock.slots {
+        out.extend_from_slice(&slot.base);
+        out.push(slot.luma_tolerance);
+        out.extend_from_slice(&slot.gap_base);
+        out.push(slot.gap_luma_tolerance);
+    }
+    push_varuint(&mut out, clock.gap_switch_offsets.len() as u64);
+    for &offset in &clock.gap_switch_offsets {
+        push_varuint(
+            &mut out,
+            u64::try_from(offset).context("tone clock gap switch offset exceeds u64")?,
+        );
+    }
+    Ok(out)
+}
+
+pub fn decode_tone_clock_map(
+    bytes: &[u8],
+    expected_byte_length: Option<usize>,
+) -> Result<ToneClockDescriptor> {
+    let mut cursor = ByteCursor::new(bytes);
+    let version = cursor.read_u8("tone clock map version")?;
+    if version != TONE_CLOCK_MAP_VERSION && version != TONE_CLOCK_MAP_VERSION_WEDGES {
+        bail!("unsupported tone clock map version {version}");
+    }
+    let bits_per_pixel = cursor.read_u8("tone clock bits per pixel")?;
+    let ordering = ToneOrdering::from_wire_code(cursor.read_u8("tone clock ordering")?)?;
+    let blend = match cursor.read_u8("tone clock blend")? {
+        0 => false,
+        1 => true,
+        other => bail!("tone clock blend flag {other} is not 0 or 1"),
+    };
+    // A v1 map has one ring holding every slot, over the whole record, turned
+    // as one piece: that is what a wheel of wedges was, and reading it as
+    // anything else would move the pockets of every record already pressed.
+    let (rings, rotation_centidegrees, span) = if version == TONE_CLOCK_MAP_VERSION {
+        let ring_count = usize::from(cursor.read_u8("tone clock ring count")?);
+        if ring_count == 0 || ring_count > TONE_CLOCK_MAX_RINGS {
+            bail!("tone clock declares {ring_count} rings");
+        }
+        let mut rings = Vec::with_capacity(ring_count);
+        for _ in 0..ring_count {
+            rings.push(u32::from(cursor.read_u8("tone clock ring slots")?));
+        }
+        let mut turns = Vec::with_capacity(ring_count);
+        for _ in 0..ring_count {
+            turns.push(cursor.read_u16be("tone clock ring rotation")?);
+        }
+        let inner = cursor.read_u16be("tone clock band inner")?;
+        let outer = cursor.read_u16be("tone clock band outer")?;
+        (rings, turns, (inner, outer))
+    } else {
+        let turn = cursor.read_u16be("tone clock rotation")?;
+        (
+            vec![u32::from(cursor.read_u8("tone clock slot count")?)],
+            vec![turn],
+            whole_disc(),
+        )
+    };
+    let slot_count: usize = rings.iter().map(|&slots| slots as usize).sum();
+    if slot_count > TONE_CLOCK_MAX_CELLS {
+        bail!("tone clock declares {slot_count} pockets");
+    }
+    let mut slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        let base = cursor.read_rgb("tone clock slot base")?;
+        let luma_tolerance = cursor.read_u8("tone clock slot luma tolerance")?;
+        let gap_base = cursor.read_rgb("tone clock slot gap base")?;
+        let gap_luma_tolerance = cursor.read_u8("tone clock slot gap luma tolerance")?;
+        slots.push(ToneClockSlotDescriptor {
+            base,
+            luma_tolerance,
+            gap_base,
+            gap_luma_tolerance,
+        });
+    }
+    let switch_count = cursor.read_varuint("tone clock gap switch count")?;
+    let switch_count = usize::try_from(switch_count).context("tone clock gap switch count exceeds usize")?;
+    if switch_count > cursor.remaining() {
+        bail!("tone clock declares more gap switches than the map can hold");
+    }
+    let mut gap_switch_offsets = Vec::with_capacity(switch_count);
+    for _ in 0..switch_count {
+        gap_switch_offsets.push(
+            usize::try_from(cursor.read_varuint("tone clock gap switch offset")?)
+                .context("tone clock gap switch offset exceeds usize")?,
+        );
+    }
+    if cursor.remaining() != 0 {
+        bail!(
+            "tone clock map contains {} trailing bytes",
+            cursor.remaining()
+        );
+    }
+
+    let clock = ToneClockDescriptor {
+        rotation_centidegrees,
+        blend,
+        bits_per_pixel,
+        ordering,
+        // A v1 map comes back with its one ring written out rather than
+        // left implicit, so nothing downstream has to know which version it
+        // was read from.
+        rings,
+        span,
+        slots,
+        gap_switch_offsets,
+    };
+    validate_tone_clock(&clock, expected_byte_length)?;
+    Ok(clock)
+}
+
 fn push_varuint(out: &mut Vec<u8>, mut value: u64) {
     loop {
         let mut byte = (value & 0x7f) as u8;
@@ -1684,12 +2221,14 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut signed_release_reference = None;
     let mut bsc_pointer = None;
     let mut tone_spans = None;
+    let mut tone_clock = None;
     let mut cache_encryption = None;
     let mut chain_anchor = None;
     let mut additional_signatures = None;
     let mut isrcs = None;
     let mut upc = None;
     let mut deferred_attestation = None;
+    let mut deadwax = None;
     let mut spiral_family = None;
 
     while offset < body.len() {
@@ -1844,6 +2383,12 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 }
                 tone_spans = Some(decode_toned_carrier_map(payload, None)?);
             }
+            SEGMENT_TONE_CLOCK_MAP => {
+                if tone_clock.is_some() {
+                    bail!("duplicate tone clock map segment");
+                }
+                tone_clock = Some(decode_tone_clock_map(payload, None)?);
+            }
             SEGMENT_CACHE_ENCRYPTION => {
                 if cache_encryption.is_some() {
                     bail!("duplicate cache encryption segment");
@@ -1946,6 +2491,12 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 family.validate()?;
                 assign_once(&mut spiral_family, family, "spiral geometry")?;
             }
+            SEGMENT_DEADWAX_EXTENT => {
+                if deadwax.is_some() {
+                    bail!("duplicate deadwax extent segment");
+                }
+                deadwax = Some(decode_deadwax_extent(payload)?);
+            }
             // A segment type this build does not know is skipped, not
             // refused.
             //
@@ -1995,12 +2546,27 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
             if !tone_spans.is_empty() {
                 bail!("rgb payload encoding must not include a toned carrier map");
             }
+            if tone_clock.is_some() {
+                bail!("rgb payload encoding must not include a tone clock map");
+            }
         }
         PAYLOAD_ENCODING_TONED_V1 => {
             if tone_spans.is_empty() {
                 bail!("toned-v1 payload encoding requires a toned carrier map");
             }
+            if tone_clock.is_some() {
+                bail!("toned-v1 payload encoding must not include a tone clock map");
+            }
             resolve_tone_spans(&tone_spans, Some(stream_byte_length))?;
+        }
+        PAYLOAD_ENCODING_TONED_V2 => {
+            if !tone_spans.is_empty() {
+                bail!("toned-v2 payload encoding must not include a toned carrier map");
+            }
+            let clock = tone_clock
+                .as_ref()
+                .context("toned-v2 payload encoding requires a tone clock map")?;
+            validate_tone_clock(clock, Some(stream_byte_length))?;
         }
         other => bail!("unsupported canonical payload encoding {other}"),
     }
@@ -2028,12 +2594,14 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         signed_release_reference,
         bsc_pointer,
         tone_spans,
+        tone_clock,
         cache_encryption,
         chain_anchor,
         additional_signatures: additional_signatures.unwrap_or_default(),
         isrcs: isrcs.unwrap_or_default(),
         upc,
         deferred_attestation,
+        deadwax,
     };
     // Null or signed: a deferred field with no attestation over it is a
     // malformed record, not merely an untrusted one.
@@ -2092,6 +2660,14 @@ impl<'a> ByteCursor<'a> {
             .with_context(|| format!("{label} is truncated"))?;
         self.offset += 1;
         Ok(value)
+    }
+
+    fn read_rgb(&mut self, label: &str) -> Result<[u8; 3]> {
+        Ok([
+            self.read_u8(label)?,
+            self.read_u8(label)?,
+            self.read_u8(label)?,
+        ])
     }
 
     fn read_u16be(&mut self, label: &str) -> Result<u16> {
@@ -2271,6 +2847,7 @@ mod tests {
             signed_release_reference: None,
             bsc_pointer: Some(vec![1, 2, 3, 4]),
             tone_spans: Vec::new(),
+            tone_clock: None,
             cache_encryption: Some(CacheEncryptionDescriptor {
                 version: CACHE_ENCRYPTION_DESCRIPTOR_VERSION,
                 algorithm: CacheEncryptionAlgorithm::XChaCha20Poly1305,
@@ -2282,6 +2859,7 @@ mod tests {
             isrcs: Vec::new(),
             upc: None,
             deferred_attestation: None,
+            deadwax: None,
         }
     }
 
@@ -2462,9 +3040,11 @@ mod tests {
     fn payload_encoding_codes_round_trip() {
         assert_eq!(payload_encoding_code("rgb").unwrap(), 0);
         assert_eq!(payload_encoding_code("toned-v1").unwrap(), 1);
+        assert_eq!(payload_encoding_code("toned-v2").unwrap(), 2);
         assert_eq!(payload_encoding_from_code(0).unwrap(), "rgb");
         assert_eq!(payload_encoding_from_code(1).unwrap(), "toned-v1");
-        assert!(payload_encoding_from_code(2).is_err());
+        assert_eq!(payload_encoding_from_code(2).unwrap(), "toned-v2");
+        assert!(payload_encoding_from_code(3).is_err());
     }
 
     #[test]
@@ -2533,6 +3113,141 @@ mod tests {
         let decoded = decode_toned_carrier_map(&bytes, Some(1537)).unwrap();
 
         assert_eq!(decoded, spans);
+    }
+
+    #[test]
+    fn tone_clock_map_round_trips() {
+        let clock = ToneClockDescriptor {
+            rotation_centidegrees: vec![12_345],
+            blend: true,
+            bits_per_pixel: 20,
+            ordering: ToneOrdering::ChromaProximity,
+            rings: vec![16],
+            span: (0, TONE_CLOCK_SPAN_UNITS as u16),
+            slots: (0..16u8)
+                .map(|k| ToneClockSlotDescriptor {
+                    base: [k * 16, 255 - k * 16, 128],
+                    luma_tolerance: 48 + k,
+                    gap_base: [k * 16 + 8, 255 - k * 16, 140],
+                    gap_luma_tolerance: 48 + k,
+                })
+                .collect(),
+            gap_switch_offsets: vec![1_000, 2_000, 70_000, 71_000],
+        };
+        let bytes = encode_tone_clock_map(&clock, Some(140_000)).unwrap();
+        // One ring is still a version 1 map: 7 header bytes, 8 per slot,
+        // 1 + (2 + 2 + 3 + 3) for the switches, and not a byte more than the
+        // records already pressed carry.
+        assert_eq!(bytes[0], TONE_CLOCK_MAP_VERSION_WEDGES);
+        assert_eq!(bytes.len(), 7 + 16 * 8 + 11);
+        assert_eq!(decode_tone_clock_map(&bytes, Some(140_000)).unwrap(), clock);
+        assert!(decode_tone_clock_map(&bytes, Some(70_500)).is_err());
+
+        let mut one_slot = clock.clone();
+        one_slot.slots.truncate(1);
+        one_slot.rings = vec![1];
+        assert!(encode_tone_clock_map(&one_slot, None).is_err());
+        let mut spun_too_far = clock.clone();
+        spun_too_far.rotation_centidegrees = vec![36_000];
+        assert!(encode_tone_clock_map(&spun_too_far, None).is_err());
+    }
+
+    /// The house wheel — eight pockets inside, sixteen outside — goes into
+    /// the map and comes back the same wheel.
+    #[test]
+    fn a_ringed_tone_clock_map_round_trips() {
+        let clock = ToneClockDescriptor {
+            rotation_centidegrees: vec![4_500, 9_000],
+            blend: true,
+            bits_per_pixel: 20,
+            ordering: ToneOrdering::ChromaProximity,
+            rings: vec![8, 16],
+            span: (3_100, 9_700),
+            slots: (0..24u8)
+                .map(|k| ToneClockSlotDescriptor {
+                    base: [k * 10, 255 - k * 10, 128],
+                    luma_tolerance: 40 + k,
+                    gap_base: [k * 10 + 8, 255 - k * 10, 140],
+                    gap_luma_tolerance: 40 + k,
+                })
+                .collect(),
+            gap_switch_offsets: vec![1_000],
+        };
+        let bytes = encode_tone_clock_map(&clock, Some(140_000)).unwrap();
+        assert_eq!(bytes[0], TONE_CLOCK_MAP_VERSION);
+        // 4 header bytes, then 1 + 2 ring counts, 2 rotations of 2, 4 for
+        // the band, 8 per pocket, and 1 + 2 for the one switch.
+        assert_eq!(bytes.len(), 4 + 1 + 2 + 4 + 4 + 24 * 8 + 3);
+        assert_eq!(clock.rotation_centidegrees, vec![4_500, 9_000]);
+        assert_eq!(decode_tone_clock_map(&bytes, Some(140_000)).unwrap(), clock);
+
+        // A wheel whose tones do not add up to its pockets is not a wheel.
+        let mut short = clock.clone();
+        short.slots.truncate(23);
+        assert!(encode_tone_clock_map(&short, None).is_err());
+        // Neither is one whose band is not a band.
+        let mut inside_out = clock.clone();
+        inside_out.span = (9_700, 3_100);
+        assert!(encode_tone_clock_map(&inside_out, None).is_err());
+    }
+
+    /// A version 1 map — every clock-toned record pressed so far — still
+    /// reads, as the one-ring wheel over the whole disc that it is.
+    #[test]
+    fn a_version_one_map_still_decodes_as_wedges() {
+        let mut bytes = vec![
+            TONE_CLOCK_MAP_VERSION_WEDGES,
+            20,
+            ToneOrdering::ChromaProximity.wire_code(),
+            1,
+        ];
+        bytes.extend_from_slice(&1_250u16.to_be_bytes());
+        bytes.push(4);
+        for k in 0..4u8 {
+            bytes.extend_from_slice(&[k, k, k]);
+            bytes.push(16);
+            bytes.extend_from_slice(&[k, k, k]);
+            bytes.push(16);
+        }
+        bytes.push(0);
+        let clock = decode_tone_clock_map(&bytes, None).unwrap();
+        assert_eq!(clock.rings, vec![4]);
+        assert_eq!(clock.span, (0, TONE_CLOCK_SPAN_UNITS as u16));
+        assert!(!clock.has_rings());
+        // And it re-encodes to exactly the bytes it came from.
+        assert_eq!(encode_tone_clock_map(&clock, None).unwrap(), bytes);
+    }
+
+    #[test]
+    fn tone_clock_is_inside_the_identity_only_when_present() {
+        let plain = test_descriptor(vec![1; CACHE_ENCRYPTION_SECRET_LENGTH]);
+        let mut clocked = plain.clone();
+        clocked.tone_clock = Some(ToneClockDescriptor {
+            rotation_centidegrees: vec![0],
+            blend: false,
+            bits_per_pixel: 20,
+            ordering: ToneOrdering::ChromaProximity,
+            rings: vec![2],
+            span: (0, TONE_CLOCK_SPAN_UNITS as u16),
+            slots: vec![
+                ToneClockSlotDescriptor {
+                    base: [1, 2, 3],
+                    luma_tolerance: 8,
+                    gap_base: [4, 5, 6],
+                    gap_luma_tolerance: 8,
+                };
+                2
+            ],
+            gap_switch_offsets: Vec::new(),
+        });
+        let plain_identity = signed_descriptor_identity_bytes(&plain).unwrap();
+        let clocked_identity = signed_descriptor_identity_bytes(&clocked).unwrap();
+        assert!(clocked_identity.starts_with(&plain_identity));
+        assert!(clocked_identity.len() > plain_identity.len());
+        assert_ne!(
+            cache_encryption_identity_bytes(&plain).unwrap(),
+            cache_encryption_identity_bytes(&clocked).unwrap()
+        );
     }
 
     #[test]

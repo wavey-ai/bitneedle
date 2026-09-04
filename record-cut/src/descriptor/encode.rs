@@ -11,7 +11,8 @@ use record_core::SpiralFamily;
 use record_descriptor::{
     compute_descriptor_crc32, encode_cache_encryption_descriptor, encode_isrc_segment,
     encode_toned_carrier_map, normalize_upc, payload_encoding_code, record_profile_code,
-    release_id_to_bytes, CacheEncryptionDescriptor, SignedReleaseReference, ToneSpanDescriptor,
+    release_id_to_bytes, CacheEncryptionDescriptor, DeadwaxExtent, SignedReleaseReference,
+    ToneSpanDescriptor,
     TrackIsrc, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1, RECORD_DESCRIPTOR_MAGIC,
     RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION, RECORD_DESCRIPTOR_VERSION_HOUSE,
     SEGMENT_ADDITIONAL_SIGNATURES, SEGMENT_ARTIST, SEGMENT_ARTWORK_CREDIT, SEGMENT_BSC_POINTER,
@@ -20,7 +21,7 @@ use record_descriptor::{
     SEGMENT_DEFERRED_ATTESTATION, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_ISRC, SEGMENT_LABEL,
     SEGMENT_PAYLOAD_ENCODING, SEGMENT_RECORD_PROFILE, SEGMENT_RELEASE_ID,
     SEGMENT_SIGNED_RELEASE_REFERENCE, SEGMENT_SPIRAL_GEOMETRY, SEGMENT_STREAM_BYTE_LENGTH,
-    SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP, SEGMENT_UPC,
+    SEGMENT_DEADWAX_EXTENT, SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP, SEGMENT_UPC,
 };
 
 pub const RECORD_DESCRIPTOR_TEXT_LIMIT: usize = 96;
@@ -51,6 +52,8 @@ pub struct RecordDescriptorInput {
     pub signed_release_reference: Option<SignedReleaseReference>,
     pub bsc_pointer: Option<Vec<u8>>,
     pub tone_spans: Vec<ToneSpanDescriptor>,
+    /// The clockface for a toned-v2 groove; `None` for every other encoding.
+    pub tone_clock: Option<record_descriptor::ToneClockDescriptor>,
     pub cache_encryption: Option<CacheEncryptionDescriptor>,
     /// The deferred group: written after the press, and never unsigned.
     pub chain_anchor: Option<Vec<u8>>,
@@ -60,6 +63,11 @@ pub struct RecordDescriptorInput {
     /// Signatures beyond the first: a pressing may be attested by the
     /// artist, by yl.vin, or by both.
     pub additional_signatures: Vec<SignedReleaseReference>,
+    /// The deadwax the cut left behind, and whether anything has claimed it.
+    /// `None` when the programme ran to the label and there is no band, and
+    /// the renderer fills this in — the extent is a property of where the
+    /// groove actually stopped, which nothing above the lathe knows.
+    pub deadwax: Option<DeadwaxExtent>,
     /// The groove geometry family. Archimedean writes a v2 descriptor,
     /// byte-identical to every record before spiral families existed;
     /// vari-pitch writes the house v3 descriptor with a spiral-geometry
@@ -311,15 +319,41 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
             if !descriptor.tone_spans.is_empty() {
                 bail!("rgb payload encoding must not include tone spans");
             }
+            if descriptor.tone_clock.is_some() {
+                bail!("rgb payload encoding must not include a tone clock");
+            }
             Vec::new()
         }
         PAYLOAD_ENCODING_TONED_V1 => {
             if descriptor.tone_spans.is_empty() {
                 bail!("toned-v1 payload encoding requires tone spans");
             }
+            if descriptor.tone_clock.is_some() {
+                bail!("toned-v1 payload encoding must not include a tone clock");
+            }
             encode_toned_carrier_map(&descriptor.tone_spans, Some(descriptor.stream_byte_length))?
         }
+        record_descriptor::PAYLOAD_ENCODING_TONED_V2 => {
+            if !descriptor.tone_spans.is_empty() {
+                bail!("toned-v2 payload encoding must not include tone spans");
+            }
+            Vec::new()
+        }
         other => bail!("unsupported canonical payload encoding {other}"),
+    };
+    let tone_clock_map = match (payload_encoding_text, descriptor.tone_clock.as_ref()) {
+        (record_descriptor::PAYLOAD_ENCODING_TONED_V2, Some(clock)) => {
+            record_descriptor::encode_tone_clock_map(clock, Some(descriptor.stream_byte_length))?
+        }
+        (record_descriptor::PAYLOAD_ENCODING_TONED_V2, None) => {
+            bail!("toned-v2 payload encoding requires a tone clock")
+        }
+        _ => Vec::new(),
+    };
+
+    let deadwax = match descriptor.deadwax.as_ref() {
+        Some(extent) => record_descriptor::encode_deadwax_extent(extent)?,
+        None => Vec::new(),
     };
 
     let mut out = Vec::new();
@@ -346,6 +380,7 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_SIGNED_RELEASE_REFERENCE, signed_release_reference),
         (SEGMENT_BSC_POINTER, bsc_pointer),
         (SEGMENT_TONED_CARRIER_MAP, toned_carrier_map),
+        (record_descriptor::SEGMENT_TONE_CLOCK_MAP, tone_clock_map),
         (SEGMENT_CACHE_ENCRYPTION, cache_encryption),
         (SEGMENT_CHAIN_ANCHOR, chain_anchor),
         (SEGMENT_ISRC, isrcs),
@@ -353,6 +388,7 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_DEFERRED_ATTESTATION, deferred_attestation),
         (SEGMENT_ADDITIONAL_SIGNATURES, additional_signatures),
         (SEGMENT_SPIRAL_GEOMETRY, spiral_geometry),
+        (SEGMENT_DEADWAX_EXTENT, deadwax),
     ] {
         if payload.is_empty() {
             continue;
@@ -417,6 +453,71 @@ mod tests {
             key_derivation: CacheKeyDerivation::HkdfSha256,
             secret: vec![7u8; CACHE_ENCRYPTION_SECRET_LENGTH],
         }
+    }
+
+    fn deadwax(claim: Option<[u8; 4]>, used: u32) -> DeadwaxExtent {
+        DeadwaxExtent {
+            outer_radius: 700,
+            inner_radius: 420,
+            pixel_capacity: 96_000,
+            encoding: record_descriptor::DEADWAX_ENCODING_GRAYSCALE_NIBBLE,
+            byte_capacity: 48_000,
+            claim,
+            claimed_byte_length: used,
+        }
+    }
+
+    /// The band survives the stream: a reader that holds nothing but the
+    /// descriptor learns where the deadwax is and that nobody is in it.
+    #[test]
+    fn a_free_deadwax_round_trips_through_the_stream() {
+        let mut input = base_input();
+        input.deadwax = Some(deadwax(None, 0));
+
+        let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+        let extent = decoded.deadwax.expect("deadwax segment");
+
+        assert!(extent.is_free());
+        assert_eq!(extent.outer_radius, 700);
+        assert_eq!(extent.inner_radius, 420);
+        assert_eq!(extent.free_byte_capacity(), 48_000);
+    }
+
+    /// And a claimed one says who has it and how much of it is left.
+    #[test]
+    fn a_claimed_deadwax_carries_its_owner_and_what_is_left() {
+        let mut input = base_input();
+        input.deadwax = Some(deadwax(Some(*b"SIDE"), 12_000));
+
+        let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+        let extent = decoded.deadwax.expect("deadwax segment");
+
+        assert_eq!(extent.claim, Some(*b"SIDE"));
+        assert!(!extent.is_free());
+        assert_eq!(extent.free_byte_capacity(), 36_000);
+    }
+
+    /// A claim longer than the band it claims is a malformed record, not a
+    /// band that happens to be over-full: the writer got its own arithmetic
+    /// wrong and every reader after it would inherit the mistake.
+    #[test]
+    fn a_claim_cannot_outrun_its_band() {
+        let mut input = base_input();
+        input.deadwax = Some(deadwax(Some(*b"SIDE"), 48_001));
+
+        assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
+    }
+
+    /// A record whose programme ran to the label has no band, and writes no
+    /// segment: absence is the declaration.
+    #[test]
+    fn no_deadwax_writes_no_segment() {
+        let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+
+        assert!(decoded.deadwax.is_none());
     }
 
     #[test]

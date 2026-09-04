@@ -45,6 +45,27 @@ const HEADER_SPIRAL_TURNS: f64 = 2.0;
 const TRAILER_SPIRAL_TURNS: f64 = 4.0;
 const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
 
+/// A wheel's rotation: one for all of it, or one per ring.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RotationDegrees {
+    Whole(f64),
+    PerRing(Vec<f64>),
+}
+
+impl RotationDegrees {
+    /// The rotation of each of `rings` rings, padded from the last given.
+    fn per_ring(&self, rings: usize) -> Vec<f64> {
+        let given: &[f64] = match self {
+            Self::Whole(one) => std::slice::from_ref(one),
+            Self::PerRing(many) => many,
+        };
+        (0..rings)
+            .map(|ring| given.get(ring).or_else(|| given.last()).copied().unwrap_or(0.0))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderOptions {
@@ -83,6 +104,45 @@ pub struct RenderOptions {
     /// limit, before gamut mapping). Defaults to `0.2`. Has no effect
     /// unless `groove_tone_color` is also set.
     pub gap_tone_lightness: Option<f64>,
+    /// Clockface tones: CSS hex colours, one per slot, 2–64 of them. The
+    /// disc is divided into that many equal angular slots; slot zero begins
+    /// at `grooveToneRotationDegrees` clockwise from twelve o'clock and the
+    /// rest follow clockwise, so the app's picker can run once per slot of
+    /// the artwork and hand the results straight over. When set, the payload
+    /// is encoded "toned-v2" — every slot at the same bits per pixel, so the
+    /// groove is exactly as long as a single-tone cut — and this takes
+    /// precedence over `grooveToneColor`. Track gaps lighten per slot as
+    /// `gapToneLightness` describes.
+    pub groove_tone_slots: Option<Vec<String>>,
+    /// The slots in each ring of the wheel, innermost first — `[8, 16]` is
+    /// eight pockets across the inside of the groove band and sixteen around
+    /// the outside, and `grooveToneSlots` then carries twenty-four colours,
+    /// innermost ring first and clockwise from twelve within each ring.
+    ///
+    /// Defaults to one ring holding every slot, which is what a wheel was
+    /// before it had rings and is written as a version 1 clock map. The band
+    /// the rings divide is the groove's own, taken from the record profile:
+    /// a ring has to be a band of groove or it has nothing to tone.
+    ///
+    /// Capacity is untouched by any of it. Every pocket's palette carries
+    /// the same bits per pixel and the bit stream runs continuously across
+    /// them, so the groove is exactly as long as a single-tone cut.
+    pub groove_tone_rings: Option<Vec<u32>>,
+    /// Where slot zero begins, in degrees clockwise from twelve o'clock.
+    ///
+    /// One number turns the whole wheel. An array turns each ring on its own,
+    /// innermost first, padded from the last given — which is how the rings
+    /// are made to turn at different rates, so the alignment between them
+    /// changes with the spin instead of the wheel reading as one stamped
+    /// shape however far it is turned.
+    ///
+    /// Defaults to `0`. Ignored without slots.
+    pub groove_tone_rotation_degrees: Option<RotationDegrees>,
+    /// Whether neighbouring slots run into each other — a pixel near a
+    /// boundary takes the neighbour's tone in proportion to its nearness,
+    /// decided per pixel from its groove index — or step hard. Defaults to
+    /// `true`. Ignored without slots.
+    pub groove_tone_blend: Option<bool>,
     #[serde(default)]
     pub guide_outlines: bool,
     /// How much of the payload band this cut lays its programme across,
@@ -92,6 +152,16 @@ pub struct RenderOptions {
     /// inside it stays deadwax, the way a lathe leaves a side it did not
     /// fill. `1.0` is the historical cut that always ran to the label.
     pub groove_span_fraction: Option<f64>,
+    /// The pitch to cut at, centre to centre between turns, in rendered
+    /// pixels. Clamped at [`record_core::MIN_TURN_SEPARATION_PX`].
+    ///
+    /// The clamp is not a preference. `trace_record_spiral_with_family`
+    /// rounds every point to an integer pixel and skips one already taken,
+    /// so turns closer than the grid can separate merge: measured on the ten
+    /// at 576, asking 1.75 draws 2.33, 1.50 draws 3.00, 1.30 draws 4.25 —
+    /// wider than asked and irregular. At 2.0 and above asked and drawn
+    /// agree, so that is the only range this option can honestly serve.
+    pub turn_separation_px: Option<f64>,
     /// Groove geometry family: `"archimedean"` (the default) or
     /// `"variPitch"`. Vari-pitch is the house v3 cut — the lathe's
     /// vari-pitch head, spacing breathing in slow bands across the disc.
@@ -277,6 +347,8 @@ pub struct RenderPayload {
     /// Resolved groove tone span tuples
     /// (`[byteOffset, byteLength, baseRgbHex, lumaTolerance, bitsPerPixel, ordering]`),
     /// byte offsets relative to the first byte after the raw BRS1 prefix.
+    /// For a clock-toned (toned-v2) groove this is instead the resolved
+    /// `ToneClockDescriptor` as a JSON object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rgb_tone: Option<serde_json::Value>,
     pub validation: ValidationPayload,
@@ -1640,6 +1712,29 @@ fn span_fraction_floor_estimate(track_pixel_count: usize, geometry: &RecordProfi
     ((outer - swept.sqrt()) / band).clamp(0.0, 1.0)
 }
 
+/// The span `track_pixel_count` occupies at a named pitch.
+///
+/// A spiral's arc between two radii is `(r_out^2 - r_in^2) / 2b`, so the
+/// radius a payload reaches is the one making that equal its own pixel count.
+/// Solved, not searched. Returns 1.0 when the programme would reach past the
+/// innermost recorded diameter — the caller's signal that the pitch it asked
+/// for does not fit this side.
+fn span_for_turn_separation(
+    track_pixel_count: usize,
+    geometry: &RecordProfileGeometry,
+    separation_px: f64,
+) -> f64 {
+    let outer = payload_outer_radius(geometry) as f64;
+    let inner = payload_inner_radius(geometry) as f64;
+    let band = (outer - inner).max(1.0);
+    let b = separation_px / (2.0 * PI);
+    let reached_squared = outer * outer - 2.0 * b * track_pixel_count as f64;
+    if reached_squared <= inner * inner {
+        return 1.0;
+    }
+    ((outer - reached_squared.sqrt()) / band).clamp(1e-6, 1.0)
+}
+
 #[derive(Debug, Clone)]
 struct CutFit {
     span_fraction: f64,
@@ -1668,8 +1763,24 @@ fn solve_cut(
     family: &SpiralFamily,
     record_profile: &str,
     requested_span_fraction: f64,
+    requested_separation_px: Option<f64>,
 ) -> Result<CutFit> {
     let geometry = describe_record_profile(record_profile)?;
+
+    // A named pitch is arithmetic, not a search: the span it implies follows
+    // from the payload. The only question left is whether the programme
+    // reached the label before it ran out, and if it did the ordinary fit
+    // takes over.
+    if let Some(separation) = requested_separation_px {
+        let separation = separation.max(record_core::MIN_TURN_SEPARATION_PX);
+        let span = span_for_turn_separation(track_pixel_count, &geometry, separation);
+        if span < 1.0 {
+            let fit = find_exact_fit_with_coverage(
+                width, height, track_pixel_count, family, record_profile, span, None,
+            )?;
+            return Ok(CutFit { span_fraction: span, fit });
+        }
+    }
     let mut span_fraction = record_core::validate_groove_span_fraction(requested_span_fraction)?
         .max(span_fraction_floor_estimate(track_pixel_count, &geometry))
         .min(1.0);
@@ -1866,6 +1977,7 @@ fn render_track_scanline_onto_transparent_spiral(
     descriptor_input: &RecordDescriptorInput,
     guide_outlines: bool,
     dummy_spiral_regions: &[DummySpiralPixelRegion],
+    tone_clock: Option<(&[u8], &record_groove::ToneClock)>,
 ) -> Result<TransparentRender> {
     let spiral_mask = build_spiral_mask(width, height, b_value, family, record_profile)?;
     let mut data = vec![0_u8; width * height * 4];
@@ -1892,11 +2004,53 @@ fn render_track_scanline_onto_transparent_spiral(
         .map(|(first, last)| (*first, *last));
     paint_unused_metadata_groove(&mut data, &lead_out_indices, 0, 53, 0);
 
+    // What the cut left standing between the programme and the descriptor's
+    // inner band, declared so that something other than this renderer can
+    // use it. The geometry was already knowable — the prefix carries the
+    // radius the cut stopped at and the feed the lead-out is cut with — but
+    // knowable is not the same as offered: without this a writer has to
+    // re-derive the band from the profile's own tables and guess whether
+    // anyone else is already in there.
+    //
+    // The encoding byte is what keeps this a declaration rather than a
+    // promise about pixels. Today the band is offered under the descriptor's
+    // own grey nibble scheme, which is the only one a reader of this vintage
+    // can be assumed to implement; when the metadata bands go toned, the
+    // renderer raises the encoding and the capacity with it and nothing
+    // about the segment's shape changes.
+    let deadwax_extent = {
+        let geometry = describe_record_profile(record_profile)?;
+        let inner = payload_inner_radius(&geometry).max(0);
+        let outer = cut_inner_radius.max(0);
+        if lead_out_pixel_capacity == 0 || outer <= inner {
+            None
+        } else {
+            let pixel_capacity = u32::try_from(lead_out_pixel_capacity)
+                .context("deadwax pixel capacity exceeds u32")?;
+            Some(record_descriptor::DeadwaxExtent {
+                outer_radius: u16::try_from(outer).context("deadwax outer radius exceeds u16")?,
+                inner_radius: u16::try_from(inner).context("deadwax inner radius exceeds u16")?,
+                pixel_capacity,
+                encoding: record_descriptor::DEADWAX_ENCODING_GRAYSCALE_NIBBLE,
+                byte_capacity: pixel_capacity / 2,
+                claim: record_descriptor::DEADWAX_CLAIM_FREE,
+                claimed_byte_length: 0,
+            })
+        }
+    };
+
     let mut track_offset = 0usize;
     let mut carrier_pixels_written = 0usize;
     let mut dummy_region_index = 0usize;
     let mut dummy_region_pixels_written = 0usize;
     let mut pixels_added = 0usize;
+    // Where each track pixel landed, in track order. A clock tones a pixel
+    // by where it sits on the disc, which is only known once it is placed.
+    let mut placements = Vec::with_capacity(if tone_clock.is_some() {
+        track_data.len() / 4
+    } else {
+        0
+    });
 
     for &pixel_index in spiral_mask.ordered_pixel_indices.iter() {
         while let Some(region) = dummy_spiral_regions.get(dummy_region_index) {
@@ -1930,11 +2084,53 @@ fn render_track_scanline_onto_transparent_spiral(
 
         data[rgba_index..rgba_index + 4]
             .copy_from_slice(&track_data[track_offset..track_offset + 4]);
+        if tone_clock.is_some() {
+            placements.push(pixel_index);
+        }
 
         track_offset += 4;
         carrier_pixels_written += 1;
         pixels_added += 1;
     }
+
+    if let Some((codes, clock)) = tone_clock {
+        let center_x = width as f64 / 2.0;
+        let center_y = height as f64 / 2.0;
+        let angles: Vec<f64> = placements
+            .iter()
+            .map(|&index| {
+                record_groove::pixel_angle(
+                    (index % width) as f64,
+                    (index / width) as f64,
+                    center_x,
+                    center_y,
+                )
+            })
+            .collect();
+        // The same two numbers, read the other way: which ring of the wheel
+        // this pixel of the spiral is passing through.
+        let radii: Vec<f64> = placements
+            .iter()
+            .map(|&index| {
+                record_groove::pixel_radius(
+                    (index % width) as f64,
+                    (index / width) as f64,
+                    center_x,
+                    center_y,
+                )
+            })
+            .collect();
+        let toned = record_groove::encode_toned_clock(codes, clock, &angles, &radii)?;
+        for (&index, pixel) in placements.iter().zip(toned.chunks_exact(4)) {
+            data[index * 4..index * 4 + 4].copy_from_slice(pixel);
+        }
+    }
+
+    // The extent is the lathe's to declare, not the caller's: it is a fact
+    // about where the groove actually stopped, which nothing above this
+    // knows until the cut has been laid down.
+    let mut descriptor_input = descriptor_input.clone();
+    descriptor_input.deadwax = deadwax_extent;
 
     let descriptor = paint_descriptor_spiral(
         &mut data,
@@ -1942,7 +2138,7 @@ fn render_track_scanline_onto_transparent_spiral(
         height,
         record_profile,
         b_value,
-        descriptor_input,
+        &descriptor_input,
     )?;
 
     let pixels_remaining =
@@ -2220,20 +2416,56 @@ fn render_payload_codes_to_transparent_spiral(
     render_options: &RenderOptions,
 ) -> Result<TransparentRenderResult> {
     let normalized_profile = normalize_record_profile_name(record_profile)?;
-    let groove_tone = groove_toned_track(codes, render_options)?;
-    let (track, source_dimensions, rgb_tone, tone_spans) = match groove_tone {
-        Some((track, rgb_tone, tone_spans)) => {
-            let side = square_side_for_pixel_count(track.pixel_count);
-            let dimensions = (side, side, track.pixel_count);
-            (track, dimensions, Some(rgb_tone), tone_spans)
-        }
-        None => {
-            let source = payload_codes_to_rgb_color_block(codes, code_format)?;
-            let source_track = payload_track_from_rgb_block(&source);
-            let track = filter_track_pixels(&source_track.track_data, true, false);
-            let dimensions = (source.width, source.height, source_track.pixel_count);
-            (track, dimensions, None, Vec::new())
-        }
+    let groove_clock = groove_clock_track(codes, render_options, &normalized_profile)?;
+    let groove_tone = if groove_clock.is_some() {
+        None
+    } else {
+        groove_toned_track(codes, render_options)?
+    };
+    let (track, source_dimensions, rgb_tone, tone_spans, tone_clock, payload_encoding) =
+        match (groove_clock, groove_tone) {
+            (Some((track, rgb_tone, clock_descriptor, clock)), _) => {
+                let side = square_side_for_pixel_count(track.pixel_count);
+                let dimensions = (side, side, track.pixel_count);
+                (
+                    track,
+                    dimensions,
+                    Some(rgb_tone),
+                    Vec::new(),
+                    Some((clock_descriptor, clock)),
+                    PAYLOAD_ENCODING_TONED_V2.to_string(),
+                )
+            }
+            (None, Some((track, rgb_tone, tone_spans))) => {
+                let side = square_side_for_pixel_count(track.pixel_count);
+                let dimensions = (side, side, track.pixel_count);
+                (
+                    track,
+                    dimensions,
+                    Some(rgb_tone),
+                    tone_spans,
+                    None,
+                    PAYLOAD_ENCODING_TONED_V1.to_string(),
+                )
+            }
+            (None, None) => {
+                let source = payload_codes_to_rgb_color_block(codes, code_format)?;
+                let source_track = payload_track_from_rgb_block(&source);
+                let track = filter_track_pixels(&source_track.track_data, true, false);
+                let dimensions = (source.width, source.height, source_track.pixel_count);
+                (
+                    track,
+                    dimensions,
+                    None,
+                    Vec::new(),
+                    None,
+                    normalize_payload_code_format(code_format)?.to_string(),
+                )
+            }
+        };
+    let (tone_clock_descriptor, tone_clock) = match tone_clock {
+        Some((descriptor, clock)) => (Some(descriptor), Some(clock)),
+        None => (None, None),
     };
     let dummy_spiral_regions =
         dummy_spiral_pixel_regions_for_track(render_options, track.pixel_count);
@@ -2270,6 +2502,7 @@ fn render_payload_codes_to_transparent_spiral(
         &spiral_family,
         &normalized_profile,
         resolve_groove_span_fraction(render_options)?,
+        render_options.turn_separation_px,
     )?;
     let CutFit {
         span_fraction: groove_span_fraction,
@@ -2304,11 +2537,7 @@ fn render_payload_codes_to_transparent_spiral(
         },
         record_profile: normalized_profile.clone(),
         stream_byte_length: codes.len(),
-        payload_encoding: Some(if rgb_tone.is_some() {
-            PAYLOAD_ENCODING_TONED_V1.to_string()
-        } else {
-            normalize_payload_code_format(code_format)?.to_string()
-        }),
+        payload_encoding: Some(payload_encoding),
         title: render_options.header_title.clone(),
         artist: render_options.header_artist.clone(),
         release_id: render_options.header_release_id.clone(),
@@ -2322,6 +2551,7 @@ fn render_payload_codes_to_transparent_spiral(
         signed_release_reference: signed_release_reference_from_render_options(render_options)?,
         bsc_pointer: None,
         tone_spans,
+        tone_clock: tone_clock_descriptor,
         cache_encryption,
         chain_anchor: None,
         additional_signatures: Vec::new(),
@@ -2329,6 +2559,10 @@ fn render_payload_codes_to_transparent_spiral(
         upc: None,
         deferred_attestation: None,
         spiral_family,
+        // Filled in by the cut: see `deadwax_extent` in
+        // `render_track_scanline_onto_transparent_spiral`. Nothing above the
+        // lathe knows where the groove stopped.
+        deadwax: None,
     };
 
     let rendered = render_track_scanline_onto_transparent_spiral(
@@ -2343,6 +2577,7 @@ fn render_payload_codes_to_transparent_spiral(
         &descriptor_input,
         render_options.guide_outlines,
         &dummy_spiral_regions,
+        tone_clock.as_ref().map(|clock| (codes, clock)),
     )?;
 
     let min_perceptible_turn_gap = resolve_render_min_perceptible_turn_gap(render_options)?
@@ -2376,6 +2611,7 @@ fn render_payload_codes_to_transparent_spiral(
 }
 
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
+pub const PAYLOAD_ENCODING_TONED_V2: &str = "toned-v2";
 /// Size budget used when auto-tuning a groove tone colour; shared so other
 /// layers (e.g. record-wasm metadata injection) resolve identical configs.
 pub const GROOVE_TONE_MAX_SIZE_FACTOR: f64 = 1.2;
@@ -2485,6 +2721,218 @@ fn encode_toned_spans_with_shared_config(
     }
 
     Ok(TonedRender { rgba, spans })
+}
+
+/// Builds the clock-toned groove when `grooveToneSlots` is set.
+///
+/// The track returned is a placeholder of the right length — opaque black,
+/// one pixel per `bits_per_pixel` bits of payload — because a clock tones a
+/// pixel by where it lands on the disc, and that is only known once the
+/// spiral has been fitted and traced. The paint step does the toning in
+/// place (see `render_track_scanline_onto_transparent_spiral`). Alongside
+/// it: the descriptor the record carries and the wheel the painter uses,
+/// which are the same thing in two crates' types.
+///
+/// Each slot's tone is auto-tuned exactly as a single groove tone is, and
+/// its gap tone lightened the same way; bits per pixel comes from the size
+/// budget alone, so every slot agrees and the groove is as long as a
+/// single-tone cut.
+fn groove_clock_track(
+    codes: &[u8],
+    render_options: &RenderOptions,
+    record_profile: &str,
+) -> Result<
+    Option<(
+        TrackPixels,
+        serde_json::Value,
+        record_descriptor::ToneClockDescriptor,
+        record_groove::ToneClock,
+    )>,
+> {
+    let Some(slot_hexes) = render_options
+        .groove_tone_slots
+        .as_deref()
+        .filter(|slots| !slots.is_empty())
+    else {
+        return Ok(None);
+    };
+    if codes.is_empty() {
+        bail!("cannot tone an empty payload");
+    }
+    // One ring holding every slot unless the caller has asked for more:
+    // that is the wheel of wedges every clock was, and it stays a version 1
+    // map so a record that does not need rings is the record it was.
+    let rings: Vec<u32> = match render_options.groove_tone_rings.as_deref() {
+        Some(rings) if !rings.is_empty() => rings.to_vec(),
+        _ => vec![slot_hexes.len() as u32],
+    };
+    if rings.len() > record_groove::TONE_CLOCK_MAX_RINGS {
+        bail!(
+            "grooveToneRings has {} rings, more than {}",
+            rings.len(),
+            record_groove::TONE_CLOCK_MAX_RINGS
+        );
+    }
+    for (index, &slots) in rings.iter().enumerate() {
+        if !(record_groove::TONE_CLOCK_MIN_SLOTS..=record_groove::TONE_CLOCK_MAX_SLOTS)
+            .contains(&(slots as usize))
+        {
+            bail!(
+                "grooveToneRings[{index}] needs between {} and {} slots, got {slots}",
+                record_groove::TONE_CLOCK_MIN_SLOTS,
+                record_groove::TONE_CLOCK_MAX_SLOTS,
+            );
+        }
+    }
+    let cells: usize = rings.iter().map(|&slots| slots as usize).sum();
+    if cells != slot_hexes.len() {
+        bail!(
+            "grooveToneRings asks for {cells} pockets but grooveToneSlots carries {} colours",
+            slot_hexes.len()
+        );
+    }
+    if cells > record_groove::TONE_CLOCK_MAX_CELLS {
+        bail!(
+            "a wheel of {cells} pockets is more than {}",
+            record_groove::TONE_CLOCK_MAX_CELLS
+        );
+    }
+
+    // The band the rings divide is the groove's own. A ring is a band of the
+    // record and it can only tone the part of it the spiral runs through, so
+    // the wheel is laid across the payload annulus rather than across the
+    // whole disc — where the innermost ring would be under the label, toning
+    // nothing.
+    let geometry = record_core::describe_record_profile(record_profile)?;
+    let span_of = |radius: i32| -> u16 {
+        let whole = f64::from(geometry.outer_radius).max(1.0);
+        ((f64::from(radius) / whole).clamp(0.0, 1.0)
+            * f64::from(record_groove::TONE_CLOCK_SPAN_UNITS))
+        .round() as u16
+    };
+    let span = (
+        span_of(geometry.payload_inner_radius),
+        span_of(geometry.payload_outer_radius),
+    );
+
+    let units_per_degree = f64::from(record_groove::TONE_CLOCK_ROTATION_UNITS_PER_TURN) / 360.0;
+    let rotation_centidegrees: Vec<u16> = render_options
+        .groove_tone_rotation_degrees
+        .clone()
+        .unwrap_or(RotationDegrees::Whole(0.0))
+        .per_ring(rings.len())
+        .into_iter()
+        .map(|degrees| {
+            if !degrees.is_finite() {
+                bail!("grooveToneRotationDegrees must be finite");
+            }
+            Ok(((degrees.rem_euclid(360.0) * units_per_degree).round() as u32
+                % record_groove::TONE_CLOCK_ROTATION_UNITS_PER_TURN) as u16)
+        })
+        .collect::<Result<_>>()?;
+    let blend = render_options.groove_tone_blend.unwrap_or(true);
+    let predominant_gap_tone_lightness =
+        normalize_gap_tone_lightness(render_options.gap_tone_lightness)?;
+
+    let mut slots = Vec::with_capacity(slot_hexes.len());
+    let mut shared: Option<(u32, CarrierToneOrdering)> = None;
+    for (index, hex) in slot_hexes.iter().enumerate() {
+        let hex = hex.trim();
+        if hex.is_empty() {
+            bail!("grooveToneSlots[{index}] is empty");
+        }
+        let base = TonedConfig::from_hex(hex, 0, 1).base;
+        let config = TonedConfig::balanced(base, GROOVE_TONE_MAX_SIZE_FACTOR)
+            .with_context(|| format!("grooveToneSlots[{index}] {hex} cannot be toned"))?;
+        match shared {
+            None => shared = Some((config.bits_per_pixel, config.ordering)),
+            Some((bits_per_pixel, ordering)) => {
+                if (bits_per_pixel, ordering) != (config.bits_per_pixel, config.ordering) {
+                    bail!(
+                        "grooveToneSlots[{index}] {hex} tuned to {} bits per pixel where slot 0                          tuned to {bits_per_pixel}; a clock's slots must agree",
+                        config.bits_per_pixel
+                    );
+                }
+            }
+        }
+        let effective_gap_tone_lightness =
+            adaptive_gap_tone_lightness(oklch_lightness(base), predominant_gap_tone_lightness)?;
+        let gap_base = lighten_base_oklch(base, effective_gap_tone_lightness)?;
+        // Tuned on its own rather than borrowing the track tone's window: a
+        // lightened tone sits nearer the gamut ceiling, where the same luma
+        // window holds fewer colours than 2^20, and the clock carries a gap
+        // tolerance per pocket for exactly this.
+        let gap_config = TonedConfig::balanced(gap_base, GROOVE_TONE_MAX_SIZE_FACTOR)
+            .with_context(|| format!("grooveToneSlots[{index}] {hex} gap tone cannot be toned"))?;
+        if (gap_config.bits_per_pixel, gap_config.ordering) != (config.bits_per_pixel, config.ordering) {
+            bail!(
+                "grooveToneSlots[{index}] {hex} gap tone tuned to {} bits per pixel where its \
+                 track tone tuned to {}; a clock's tones must agree",
+                gap_config.bits_per_pixel,
+                config.bits_per_pixel
+            );
+        }
+        slots.push(record_groove::ClockSlot {
+            base,
+            luma_tolerance: config.luma_tolerance,
+            gap_base,
+            gap_luma_tolerance: gap_config.luma_tolerance,
+        });
+    }
+    let (bits_per_pixel, ordering) = shared.expect("at least two slots");
+
+    let clock = record_groove::ToneClock {
+        rotation_centidegrees: rotation_centidegrees.clone(),
+        blend,
+        bits_per_pixel,
+        ordering,
+        rings: rings.clone(),
+        span,
+        slots,
+        gap_switch_offsets: track_gap_tone_switch_offsets(codes).unwrap_or_default(),
+    };
+    clock.validate()?;
+
+    let descriptor = record_descriptor::ToneClockDescriptor {
+        rotation_centidegrees,
+        blend,
+        rings,
+        span,
+        bits_per_pixel: u8::try_from(bits_per_pixel).context("tone bits per pixel exceeds u8")?,
+        ordering: match ordering {
+            CarrierToneOrdering::BaseProximity => ToneOrdering::BaseProximity,
+            CarrierToneOrdering::ChromaProximity => ToneOrdering::ChromaProximity,
+        },
+        slots: clock
+            .slots
+            .iter()
+            .map(|slot| record_descriptor::ToneClockSlotDescriptor {
+                base: slot.base,
+                luma_tolerance: slot.luma_tolerance,
+                gap_base: slot.gap_base,
+                gap_luma_tolerance: slot.gap_luma_tolerance,
+            })
+            .collect(),
+        gap_switch_offsets: clock.gap_switch_offsets.clone(),
+    };
+    record_descriptor::validate_tone_clock(&descriptor, Some(codes.len()))?;
+    let clock_json = serde_json::to_value(&descriptor)?;
+
+    let pixel_count = clock.pixel_count(codes.len());
+    let mut track_data = vec![0u8; pixel_count * 4];
+    for pixel in track_data.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+
+    Ok(Some((
+        TrackPixels {
+            track_data,
+            pixel_count,
+        },
+        clock_json,
+        descriptor,
+        clock,
+    )))
 }
 
 /// Builds the toned groove track when `grooveToneColor` is set: raw RGB
@@ -2605,8 +3053,13 @@ fn groove_toned_track(
 
 pub fn write_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
+    // `Default` rather than `Best`: on groove noise both levels find the
+    // same matches, so the bytes are within a few hundred of one another
+    // while the encode runs several times faster — and either way it is
+    // lossless, so the record's pixels are untouched. What matters about a
+    // pressed PNG is what it decodes to, not how hard the deflater worked.
     let encoder =
-        PngEncoder::new_with_quality(&mut out, CompressionType::Best, FilterType::Adaptive);
+        PngEncoder::new_with_quality(&mut out, CompressionType::Default, FilterType::Adaptive);
 
     encoder
         .write_image(rgba, width as u32, height as u32, ExtendedColorType::Rgba8)
@@ -3487,6 +3940,205 @@ mod tests {
 
         let native_stream = record_core::parse_chunk_stream(&decoded.bytes).unwrap();
         record_core::validate_track_listing_metadata(&native_stream.metadata).unwrap();
+    }
+
+    /// Sixteen pockets, spun a quarter of a pocket, blended, with a track
+    /// gap: the record must come back byte for byte, be no longer than a
+    /// single-tone cut, and carry the wheel — not a span list — in its
+    /// descriptor.
+    #[test]
+    fn clock_toned_groove_round_trips_with_gaps() {
+        let music_one = vec![0xAAu8; 4_000];
+        let gap = vec![0xCCu8; 1_500];
+        let music_two = vec![0xBBu8; 5_500];
+
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
+            tracks: vec![
+                TrackInput {
+                    title: "Side A".to_string(),
+                    first_revolution_index: Some(0),
+                    revolution_count: Some(1),
+                },
+                TrackInput {
+                    title: "Side B".to_string(),
+                    first_revolution_index: Some(2),
+                    revolution_count: Some(1),
+                },
+            ],
+            track_gaps: vec![TrackGapInput {
+                first_revolution_index: 1,
+                revolution_count: 1,
+                after_track_index: 0,
+            }],
+        };
+        let entries = vec![
+            PayloadEntryInput {
+                payload_descriptor_index: 0,
+                bytes: music_one,
+            },
+            PayloadEntryInput {
+                payload_descriptor_index: 0,
+                bytes: gap,
+            },
+            PayloadEntryInput {
+                payload_descriptor_index: 0,
+                bytes: music_two,
+            },
+        ];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+
+        // A hue wheel, one pocket every 22.5°.
+        let slots: Vec<String> = (0..16)
+            .map(|k| {
+                let t = k as f64 / 16.0 * std::f64::consts::TAU;
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (150.0 + 90.0 * t.cos()) as u8,
+                    (150.0 + 90.0 * (t + 2.094).cos()) as u8,
+                    (150.0 + 90.0 * (t + 4.189).cos()) as u8
+                )
+            })
+            .collect();
+        let options = serde_json::json!({
+            "grooveToneSlots": slots,
+            "grooveToneRotationDegrees": 5.625,
+            "grooveToneBlend": true,
+        })
+        .to_string();
+        let output =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&options)).unwrap();
+
+        let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/fixtures");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("clock-toned-single45.png"), &output.png_bytes).unwrap();
+
+        assert_eq!(output.descriptor.payload_encoding, PAYLOAD_ENCODING_TONED_V2);
+        assert!(output.descriptor.tone_spans.is_empty());
+        let clock = output.descriptor.tone_clock.as_ref().expect("clock in descriptor");
+        assert_eq!(clock.slots.len(), 16);
+        // One rotation per ring since the clock grew a wheel: the option is
+        // still a single angle, so every ring must have taken it.
+        assert!(
+            !clock.rotation_centidegrees.is_empty(),
+            "a clock with no rotation at all"
+        );
+        assert!(
+            clock
+                .rotation_centidegrees
+                .iter()
+                .all(|&turn| turn == 563),
+            "5.625° in hundredths, rounded, on every ring: {:?}",
+            clock.rotation_centidegrees
+        );
+        assert!(clock.blend);
+        assert_eq!(clock.gap_switch_offsets.len(), 2, "into the gap and out again");
+        for slot in &clock.slots {
+            assert_ne!(slot.gap_base, slot.base);
+        }
+
+        // No longer than one tone at the same budget — a pixel or two
+        // shorter, in fact: spans each pad their own tail, the clock's one
+        // stream pads once.
+        let single = serde_json::json!({ "grooveToneColor": slots[0] }).to_string();
+        let single_output =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&single)).unwrap();
+        assert!(
+            output.payload.filtered_pixel_count <= single_output.payload.filtered_pixel_count,
+            "clock {} px, single tone {} px",
+            output.payload.filtered_pixel_count,
+            single_output.payload.filtered_pixel_count
+        );
+
+        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+            &output.png_bytes,
+            "single45",
+            Some(stream.len()),
+        )
+        .unwrap();
+        assert_eq!(decoded.bytes, stream, "clock-toned groove did not round-trip");
+    }
+
+    /// The house wheel, cut and read back: eight pockets across the inside
+    /// of the groove band and sixteen around the outside, blended both
+    /// ways, at no cost in groove length.
+    #[test]
+    fn a_ringed_clock_tones_the_groove_and_round_trips() {
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
+            tracks: vec![TrackInput {
+                title: "Side A".to_string(),
+                first_revolution_index: Some(0),
+                revolution_count: Some(1),
+            }],
+            track_gaps: Vec::new(),
+        };
+        let entries = vec![PayloadEntryInput {
+            payload_descriptor_index: 0,
+            bytes: vec![0x5Au8; 11_000],
+        }];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+
+        // Twenty-four pockets: the inner ring's eight, then the outer
+        // ring's sixteen, each its own hue so no two pockets could be
+        // mistaken for one another.
+        let cells: Vec<String> = (0..24)
+            .map(|k| {
+                let t = k as f64 / 24.0 * std::f64::consts::TAU;
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (150.0 + 90.0 * t.cos()) as u8,
+                    (150.0 + 90.0 * (t + 2.094).cos()) as u8,
+                    (150.0 + 90.0 * (t + 4.189).cos()) as u8
+                )
+            })
+            .collect();
+        let options = serde_json::json!({
+            "grooveToneSlots": cells,
+            "grooveToneRings": [8, 16],
+            "grooveToneRotationDegrees": 11.25,
+            "grooveToneBlend": true,
+        })
+        .to_string();
+        let output =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&options)).unwrap();
+
+        let clock = output.descriptor.tone_clock.as_ref().expect("clock in descriptor");
+        assert_eq!(clock.rings, vec![8, 16]);
+        assert_eq!(clock.slots.len(), 24);
+        assert!(clock.has_rings(), "a ringed wheel is written as one");
+        // The band the rings divide is the groove's own, not the disc's:
+        // an inner ring under the label would tone nothing.
+        let geometry = record_core::describe_record_profile("single45").unwrap();
+        assert!(clock.span.0 > 0, "the band starts at the groove, not the spindle");
+        assert!(
+            f64::from(clock.span.1) / f64::from(record_groove::TONE_CLOCK_SPAN_UNITS)
+                <= f64::from(geometry.outer_radius),
+            "the band ends inside the record"
+        );
+
+        // Rings cost no groove: the same payload on a wheel of wedges is
+        // the same length.
+        let wedges = serde_json::json!({
+            "grooveToneSlots": cells[..16],
+            "grooveToneRotationDegrees": 11.25,
+            "grooveToneBlend": true,
+        })
+        .to_string();
+        let flat =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&wedges)).unwrap();
+        assert_eq!(
+            output.payload.filtered_pixel_count, flat.payload.filtered_pixel_count,
+            "rings changed the length of the cut"
+        );
+
+        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+            &output.png_bytes,
+            "single45",
+            Some(stream.len()),
+        )
+        .unwrap();
+        assert_eq!(decoded.bytes, stream, "ringed clock groove did not round-trip");
     }
 
     #[test]

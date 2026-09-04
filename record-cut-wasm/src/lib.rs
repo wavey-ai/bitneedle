@@ -647,6 +647,13 @@ struct RenderOptions {
     header_generation_version: Option<String>,
     track_listing: Option<serde_json::Value>,
     dummy_spiral_regions: Option<serde_json::Value>,
+    /// Decode the pressed groove back and compare bytes before handing the
+    /// PNG over. On by default: a press that cannot prove it reads is not a
+    /// press. A live preview — the wheel lab's CUT disc, which cuts again on
+    /// every move of the hand — passes `false` and skips the second half of
+    /// the work; the pixels are the same either way, only the proof is
+    /// skipped.
+    verify: Option<bool>,
 }
 
 #[wasm_bindgen(js_name = renderPayloadCodesToPng)]
@@ -1540,23 +1547,31 @@ fn render_chunk_input_to_png(
         );
     }
 
-    let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
-        &rendered.png_bytes,
-        normalized_profile,
-        Some(chunk_input.stream_bytes.len()),
-    )
-    .context("rendered PNG groove could not be decoded")?;
+    // The proof half of the cut: the groove read back out of the PNG it was
+    // just pressed into, compared byte for byte against what went in. About
+    // half the wall clock on a many-pocket wheel — thirty palettes' reverse
+    // indexes built for the way back — so an interactive preview may ask out
+    // of it. The stream was already parsed on the way in, and nothing here
+    // touches a pixel either way.
+    if resolved_render_options.verify.unwrap_or(true) {
+        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+            &rendered.png_bytes,
+            normalized_profile,
+            Some(chunk_input.stream_bytes.len()),
+        )
+        .context("rendered PNG groove could not be decoded")?;
 
-    if decoded.bytes != chunk_input.stream_bytes {
-        bail!(
-            "rendered PNG groove bytes mismatch: decoded={}, expected={}",
-            decoded.bytes.len(),
-            chunk_input.stream_bytes.len()
-        );
+        if decoded.bytes != chunk_input.stream_bytes {
+            bail!(
+                "rendered PNG groove bytes mismatch: decoded={}, expected={}",
+                decoded.bytes.len(),
+                chunk_input.stream_bytes.len()
+            );
+        }
+
+        record_core::parse_chunk_stream(&decoded.bytes)
+            .context("rendered PNG groove did not decode to a valid BCS2 chunk stream")?;
     }
-
-    record_core::parse_chunk_stream(&decoded.bytes)
-        .context("rendered PNG groove did not decode to a valid BCS2 chunk stream")?;
 
     let payload_json = serde_json::to_string(&rendered.payload)?;
     let header_json = render_header_json(
@@ -3062,5 +3077,103 @@ mod tests {
             header.get("al").and_then(serde_json::Value::as_u64),
             Some(64_960)
         );
+    }
+}
+
+#[cfg(test)]
+mod lab_check {
+    use std::time::Instant;
+
+    fn payload() -> Vec<u8> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.ecdc");
+        std::fs::read(path).expect("fixture")
+    }
+
+    /// `count` distinct hues, offset by `seed` so no two runs share a
+    /// palette — the cache would otherwise answer the second question with
+    /// the first one's work.
+    fn hues(count: usize, seed: f64) -> Vec<String> {
+        (0..count)
+            .map(|k| {
+                let t = seed + k as f64 / count as f64 * std::f64::consts::TAU;
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (150.0 + 90.0 * t.cos()) as u8,
+                    (150.0 + 90.0 * (t + 2.094).cos()) as u8,
+                    (150.0 + 90.0 * (t + 4.189).cos()) as u8
+                )
+            })
+            .collect()
+    }
+
+    fn run(label: &str, bytes: &[u8], options: serde_json::Value) {
+        let at = Instant::now();
+        let out = super::render_payload_entries_with_descriptor_to_png_native(
+            vec![bytes.to_vec()],
+            r#"{"container":"ECDC"}"#,
+            "rgb",
+            "single45",
+            208.5,
+            &options.to_string(),
+        );
+        let took = at.elapsed();
+        match out {
+            Ok(result) => println!(
+                "{label:24} {:>7.2}s   {} KB PNG",
+                took.as_secs_f64(),
+                result.png_bytes.len() / 1024
+            ),
+            Err(error) => println!("{label:24} FAILED: {error:#}"),
+        }
+    }
+
+    /// Where the time in a cut actually goes, by difference: a single-tone
+    /// cut is everything but the wheel, and each wheel above it adds only
+    /// its own palettes.
+    #[test]
+    #[ignore]
+    fn where_the_cost_is() {
+        let bytes = payload();
+        println!("\n{} KB of payload, single45, exact fit\n", bytes.len() / 1024);
+
+        run("no groove at all", &bytes, serde_json::json!({
+            "payloadEncoding": "rgb", "grooveToneColor": "#8899AA",
+        }));
+        for (label, cells, rings, seed) in [
+            ("clock, 2 pockets", 2usize, vec![2u32], 0.1),
+            ("clock, 8 pockets", 8, vec![8], 0.2),
+            ("clock, 16 flat", 16, vec![16], 0.3),
+            ("clock, 8 + 16", 24, vec![8, 16], 0.4),
+            ("clock, 12 + 16", 28, vec![12, 16], 0.5),
+        ] {
+            run(label, &bytes, serde_json::json!({
+                "payloadEncoding": "rgb",
+                "grooveToneSlots": hues(cells, seed),
+                "grooveToneRings": rings,
+                "grooveToneBlend": true,
+            }));
+        }
+
+        // The fit's own share: the same cuts with the pitch handed to them
+        // rather than searched for.
+        run("no groove, pitch given", &bytes, serde_json::json!({
+            "payloadEncoding": "rgb", "grooveToneColor": "#8899AA", "turnSeparationPx": 1.7,
+        }));
+        run("8 + 16, pitch given", &bytes, serde_json::json!({
+            "payloadEncoding": "rgb",
+            "grooveToneSlots": hues(24, 0.7),
+            "grooveToneRings": [8, 16],
+            "grooveToneBlend": true,
+            "turnSeparationPx": 1.7,
+        }));
+
+        // A quarter of the payload on the same wheel: what scales with the
+        // spiral rather than with the wheel.
+        run("8 + 16, quarter payload", &bytes[..bytes.len() / 4], serde_json::json!({
+            "payloadEncoding": "rgb",
+            "grooveToneSlots": hues(24, 0.6),
+            "grooveToneRings": [8, 16],
+            "grooveToneBlend": true,
+        }));
     }
 }

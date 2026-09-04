@@ -2687,6 +2687,7 @@ fn descriptor_input_with_rewrite_options(
         signed_release_reference,
         bsc_pointer: Some(encode_sidecar_header_pointer(&pointer)?),
         tone_spans: descriptor.tone_spans.clone(),
+        tone_clock: descriptor.tone_clock.clone(),
         cache_encryption: descriptor.cache_encryption.clone(),
         chain_anchor: None,
         additional_signatures: Vec::new(),
@@ -2694,6 +2695,9 @@ fn descriptor_input_with_rewrite_options(
         upc: None,
         deferred_attestation: None,
         spiral_family: descriptor.spiral_family,
+        // The extent is the lathe's: the renderer fills it in when the cut
+        // tells it where the groove stopped.
+        deadwax: None,
     })
 }
 
@@ -2735,6 +2739,7 @@ fn descriptor_input_with_cache_encryption_option(
         signed_release_reference: descriptor.signed_release_reference.clone(),
         bsc_pointer: descriptor.bsc_pointer.clone(),
         tone_spans: descriptor.tone_spans.clone(),
+        tone_clock: descriptor.tone_clock.clone(),
         cache_encryption,
         // Carried across as they were: a repaint must not drop what the
         // record already says.
@@ -2744,6 +2749,9 @@ fn descriptor_input_with_cache_encryption_option(
         deferred_attestation: descriptor.deferred_attestation.clone(),
         additional_signatures: descriptor.additional_signatures.clone(),
         spiral_family: descriptor.spiral_family,
+        // The extent is the lathe's: the renderer fills it in when the cut
+        // tells it where the groove stopped.
+        deadwax: None,
     }
 }
 
@@ -3856,6 +3864,7 @@ mod attestation_tests {
             signed_release_reference: None,
             bsc_pointer: None,
             tone_spans: Vec::new(),
+            tone_clock: None,
             cache_encryption: None,
             chain_anchor: Some(vec![9; 8]),
             additional_signatures: Vec::new(),

@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use bytes2rgb::rgba_to_bytes as track_rgba_to_bytes;
-use bytes2rgb::{decode_toned_spans, ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig};
+use bytes2rgb::{
+    decode_toned_clock, decode_toned_spans, pixel_angle, pixel_radius, ClockSlot, ToneClock,
+    ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig,
+};
 use record_core::{
     build_header_spiral_indices, build_spiral_mask_with_family, build_trailer_spiral_indices,
     known_record_profile_names, normalize_record_profile_name, SpiralFamily, RECORD_STREAM_MAGIC,
@@ -10,6 +13,7 @@ use record_descriptor::{
 };
 
 pub const PAYLOAD_ENCODING_TONED_V1: &str = "toned-v1";
+pub const PAYLOAD_ENCODING_TONED_V2: &str = "toned-v2";
 
 #[derive(Debug, Clone)]
 pub struct DecodedChunkStream {
@@ -56,6 +60,90 @@ fn decode_toned_track_to_bytes(
         .collect();
 
     decode_toned_spans(track_data, &spans).context("failed to decode toned-v1 groove pixels")
+}
+
+fn bytes_tone_ordering(ordering: DescriptorToneOrdering) -> BytesToneOrdering {
+    match ordering {
+        DescriptorToneOrdering::BaseProximity => BytesToneOrdering::BaseProximity,
+        DescriptorToneOrdering::ChromaProximity => BytesToneOrdering::ChromaProximity,
+    }
+}
+
+/// Decodes a toned-v2 groove. Each lifted pixel's slot follows from where it
+/// sits on the raster — its angle about the centre, in the record's frame —
+/// and its index in the groove, so the raster indices the walk visited are
+/// all the decoder needs beyond the wheel itself.
+fn decode_clock_toned_track_to_bytes(
+    track_data: &[u8],
+    pixel_indices: &[usize],
+    width: usize,
+    height: usize,
+    clock: &record_descriptor::ToneClockDescriptor,
+    expected_byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    record_descriptor::validate_tone_clock(clock, expected_byte_length)
+        .context("invalid toned-v2 tone clock")?;
+    let wheel = ToneClock {
+        // A version 1 map comes back from the descriptor with its one ring
+        // written out, so nothing here has to know which version it was.
+        rings: clock.ring_slots(),
+        span: clock.span,
+        rotation_centidegrees: clock.rotation_centidegrees.clone(),
+        blend: clock.blend,
+        bits_per_pixel: u32::from(clock.bits_per_pixel),
+        ordering: bytes_tone_ordering(clock.ordering),
+        slots: clock
+            .slots
+            .iter()
+            .map(|slot| ClockSlot {
+                base: slot.base,
+                luma_tolerance: slot.luma_tolerance,
+                gap_base: slot.gap_base,
+                gap_luma_tolerance: slot.gap_luma_tolerance,
+            })
+            .collect(),
+        gap_switch_offsets: clock.gap_switch_offsets.clone(),
+    };
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let angles: Vec<f64> = pixel_indices
+        .iter()
+        .map(|&index| {
+            pixel_angle(
+                (index % width) as f64,
+                (index / width) as f64,
+                center_x,
+                center_y,
+            )
+        })
+        .collect();
+    // The ring a pixel is in, off the same two numbers its angle came from.
+    let radii: Vec<f64> = pixel_indices
+        .iter()
+        .map(|&index| {
+            pixel_radius(
+                (index % width) as f64,
+                (index / width) as f64,
+                center_x,
+                center_y,
+            )
+        })
+        .collect();
+    // A payload that came in over its nominal keeps writing past the cut;
+    // whatever was lifted beyond the declared length is padding to the wheel.
+    let needed = expected_byte_length
+        .map(|length| record_descriptor::tone_clock_pixel_count(clock, length))
+        .transpose()?
+        .unwrap_or(angles.len())
+        .min(angles.len());
+    decode_toned_clock(
+        &track_data[..needed * 4],
+        &wheel,
+        &angles[..needed],
+        &radii[..needed],
+        expected_byte_length,
+    )
+    .context("failed to decode toned-v2 groove pixels")
 }
 
 fn load_png_rgba(png_bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
@@ -135,7 +223,7 @@ fn decode_record_groove_to_track_data(
     record_profile: &str,
     b_value: f64,
     spiral_family: &SpiralFamily,
-) -> Result<(Vec<u8>, usize)> {
+) -> Result<(Vec<u8>, usize, Vec<usize>)> {
     let expected_rgba_len = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -156,6 +244,7 @@ fn decode_record_groove_to_track_data(
         None,
     )?;
     let mut track_data = Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
+    let mut lifted_indices = Vec::with_capacity(mask.ordered_pixel_indices.len());
 
     for &pixel_index in &mask.ordered_pixel_indices {
         let rgba_index = pixel_index
@@ -171,6 +260,7 @@ fn decode_record_groove_to_track_data(
         }
 
         track_data.extend_from_slice(&rgba[rgba_index..rgba_index + 4]);
+        lifted_indices.push(pixel_index);
     }
 
     if track_data.is_empty() {
@@ -179,7 +269,7 @@ fn decode_record_groove_to_track_data(
 
     let pixel_count = track_data.len() / 4;
 
-    Ok((track_data, pixel_count))
+    Ok((track_data, pixel_count, lifted_indices))
 }
 
 pub fn infer_record_profile_from_png(png_bytes: &[u8]) -> Result<String> {
@@ -257,7 +347,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
     let descriptor = decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
     let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
 
-    let (track_data, pixel_count) = decode_record_groove_to_track_data(
+    let (track_data, pixel_count, pixel_indices) = decode_record_groove_to_track_data(
         &rgba,
         width,
         height,
@@ -272,6 +362,20 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
         }
         PAYLOAD_ENCODING_TONED_V1 => {
             decode_toned_track_to_bytes(&track_data, &descriptor.tone_spans, resolved_byte_length)?
+        }
+        PAYLOAD_ENCODING_TONED_V2 => {
+            let clock = descriptor
+                .tone_clock
+                .as_ref()
+                .context("toned-v2 record descriptor has no tone clock")?;
+            decode_clock_toned_track_to_bytes(
+                &track_data,
+                &pixel_indices,
+                width,
+                height,
+                clock,
+                resolved_byte_length,
+            )?
         }
         other => bail!("unsupported record payload encoding: {other}"),
     };

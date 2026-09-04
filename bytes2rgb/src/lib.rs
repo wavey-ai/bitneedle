@@ -158,16 +158,114 @@ fn rec709_luma_of(color: [u8; 3]) -> f64 {
 
 /// Rec. 709 chroma (Cb, Cr) of a colour, signed and centred on 0.
 pub fn chroma_rec709(color: [u8; 3]) -> (f64, f64) {
-    let luma = rec709_luma_of(color);
+    chroma_rec709_with_luma(color, rec709_luma_of(color))
+}
+
+/// [`chroma_rec709`] for a colour whose luma the caller already has. The
+/// enumerations below compute luma to decide whether a colour is in the
+/// window at all, so recomputing it here was a third of their work.
+#[inline]
+fn chroma_rec709_with_luma(color: [u8; 3], luma: f64) -> (f64, f64) {
     let cb = (color[2] as f64 - luma) / 1.8556;
     let cr = (color[0] as f64 - luma) / 1.5748;
     (cb, cr)
 }
 
-fn chroma_distance(a: [u8; 3], b: [u8; 3]) -> f64 {
-    let (a_cb, a_cr) = chroma_rec709(a);
-    let (b_cb, b_cr) = chroma_rec709(b);
+/// Chroma distance from `color` to a tone whose chroma is already known —
+/// the base tone is fixed for a whole enumeration, so its half of the
+/// arithmetic is hoisted out. Same operations in the same order as
+/// [`chroma_distance`], so the two agree bit for bit.
+#[inline]
+fn chroma_distance_from(color: [u8; 3], luma: f64, base_chroma: (f64, f64)) -> f64 {
+    let (a_cb, a_cr) = chroma_rec709_with_luma(color, luma);
+    let (b_cb, b_cr) = base_chroma;
     ((a_cb - b_cb).powi(2) + (a_cr - b_cr).powi(2)).sqrt()
+}
+
+/// Number of 8-bit RGB colours whose rounded Rec. 709 luma is within
+/// `luma_tolerance` of the base tone's, without materialising them.
+fn iso_luma_count(base: [u8; 3], luma_tolerance: u8) -> usize {
+    let (min, max) = iso_luma_window(base, luma_tolerance);
+    fold_iso_luma_rows(
+        || 0usize,
+        |count, r| {
+            for g in 0..=255u16 {
+                let rg = red_green_luma(r, g);
+                if let Some((low, high)) = iso_luma_blue_range(rg, min, max) {
+                    *count += usize::from(high - low + 1);
+                }
+            }
+        },
+        |count, piece| *count += piece,
+    )
+}
+
+/// The rounded-luma window `[min, max]` a tolerance opens around a base.
+fn iso_luma_window(base: [u8; 3], luma_tolerance: u8) -> (f64, f64) {
+    let target = rec709_luma_of(base).round();
+    (
+        target - luma_tolerance as f64,
+        target + luma_tolerance as f64,
+    )
+}
+
+/// The red and green share of a colour's luma. Blue is added on top in
+/// [`blue_luma`], in the order [`rec709_luma_of`] evaluates it, so a luma
+/// built in two steps here is the same `f64` as one built in one step there.
+#[inline]
+fn red_green_luma(r: u16, g: u16) -> f64 {
+    0.2126 * r as f64 + 0.7152 * g as f64
+}
+
+#[inline]
+fn blue_luma(rg: f64, b: u16) -> f64 {
+    rg + 0.0722 * b as f64
+}
+
+/// The blue values `low..=high` at which a colour with red/green luma `rg`
+/// has a rounded luma inside `[min, max]`, or `None` when there are none.
+///
+/// The estimate brackets the answer as before; within it, rounded luma is
+/// monotone in blue (each step is a monotone floating-point operation), so
+/// each end is found by bisection on exactly the test that used to be run
+/// on every blue value. Same colours, eight probes instead of up to 256.
+fn iso_luma_blue_range(rg: f64, min: f64, max: f64) -> Option<(u16, u16)> {
+    let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
+    let b_high = (((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16).min(255);
+    if b_low > b_high {
+        return None;
+    }
+    let luma = |b: u16| blue_luma(rg, b).round();
+    if luma(b_high) < min || luma(b_low) > max {
+        return None;
+    }
+
+    // Smallest blue whose luma reaches `min`.
+    let (mut lo, mut hi) = (b_low, b_high);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if luma(mid) >= min {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let first = lo;
+    if luma(first) > max {
+        return None;
+    }
+
+    // Largest blue whose luma still fits under `max`.
+    let (mut lo, mut hi) = (first, b_high);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if luma(mid) <= max {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some((first, lo))
 }
 
 const PALETTE_SELECTION_BUCKETS: usize = 16_384;
@@ -178,13 +276,40 @@ struct KeyedColor {
     color: [u8; 3],
 }
 
-fn palette_selection_key(
-    color: [u8; 3],
+/// The per-colour state an enumeration needs to key candidates against the
+/// base tone: the tone itself and its chroma, worked out once.
+#[derive(Clone, Copy)]
+struct SelectionBase {
     base: [u8; 3],
+    chroma: (f64, f64),
     ordering: ToneOrdering,
-) -> f64 {
-    match ordering {
-        ToneOrdering::ChromaProximity => chroma_distance(color, base),
+}
+
+impl SelectionBase {
+    fn new(base: [u8; 3], ordering: ToneOrdering) -> Self {
+        Self {
+            base,
+            chroma: chroma_rec709(base),
+            ordering,
+        }
+    }
+
+    #[inline]
+    fn key(&self, color: [u8; 3], luma: f64) -> f64 {
+        palette_selection_key(color, luma, self)
+    }
+
+    #[inline]
+    fn bucket(&self, key: f64) -> usize {
+        palette_selection_bucket(key, self.ordering)
+    }
+}
+
+#[inline]
+fn palette_selection_key(color: [u8; 3], luma: f64, selection: &SelectionBase) -> f64 {
+    let base = selection.base;
+    match selection.ordering {
+        ToneOrdering::ChromaProximity => chroma_distance_from(color, luma, selection.chroma),
         ToneOrdering::BaseProximity => color
             .iter()
             .zip(base.iter())
@@ -195,7 +320,10 @@ fn palette_selection_key(
 
 fn palette_selection_bucket(key: f64, ordering: ToneOrdering) -> usize {
     let maximum = match ordering {
+        // Cb and Cr are each confined to roughly ±127.5, so the distance
+        // between any two chroma pairs is safely below 512.
         ToneOrdering::ChromaProximity => 512.0,
+        // Three squared 8-bit channel deltas.
         ToneOrdering::BaseProximity => 3.0 * 255.0 * 255.0,
     };
     ((key.clamp(0.0, maximum) / maximum) * (PALETTE_SELECTION_BUCKETS - 1) as f64)
@@ -206,28 +334,144 @@ fn compare_keyed_colors(a: &KeyedColor, b: &KeyedColor) -> std::cmp::Ordering {
     a.key.total_cmp(&b.key).then(a.color.cmp(&b.color))
 }
 
+/// Calls `visit` with every colour in the window and its (unrounded) luma,
+/// in enumeration order, on the calling thread.
+#[cfg(test)]
 fn visit_iso_luma_colors(
     base: [u8; 3],
     luma_tolerance: u8,
-    mut visit: impl FnMut([u8; 3]),
+    mut visit: impl FnMut([u8; 3], f64),
 ) {
-    let target = rec709_luma_of(base).round();
-    let min = target - luma_tolerance as f64;
-    let max = target + luma_tolerance as f64;
-
+    let (min, max) = iso_luma_window(base, luma_tolerance);
     for r in 0..=255u16 {
-        for g in 0..=255u16 {
-            let rg = 0.2126 * r as f64 + 0.7152 * g as f64;
-            let b_low = ((min - 0.5 - rg) / 0.0722).floor().max(0.0) as u16;
-            let b_high = ((max + 0.5 - rg) / 0.0722).ceil().min(255.0) as u16;
-            for b in b_low..=b_high.min(255) {
-                let luma = (rg + 0.0722 * b as f64).round();
-                if luma >= min && luma <= max {
-                    visit([r as u8, g as u8, b as u8]);
-                }
-            }
+        visit_iso_luma_row(r, min, max, &mut visit);
+    }
+}
+
+/// One red row of the enumeration: every green, and for each the blue
+/// range that lands in the window.
+#[inline]
+fn visit_iso_luma_row(r: u16, min: f64, max: f64, visit: &mut impl FnMut([u8; 3], f64)) {
+    for g in 0..=255u16 {
+        let rg = red_green_luma(r, g);
+        let Some((low, high)) = iso_luma_blue_range(rg, min, max) else {
+            continue;
+        };
+        for b in low..=high {
+            visit([r as u8, g as u8, b as u8], blue_luma(rg, b));
         }
     }
+}
+
+/// How many threads share an enumeration. wasm32 has no threads to offer,
+/// so there it is the caller's alone.
+fn enumeration_workers() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(16)
+    }
+}
+
+/// Folds the 256 red rows of an enumeration into worker-local state and
+/// merges the pieces. Rows are handed out one at a time across the
+/// available threads (a row's work varies with how much of the blue range
+/// lands in the window, so a static split would leave cores idle). None of
+/// this crate's folds care what order rows arrive in — they either add
+/// integers or collect colours that are sorted by a total order afterwards
+/// — so the answer is the one a single thread would give.
+fn fold_iso_luma_rows<S: Send>(
+    init: impl Fn() -> S + Sync,
+    row: impl Fn(&mut S, u16) + Sync,
+    mut merge: impl FnMut(&mut S, S),
+) -> S {
+    let workers = enumeration_workers();
+    if workers <= 1 {
+        let mut state = init();
+        for r in 0..=255u16 {
+            row(&mut state, r);
+        }
+        return state;
+    }
+
+    let next_row = std::sync::atomic::AtomicUsize::new(0);
+    let mut pieces = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut state = init();
+                    loop {
+                        let r = next_row.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if r > 255 {
+                            break state;
+                        }
+                        row(&mut state, r as u16);
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut state = pieces.remove(0);
+    for piece in pieces {
+        merge(&mut state, piece);
+    }
+    state
+}
+
+/// [`fold_iso_luma_rows`] over every colour in the window, with its luma.
+fn fold_iso_luma_colors<S: Send>(
+    base: [u8; 3],
+    luma_tolerance: u8,
+    init: impl Fn() -> S + Sync,
+    visit: impl Fn(&mut S, [u8; 3], f64) + Sync,
+    merge: impl FnMut(&mut S, S),
+) -> S {
+    let (min, max) = iso_luma_window(base, luma_tolerance);
+    fold_iso_luma_rows(
+        init,
+        |state, r| visit_iso_luma_row(r, min, max, &mut |color, luma| visit(state, color, luma)),
+        merge,
+    )
+}
+
+/// Sorts `slices` independently, sharing them out across the available
+/// threads. Each slice ends up as `sort_unstable_by` would leave it.
+fn sort_slices_by<T: Send>(
+    slices: Vec<&mut [T]>,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering + Sync,
+) {
+    let workers = enumeration_workers();
+    if workers <= 1 {
+        for slice in slices {
+            slice.sort_unstable_by(&compare);
+        }
+        return;
+    }
+    let slices = std::sync::Mutex::new(slices.into_iter());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let Some(slice) = lock(&slices).next() else {
+                    break;
+                };
+                slice.sort_unstable_by(&compare);
+            });
+        }
+    });
 }
 
 fn select_palette_colors(
@@ -237,13 +481,7 @@ fn select_palette_colors(
     ordering: ToneOrdering,
 ) -> Result<Vec<[u8; 3]>> {
     let needed = 1usize << bits_per_pixel;
-    let mut histogram = vec![0u32; PALETTE_SELECTION_BUCKETS];
-    let mut available = 0usize;
-    visit_iso_luma_colors(base, luma_tolerance, |color| {
-        let key = palette_selection_key(color, base, ordering);
-        histogram[palette_selection_bucket(key, ordering)] += 1;
-        available += 1;
-    });
+    let available = iso_luma_count(base, luma_tolerance);
     if available < needed {
         bail!(
             "only {} colours share the base tone's luma (±{}); {} bits per pixel needs {}",
@@ -254,6 +492,20 @@ fn select_palette_colors(
         );
     }
 
+    let selection = SelectionBase::new(base, ordering);
+    let histogram = fold_iso_luma_colors(
+        base,
+        luma_tolerance,
+        || vec![0u32; PALETTE_SELECTION_BUCKETS],
+        |histogram, color, luma| {
+            histogram[selection.bucket(selection.key(color, luma))] += 1;
+        },
+        |histogram, piece| {
+            for (total, part) in histogram.iter_mut().zip(piece) {
+                *total += part;
+            }
+        },
+    );
     let mut cumulative = 0usize;
     let cutoff_bucket = histogram
         .iter()
@@ -263,19 +515,55 @@ fn select_palette_colors(
         })
         .expect("available palette colours must occupy a selection bucket");
 
-    let mut selected = Vec::with_capacity(cumulative);
-    visit_iso_luma_colors(base, luma_tolerance, |color| {
-        let key = palette_selection_key(color, base, ordering);
-        if palette_selection_bucket(key, ordering) <= cutoff_bucket {
-            selected.push(KeyedColor { key, color });
-        }
-    });
-    if selected.len() > needed {
-        selected.select_nth_unstable_by(needed - 1, compare_keyed_colors);
-        selected.truncate(needed);
+    let candidates = fold_iso_luma_colors(
+        base,
+        luma_tolerance,
+        Vec::new,
+        |selected, color, luma| {
+            let key = selection.key(color, luma);
+            if selection.bucket(key) <= cutoff_bucket {
+                selected.push(KeyedColor { key, color });
+            }
+        },
+        |selected, piece| selected.extend(piece),
+    );
+
+    // The bucket is monotone in the key, so bucket order then key order is
+    // the full key order: place each candidate in its bucket's run and sort
+    // the runs separately (and in parallel), then cut at `needed`. The same
+    // palette one big sort would give, in a fraction of the time.
+    let mut starts = Vec::with_capacity(cutoff_bucket + 2);
+    let mut offset = 0usize;
+    for &count in &histogram[..=cutoff_bucket] {
+        starts.push(offset);
+        offset += count as usize;
     }
-    selected.sort_unstable_by(compare_keyed_colors);
-    Ok(selected.into_iter().map(|entry| entry.color).collect())
+    starts.push(offset);
+    let mut cursors = starts[..=cutoff_bucket].to_vec();
+    let mut placed = vec![
+        KeyedColor {
+            key: 0.0,
+            color: [0; 3]
+        };
+        cumulative
+    ];
+    for entry in candidates {
+        let cursor = &mut cursors[selection.bucket(entry.key)];
+        placed[*cursor] = entry;
+        *cursor += 1;
+    }
+    let mut runs = Vec::with_capacity(cutoff_bucket + 1);
+    let mut rest = placed.as_mut_slice();
+    for bucket in 0..=cutoff_bucket {
+        let (run, tail) = rest.split_at_mut(starts[bucket + 1] - starts[bucket]);
+        rest = tail;
+        if run.len() > 1 {
+            runs.push(run);
+        }
+    }
+    sort_slices_by(runs, compare_keyed_colors);
+    placed.truncate(needed);
+    Ok(placed.into_iter().map(|entry| entry.color).collect())
 }
 
 /// How palette colours are ordered (and therefore which `2^bits_per_pixel`
@@ -295,6 +583,12 @@ pub enum ToneOrdering {
 
 pub mod span;
 pub use span::{decode_toned_spans, ToneSpan};
+
+pub mod clock;
+pub use clock::{
+    decode_toned_clock, encode_toned_clock, pixel_angle, pixel_radius, ClockSlot, ToneClock,
+    TONE_CLOCK_MAX_SLOTS, TONE_CLOCK_MIN_SLOTS, TONE_CLOCK_ROTATION_UNITS_PER_TURN,
+};
 
 /// Configuration for a [`TonedPalette`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -337,7 +631,20 @@ impl TonedConfig {
 pub struct TonedPalette {
     config: TonedConfig,
     colors: Vec<[u8; 3]>,
-    index_of: HashMap<[u8; 3], u32>,
+    /// Reverse lookup, built on first use: each colour packed into the high
+    /// bits of a `u64` with its palette index in the low bits, sorted, so a
+    /// colour is found by bisection. At a million colours this sorts in a
+    /// few milliseconds and takes 8 MB, where a hash map took several times
+    /// as long to build and more room to hold.
+    index_of: OnceLock<Vec<u64>>,
+}
+
+/// One reverse-index entry: the colour in the high 24 bits, the palette
+/// index below.
+#[inline]
+fn reverse_index_entry(color: [u8; 3], index: u32) -> u64 {
+    (u64::from(color[0]) << 56 | u64::from(color[1]) << 48 | u64::from(color[2]) << 40)
+        | u64::from(index)
 }
 
 impl TonedPalette {
@@ -346,7 +653,7 @@ impl TonedPalette {
     #[cfg(test)]
     fn enumerate_iso_luma(base: [u8; 3], luma_tolerance: u8) -> Vec<[u8; 3]> {
         let mut colors = Vec::new();
-        visit_iso_luma_colors(base, luma_tolerance, |color| colors.push(color));
+        visit_iso_luma_colors(base, luma_tolerance, |color, _| colors.push(color));
         colors
     }
 
@@ -381,17 +688,41 @@ impl TonedPalette {
 
         let colors = select_palette_colors(base, luma_tolerance, bits_per_pixel, ordering)?;
 
-        let index_of = colors
-            .iter()
-            .enumerate()
-            .map(|(index, &color)| (color, index as u32))
-            .collect();
-
         Ok(Self {
             config,
             colors,
-            index_of,
+            index_of: OnceLock::new(),
         })
+    }
+
+    /// Palette colour at `index`.
+    pub fn color(&self, index: usize) -> [u8; 3] {
+        self.colors[index]
+    }
+
+    /// Palette index of an exact colour, if present.
+    pub fn index_of(&self, color: [u8; 3]) -> Option<u32> {
+        Self::lookup(self.reverse_index(), color)
+    }
+
+    fn reverse_index(&self) -> &[u64] {
+        self.index_of.get_or_init(|| {
+            let mut table: Vec<u64> = self
+                .colors
+                .iter()
+                .enumerate()
+                .map(|(index, &color)| reverse_index_entry(color, index as u32))
+                .collect();
+            table.sort_unstable();
+            table
+        })
+    }
+
+    #[inline]
+    fn lookup(table: &[u64], color: [u8; 3]) -> Option<u32> {
+        let probe = reverse_index_entry(color, 0);
+        let entry = *table.get(table.partition_point(|&entry| entry < probe))?;
+        (entry & !0xFF_FFFF_FFFF == probe).then_some(entry as u32)
     }
 
     /// The configuration this palette was built from. Rebuilding from it is
@@ -421,13 +752,14 @@ impl TonedPalette {
         let mut bytes = Vec::with_capacity(rgba.len() / 4 * bpp as usize / 8 + 1);
         let mut acc = 0u32;
         let mut acc_bits = 0u32;
+        let index_of = self.reverse_index();
 
         for chunk in rgba.chunks_exact(4) {
             if chunk[3] == 0 {
                 continue;
             }
 
-            let Some(&index) = self.index_of.get(&[chunk[0], chunk[1], chunk[2]]) else {
+            let Some(index) = Self::lookup(index_of, [chunk[0], chunk[1], chunk[2]]) else {
                 bail!(
                     "pixel #{:02X}{:02X}{:02X} is not in the toned palette",
                     chunk[0],
@@ -461,10 +793,11 @@ mod tests {
     use super::*;
 
     fn reference_palette(config: TonedConfig) -> Vec<[u8; 3]> {
+        let selection = SelectionBase::new(config.base, config.ordering);
         let mut keyed = TonedPalette::enumerate_iso_luma(config.base, config.luma_tolerance)
             .into_iter()
             .map(|color| KeyedColor {
-                key: palette_selection_key(color, config.base, config.ordering),
+                key: selection.key(color, rec709_luma_of(color)),
                 color,
             })
             .collect::<Vec<_>>();

@@ -43,7 +43,17 @@ pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
 /// the band collapses into flat noise, taking the artwork under it with it.
 /// This is the density ceiling. [`MIN_B_VALUE`] is only a divide-by-zero
 /// guard and says nothing about whether a cut is legible.
+///
+/// Two pixels is the raster's limit, not a preference, and asking for less
+/// does not get it. `trace_record_spiral_with_family` rounds every point to
+/// an integer pixel and skips one already taken, so turns closer than the
+/// grid can separate land on the same pixels and merge. Measured on the ten
+/// at 576, asking for 1.75 draws at 2.33, 1.50 draws at 3.00 and 1.30 draws
+/// at 4.25 — wider than asked, and irregular, because the merging beats
+/// against the grid. At 2.00 and above the tracer draws what it is given.
+/// A finer cut needs a bigger canvas, not a smaller number here.
 pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
+
 
 /// The pitch a cutting lathe feeds the head at through the lead-out, in
 /// millimetres per turn.
@@ -668,6 +678,13 @@ pub fn vari_pitch_params(family: &SpiralFamily, sweep_theta: f64) -> Option<Vari
     let phase_2 = TAU * unit_from_draw(splitmix64(&mut character));
     // The tuned cycle counts, each bent ±8% by the seed so two records
     // tuned alike still band apart.
+    //
+    // Widening this is not the way to make pressings differ. Tried at 2.6x
+    // either way: the band count drives how much of the face is inked, so a
+    // wide seed changes not just the pattern but the density — 15.7% of the
+    // addressable pixels between two draws — and the pressings read as
+    // different *quality* rather than as different records. Whatever varies a
+    // pressing has to leave the ink alone.
     let cycles_1 =
         tuning.wave_one_cycles * (0.92 + 0.16 * unit_from_draw(splitmix64(&mut character)));
     let cycles_2 =
@@ -860,31 +877,32 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
             diameter,
         )
     });
-    let authentic_inner = scaled_radius_mm(
+    // The playable band is the recorded area, and the recorded area is what
+    // the format above says it is. There is no second set of numbers.
+    //
+    // There used to be two: the band in use was `label_radius + 14/16/18`
+    // out to `margin_radius - 6`, sitting beside a pair derived from the
+    // standard that only a hypothetical fourth profile ever reached. Two
+    // answers to one question, and the one in use was the wrong one — it put
+    // the last turn 2.4-3.5 mm inside the minimum recorded diameter, cutting
+    // closer to the label than a plant would cut. A profile is true to the
+    // format here because there is nowhere else for it to be.
+    let payload_inner = scaled_radius_mm(
         physical.outer_radius_px,
         physical.finished_diameter_mm,
         physical.inner_recorded_diameter_mm,
     );
-    let authentic_outer = scaled_radius_mm(
+    let payload_outer = scaled_radius_mm(
         physical.outer_radius_px,
         physical.finished_diameter_mm,
         physical.outer_recorded_diameter_mm,
-    );
+    )
+    .max(1);
     let margin_radius = scaled_radius_mm(
         physical.outer_radius_px,
         physical.finished_diameter_mm,
         physical.margin_diameter_mm,
     );
-    let payload_inner = match physical.name {
-        "single45" => label_radius + 18,
-        "ten" => label_radius + 16,
-        "lp" => label_radius + 14,
-        _ => authentic_inner,
-    };
-    let payload_outer = match physical.name {
-        "single45" | "ten" | "lp" => (margin_radius - 6).max(1),
-        _ => authentic_outer,
-    };
 
     Ok(RecordProfileDef {
         pixels_per_mm: physical.outer_radius_px as f64 / (physical.finished_diameter_mm / 2.0),

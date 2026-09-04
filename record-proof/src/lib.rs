@@ -219,6 +219,31 @@ impl ProofConfig {
                 tone_spans.push(candidate);
             }
         }
+        // A clock's pockets are palettes like any other; the proof paints
+        // one swatch row per distinct palette, byte length being meaningless
+        // for a tone chosen by angle.
+        if let Some(clock) = &descriptor.tone_clock {
+            for slot in &clock.slots {
+                for (base, luma_tolerance) in [
+                    (slot.base, slot.luma_tolerance),
+                    (slot.gap_base, slot.gap_luma_tolerance),
+                ] {
+                    let candidate = ProofToneSpan {
+                        base,
+                        luma_tolerance,
+                        bits_per_pixel: clock.bits_per_pixel,
+                        ordering: clock.ordering,
+                        byte_length: 0,
+                    };
+                    if !tone_spans
+                        .iter()
+                        .any(|s| s.palette_key() == candidate.palette_key())
+                    {
+                        tone_spans.push(candidate);
+                    }
+                }
+            }
+        }
         Self {
             layout_version: PROOF_LAYOUT_VERSION,
             record_profile: descriptor.record_profile.clone(),

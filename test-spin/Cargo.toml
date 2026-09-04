@@ -9,15 +9,35 @@ license = "Apache-2.0"
 [[bin]]
 name = "record-test"
 path = "src/main.rs"
+# The CLI takes a bundle JSON path, so it is only built when the reader for
+# one is compiled in. The library is the part the phone and the browser
+# link, and it does not need EnCodec to read a record.
+required-features = ["bundle-metadata"]
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 hex = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 record-core = { path = "../record-core", version = "0.1.7" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
 record-decode = { path = "../record-decode", version = "0.1.7" }
 record-sidecar = { path = "../record-sidecar", version = "0.1.7" }
-encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"] }
+record-patternize = { path = "../record-patternize", version = "0.1.7" }
+encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"], optional = true }
+
+[features]
+# The ECDC packet-layout diagnostics, and the bundle JSON they are read
+# from. On by default because the CLI takes a bundle path; off for the
+# browser, which reads a record's manifest and has no bundle to hand — and
+# which should not pull EnCodec into a wasm module to be told so.
+default = ["bundle-metadata"]
+bundle-metadata = ["dep:encodec-rs"]
+
+[dev-dependencies]
+# The tests press a real record and then damage it, so they need to read and
+# write the pixels a press produced.
+image = { version = "0.25", default-features = false, features = ["png"] }
+bitneedle-record-author = { package = "record-cut-wasm", path = "../record-cut-wasm", version = "0.1.7" }

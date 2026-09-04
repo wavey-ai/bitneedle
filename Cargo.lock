@@ -1263,10 +1263,14 @@ dependencies = [
  "base64",
  "encodec-rs 0.1.4",
  "hex",
+ "image",
  "record-core",
+ "record-cut-wasm",
  "record-decode",
  "record-descriptor",
+ "record-patternize",
  "record-sidecar",
+ "serde",
  "serde_json",
 ]
 

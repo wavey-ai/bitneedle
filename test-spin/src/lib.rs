@@ -16,6 +16,11 @@ use record_descriptor::{RecordDescriptor, SignedReleaseReference};
 use serde_json::json;
 use std::fmt::Write as _;
 
+pub mod manifest;
+pub mod sidecars;
+
+pub use manifest::{manifest_report, manifest_report_json, ManifestReport, ManifestRow, ManifestSection};
+
 #[derive(Debug, Clone, Default)]
 pub struct InspectionOptions<'a> {
     /// Optional display name for the PNG.
@@ -23,6 +28,7 @@ pub struct InspectionOptions<'a> {
 
     /// Optional EnCodec bundle metadata used only for ECDC packet-layout
     /// diagnostics.
+    #[cfg(feature = "bundle-metadata")]
     pub bundle_metadata: Option<&'a encodec_rs::metadata::OnnxFrameBundleMetadata>,
 
     /// Optional external release-manifest bytes. BRD1 contains only a binary
@@ -44,6 +50,7 @@ impl<'a> InspectionOptions<'a> {
     pub fn verbose_defaults() -> Self {
         Self {
             png_name: None,
+            #[cfg(feature = "bundle-metadata")]
             bundle_metadata: None,
             manifest: None,
             max_chunks: 12,
@@ -97,6 +104,7 @@ pub fn inspect_record_png(png: &[u8], options: &InspectionOptions<'_>) -> Result
         &decoded.record_profile,
         options,
     )?;
+    report_sidecar(&mut out, png, &decoded.record_profile)?;
     report_signing_state(
         &mut out,
         &decoded.descriptor,
@@ -1598,6 +1606,7 @@ fn report_gap_payload_body(out: &mut String, entry: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "bundle-metadata")]
 pub fn load_bundle_metadata(
     path: impl AsRef<std::path::Path>,
 ) -> Result<encodec_rs::metadata::OnnxFrameBundleMetadata> {
@@ -2138,4 +2147,94 @@ mod programme_summary_tests {
             185 * u64::from(record_core::ecdc::ECDC_OUTPUT_SAMPLES)
         );
     }
+}
+
+/// The sidecar, in the verbose report.
+///
+/// A record's sidecar is not a footnote to its payload: it carries the map
+/// that puts the groove back in order, the package the record is shown as,
+/// and whatever else the presser chose to hide in the label. It is reported
+/// at the same weight as BRS1, and every check that ran over it is listed —
+/// including the passes, because "the arbitrary items were checked" is the
+/// thing a reader actually wants to know.
+fn report_sidecar(out: &mut String, png: &[u8], record_profile: &str) -> Result<()> {
+    let report = sidecars::inspect(png, Some(record_profile));
+
+    section(out, "BSC1 SIDECAR");
+
+    let Some(inspection) = report.inspection.as_ref() else {
+        match report.error.as_deref() {
+            Some(error) => {
+                writeln!(out, "  {} sidecar would not read", red_cross())?;
+                writeln!(out, "      {error}")?;
+            }
+            None => writeln!(out, "  absent; this record carries no sidecar")?,
+        }
+        return Ok(());
+    };
+
+    let decode = &inspection.decode;
+    let validation = &inspection.decoded.validation;
+
+    match inspection.pointer.as_ref() {
+        Some(pointer) => {
+            writeln!(out, "  declared by:               BRD1 pointer")?;
+            writeln!(out, "  scheme:                    {}", pointer.scheme)?;
+            writeln!(
+                out,
+                "  carriers:                  {}",
+                pointer
+                    .carriers
+                    .iter()
+                    .map(|carrier| carrier.name())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            )?;
+            writeln!(out, "  seed:                      {:#010x}", pointer.seed)?;
+            writeln!(out, "  declared length:           {}", pointer.length)?;
+            writeln!(out, "  SHA-256:                   {}", pointer.sha256)?;
+        }
+        None => writeln!(out, "  declared by:               found by magic; no BRD1 pointer")?,
+    }
+
+    writeln!(out, "  container version:         {}", validation.version)?;
+    writeln!(out, "  container flags:           {}", validation.flags)?;
+    writeln!(out, "  BSC1 bytes:                {}", decode.bsc1_byte_length)?;
+    writeln!(out, "  carrier pixels:            {}", decode.carrier_pixels)?;
+    writeln!(out, "  carrier pairs:             {}", decode.carrier_pairs)?;
+    writeln!(out, "  carrier capacity bytes:    {}", decode.capacity_bytes)?;
+    writeln!(out, "  items:                     {}", validation.item_count)?;
+
+    section(out, "BSC1 SIDECAR ITEMS");
+
+    for (index, item) in inspection.decoded.items.iter().enumerate() {
+        writeln!(out, "  item[{index}]: {:?}", item.name)?;
+        writeln!(out, "    type:                   {} ({})", item.item_type_name, item.item_type)?;
+        writeln!(out, "    codec:                  {} ({})", item.codec_name, item.codec)?;
+        writeln!(out, "    MIME:                   {}", item.mime)?;
+        writeln!(out, "    stored bytes:           {}", item.stored_byte_length)?;
+        writeln!(out, "    decoded bytes:          {}", item.decoded_byte_length)?;
+        writeln!(
+            out,
+            "    declared raw bytes:     {}",
+            item.raw_byte_length
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "absent".to_owned())
+        )?;
+        if let Some(text) = item.text.as_deref() {
+            writeln!(out, "    text:")?;
+            writeln!(out, "{}", indent(&text.chars().take(512).collect::<String>(), 6))?;
+        } else if let Some(json) = item.json.as_ref() {
+            report_json_structure(out, json)?;
+        }
+    }
+
+    section(out, "BSC1 SIDECAR CHECKS");
+
+    for check in &report.checks {
+        writeln!(out, "  {} {}", status_mark(check.passed), check.label)?;
+        writeln!(out, "      {}", check.detail)?;
+    }
+
+    Ok(())
 }

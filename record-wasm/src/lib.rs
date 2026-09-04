@@ -679,6 +679,7 @@ fn decode_record_metadata_json(png_bytes: &[u8]) -> Result<String> {
                 .as_ref()
                 .map(|bytes| base64_url_encode(bytes)),
             "toneSpans": descriptor.tone_spans,
+            "toneClock": descriptor.tone_clock,
             "signed": descriptor.signed_release_reference.is_some(),
         },
         "chunkStream": {

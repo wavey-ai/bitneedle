@@ -68,9 +68,22 @@ fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// How many palettes stay resident. A record carries a handful of tone spans
-/// at most, so this holds a whole record's worth and then some.
-const PALETTE_CACHE_CAPACITY: usize = 8;
+/// How many palettes stay resident.
+///
+/// Eight was a whole record's worth when a record carried a handful of tone
+/// spans. A clock carries one palette per pocket, and the house wheel has
+/// twenty-four — so eight meant every cut evicted its own palettes as it
+/// built them and the next cut rebuilt all of them. Sized to a wheel now.
+///
+/// Sixty-four, not twenty-four: a wheel with track gaps carries two palettes
+/// per pocket — the track tone and its lighter gap tone — so a thirty-pocket
+/// wheel like 12 + 18 holds sixty live keys, and thirty-two would evict half
+/// of every such cut as it built it.
+///
+/// Not free: a palette is `2^bits_per_pixel` colours, three bytes each, so a
+/// twenty-bit one is three megabytes. This is a ceiling on a cache that only
+/// fills with what a cut actually used, and a cut that used them needed them.
+const PALETTE_CACHE_CAPACITY: usize = 64;
 /// Balanced configurations are a few dozen bytes each, so this can be
 /// generous — it exists to stop unbounded growth, not to save space.
 const BALANCED_CACHE_CAPACITY: usize = 256;
@@ -241,6 +254,13 @@ pub enum ToneOrdering {
 
 pub mod span;
 pub use span::{decode_toned_spans, encode_toned_spans, ToneRequest, ToneSpan, TonedRender};
+
+pub mod clock;
+pub use clock::{
+    decode_toned_clock, encode_toned_clock, pixel_angle, pixel_radius, ClockSlot, ToneClock,
+    TONE_CLOCK_MAX_CELLS, TONE_CLOCK_MAX_RINGS, TONE_CLOCK_MAX_SLOTS, TONE_CLOCK_MIN_SLOTS,
+    TONE_CLOCK_ROTATION_UNITS_PER_TURN, TONE_CLOCK_SPAN_UNITS,
+};
 
 pub mod oklch;
 pub use oklch::{
@@ -661,77 +681,65 @@ fn select_palette_colors(
     }
 
     let selection = SelectionBase::new(base, ordering);
-    let histogram = fold_iso_luma_colors(
-        base,
-        luma_tolerance,
-        || vec![0u32; PALETTE_SELECTION_BUCKETS],
-        |histogram, color, luma| {
-            histogram[selection.bucket(selection.key(color, luma))] += 1;
-        },
-        |histogram, piece| {
-            for (total, part) in histogram.iter_mut().zip(piece) {
-                *total += part;
-            }
-        },
-    );
-    let mut cumulative = 0usize;
-    let cutoff_bucket = histogram
-        .iter()
-        .position(|&count| {
-            cumulative += count as usize;
-            cumulative >= needed
-        })
-        .expect("available palette colours must occupy a selection bucket");
 
-    let candidates = fold_iso_luma_colors(
+    // One pass over the shell, keeping only the best `needed` seen so far.
+    //
+    // It used to take two: a histogram to find which selection bucket the
+    // cutoff falls in, then a second enumeration collecting everything up to
+    // it. The shell is a quarter of the sRGB cube for a mid tone — four and a
+    // half million colours — so the second walk of it was the single largest
+    // thing in a cut, and on wasm, where there are no threads to share the
+    // rows out across, it was most of the wall clock.
+    //
+    // A bounded top-`needed` does it in one. The buffer is allowed to grow
+    // to twice what is wanted and is then partitioned down, which is linear
+    // and amortises to one partition per `needed` colours admitted; the
+    // threshold that admits them is the worst colour currently kept, so once
+    // the buffer is full most of the shell is rejected on a single compare.
+    //
+    // The palette that comes out is the same one, colour for colour.
+    // `compare_keyed_colors` is a total order — the key, then the colour
+    // itself — so "the `needed` smallest" names exactly one set with no ties
+    // to break differently, and every record already cut still decodes
+    // against it.
+    let room = (needed.saturating_mul(2)).min(available).max(needed) + 1;
+    let (mut kept, _) = fold_iso_luma_colors(
         base,
         luma_tolerance,
-        Vec::new,
-        |selected, color, luma| {
+        || (Vec::<KeyedColor>::with_capacity(room), None::<f64>),
+        |top, color, luma| {
             let key = selection.key(color, luma);
-            if selection.bucket(key) <= cutoff_bucket {
-                selected.push(KeyedColor { key, color });
+            // Once the buffer is full the common case is one compare and out.
+            if top.1.is_some_and(|limit| key > limit) {
+                return;
+            }
+            top.0.push(KeyedColor { key, color });
+            if top.0.len() >= room {
+                prune_to_best(top, needed);
             }
         },
-        |selected, piece| selected.extend(piece),
+        |total, piece| {
+            total.0.extend(piece.0);
+            prune_to_best(total, needed);
+        },
     );
+    if kept.len() > needed {
+        kept.select_nth_unstable_by(needed - 1, compare_keyed_colors);
+        kept.truncate(needed);
+    }
+    kept.sort_unstable_by(compare_keyed_colors);
+    Ok(kept.into_iter().map(|entry| entry.color).collect())
+}
 
-    // The bucket is monotone in the key, so bucket order then key order is
-    // the full key order: place each candidate in its bucket's run and sort
-    // the runs separately (and in parallel), then cut at `needed`. The same
-    // palette one big sort would give, in a fraction of the time.
-    let mut starts = Vec::with_capacity(cutoff_bucket + 2);
-    let mut offset = 0usize;
-    for &count in &histogram[..=cutoff_bucket] {
-        starts.push(offset);
-        offset += count as usize;
+/// Cuts a top-`needed` buffer back to its best `needed`, and remembers the
+/// worst of them so the next colours can be turned away on one compare.
+fn prune_to_best(top: &mut (Vec<KeyedColor>, Option<f64>), needed: usize) {
+    if top.0.len() <= needed {
+        return;
     }
-    starts.push(offset);
-    let mut cursors = starts[..=cutoff_bucket].to_vec();
-    let mut placed = vec![
-        KeyedColor {
-            key: 0.0,
-            color: [0; 3]
-        };
-        cumulative
-    ];
-    for entry in candidates {
-        let cursor = &mut cursors[selection.bucket(entry.key)];
-        placed[*cursor] = entry;
-        *cursor += 1;
-    }
-    let mut runs = Vec::with_capacity(cutoff_bucket + 1);
-    let mut rest = placed.as_mut_slice();
-    for bucket in 0..=cutoff_bucket {
-        let (run, tail) = rest.split_at_mut(starts[bucket + 1] - starts[bucket]);
-        rest = tail;
-        if run.len() > 1 {
-            runs.push(run);
-        }
-    }
-    sort_slices_by(runs, compare_keyed_colors);
-    placed.truncate(needed);
-    Ok(placed.into_iter().map(|entry| entry.color).collect())
+    top.0.select_nth_unstable_by(needed - 1, compare_keyed_colors);
+    top.0.truncate(needed);
+    top.1 = Some(top.0[needed - 1].key);
 }
 
 fn balanced_candidate_means(
@@ -1557,3 +1565,4 @@ mod tests {
         assert_eq!(normalized_hex_color(Some("nope")), "#FFFFFF");
     }
 }
+
