@@ -2261,7 +2261,7 @@ fn sidecar_label_outer_radius(geometry: &record_core::RecordProfileGeometry) -> 
 }
 
 fn sidecar_lead_in_outer_radius(geometry: &record_core::RecordProfileGeometry) -> i32 {
-    (geometry.outer_radius - record_core::HEADER_SPIRAL_OUTER_EDGE_INSET)
+    (geometry.outer_radius - record_core::LEAD_IN_OUTER_EDGE_INSET)
         .max(geometry.payload_outer_radius + 1)
 }
 
@@ -2314,12 +2314,12 @@ fn build_sidecar_protected_metadata_pixels(
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
-        record_core::build_header_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?
     {
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_trailer_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?
     {
         protected[pixel_index] = true;
     }
@@ -2665,7 +2665,7 @@ fn descriptor_input_with_rewrite_options(
 
     Ok(record_cut::descriptor::RecordDescriptorInput {
         cut_inner_radius: descriptor.cut_inner_radius,
-        lead_out_b_value: f64::from_bits(descriptor.lead_out_b_value_bits),
+        deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -2720,7 +2720,7 @@ fn descriptor_input_with_cache_encryption_option(
 ) -> record_cut::descriptor::RecordDescriptorInput {
     record_cut::descriptor::RecordDescriptorInput {
         cut_inner_radius: descriptor.cut_inner_radius,
-        lead_out_b_value: f64::from_bits(descriptor.lead_out_b_value_bits),
+        deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -2763,12 +2763,12 @@ fn paint_descriptor_spiral(
     main_b_value: f64,
     descriptor: &record_cut::descriptor::RecordDescriptorInput,
 ) -> Result<record_descriptor::RecordDescriptor> {
-    let header_indices =
-        record_core::build_header_spiral_indices(width, height, record_profile, None, None, None)?;
-    let trailer_indices =
-        record_core::build_trailer_spiral_indices(width, height, record_profile, None, None, None)?;
-    let mut metadata_indices = header_indices.clone();
-    metadata_indices.extend_from_slice(&trailer_indices);
+    let lead_in_indices =
+        record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
+    let run_out_indices =
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?;
+    let mut metadata_indices = lead_in_indices.clone();
+    metadata_indices.extend_from_slice(&run_out_indices);
     let byte_capacity =
         record_descriptor::metadata_byte_capacity_for_pixel_count(metadata_indices.len());
     let descriptor_bytes = record_cut::descriptor::encode_record_descriptor_stream(
@@ -3846,7 +3846,8 @@ mod attestation_tests {
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
             cut_inner_radius: 0,
-            lead_out_b_value_bits: 0,
+            deadwax_b_value_bits: 0,
+            deadwax: None,
             spiral_family: record_core::SpiralFamily::Archimedean,
             record_profile: record_descriptor::RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,

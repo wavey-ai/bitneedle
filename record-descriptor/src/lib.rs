@@ -27,9 +27,9 @@ pub const RECORD_DESCRIPTOR_VERSION: u8 = 4;
 /// is written with.
 pub const RECORD_DESCRIPTOR_VERSION_HOUSE: u8 = 5;
 /// Magic, version, the three lengths, the payload spiral's `b`, and the cut
-/// geometry: where the programme's groove stops and what feed the lead-out
+/// geometry: where the programme's groove stops and what feed the deadwax
 /// is cut at. The last two are what let a reader that holds nothing but the
-/// PNG traverse the whole groove, lead-out included — it rides the header
+/// PNG traverse the whole groove, deadwax included — it rides the header
 /// spiral at the rim, so it is known before anything else is read.
 pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 
@@ -136,7 +136,7 @@ pub const SEGMENT_TONE_CLOCK_MAP: u8 = 32;
 /// descriptor's inner band, and what may be written into it.
 ///
 /// The band itself is not new and its geometry is already known — the prefix
-/// carries `cut_inner_radius` and the lead-out's feed, which is all a reader
+/// carries `cut_inner_radius` and the deadwax's feed, which is all a reader
 /// needs to walk it. What was missing was a claim: whether anything is in
 /// there, who put it there, and how much room a writer has if it is empty.
 ///
@@ -1473,13 +1473,18 @@ pub struct RecordDescriptor {
     pub version: u8,
     pub checksum_protected: bool,
     pub b_value_bits: u64,
-    /// Where the programme's groove stops and the lead-out takes over, in
+    /// Where the programme's groove stops and the deadwax takes over, in
     /// rendered pixels. Zero for a cut that reaches the label.
     #[serde(default)]
     pub cut_inner_radius: u16,
-    /// The lead-out's spiral `b` — the feed, never the turn count.
-    #[serde(default)]
-    pub lead_out_b_value_bits: u64,
+    /// The deadwax's spiral `b` — the feed, never the turn count.
+    ///
+    /// Serialized as `leadOutBValueBits` before the band was named
+    /// correctly. The alias keeps descriptor JSON written under the old
+    /// vocabulary readable; the wire bytes never moved, so this is the same
+    /// prefix octets 21..29 it always was.
+    #[serde(default, alias = "leadOutBValueBits")]
+    pub deadwax_b_value_bits: u64,
     /// The groove geometry family. Always [`SpiralFamily::Archimedean`] for
     /// v2 records; v3 records may carry vari-pitch. Defaults keep every
     /// existing serialized form valid.
@@ -1560,13 +1565,13 @@ pub struct DescriptorPrefix {
     pub segment_stream_len: usize,
     pub b_value_bits: u64,
     /// The radius, in rendered pixels, at which the programme's groove stops
-    /// and the lead-out takes over. Zero means the cut ran to the label and
-    /// there is no lead-out.
+    /// and the deadwax takes over. Zero means the cut ran to the label and
+    /// there is no deadwax.
     pub cut_inner_radius: u16,
-    /// The lead-out's own spiral `b`. Declared rather than assumed, because
+    /// The deadwax's own spiral `b`. Declared rather than assumed, because
     /// the turn count is never stored: a reader derives it the way a lathe
     /// produces it, from the travel left over and this feed.
-    pub lead_out_b_value_bits: u64,
+    pub deadwax_b_value_bits: u64,
 }
 
 pub fn metadata_pixel_count_for_byte_length(byte_length: usize) -> usize {
@@ -1726,7 +1731,7 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         u16::from_be_bytes(bytes[9..11].try_into().expect("slice length")) as usize;
     let b_value_bits = u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
     let cut_inner_radius = u16::from_be_bytes(bytes[19..21].try_into().expect("slice length"));
-    let lead_out_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
+    let deadwax_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
 
     if payload_len < RECORD_DESCRIPTOR_PREFIX_LENGTH || payload_len > bytes.len() {
         bail!("record descriptor payload length is invalid");
@@ -1739,7 +1744,7 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         segment_stream_len,
         b_value_bits,
         cut_inner_radius,
-        lead_out_b_value_bits,
+        deadwax_b_value_bits,
     })
 }
 
@@ -2576,7 +2581,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         checksum_protected: true,
         b_value_bits: prefix.b_value_bits,
         cut_inner_radius: prefix.cut_inner_radius,
-        lead_out_b_value_bits: prefix.lead_out_b_value_bits,
+        deadwax_b_value_bits: prefix.deadwax_b_value_bits,
         spiral_family: spiral_family.unwrap_or_default(),
         record_profile,
         stream_byte_length,
@@ -2789,7 +2794,7 @@ mod tests {
         full.extend_from_slice(&segments.to_be_bytes());
         full.extend_from_slice(&(body.len() as u16).to_be_bytes());
         full.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
-        // A cut that reached the label: no lead-out band, so no feed either.
+        // A cut that reached the label: no deadwax band, so no feed either.
         full.extend_from_slice(&0u16.to_be_bytes());
         full.extend_from_slice(&0f64.to_bits().to_be_bytes());
         full.extend_from_slice(&body);
@@ -2829,7 +2834,7 @@ mod tests {
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
             cut_inner_radius: 0,
-            lead_out_b_value_bits: 0,
+            deadwax_b_value_bits: 0,
             spiral_family: SpiralFamily::Archimedean,
             record_profile: RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,

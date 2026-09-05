@@ -27,8 +27,8 @@ pub const DEFAULT_MIN_PERCEPTIBLE_TURN_GAP: f64 = 2.0;
 pub const DEFAULT_HARD_MIN_PERCEPTIBLE_TURN_GAP: f64 = 0.9;
 pub const PAYLOAD_CODE_FORMAT_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
-pub const HEADER_SPIRAL_TURNS: f64 = 2.0;
-pub const TRAILER_SPIRAL_TURNS: f64 = 4.0;
+pub const LEAD_IN_TURNS: f64 = 2.0;
+pub const RUN_OUT_TURNS: f64 = 4.0;
 
 /// How much of the payload band a cut is allowed to use, measured
 /// outward-in from `payload_outer_radius`. A lathe does not pack a side to
@@ -55,14 +55,14 @@ pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
 pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 
 
-/// The pitch a cutting lathe feeds the head at through the lead-out, in
+/// The pitch a cutting lathe feeds the head at through the deadwax, in
 /// millimetres per turn.
 ///
 /// This is the spiral lever's own feed rate, and it is a *rate*, not a turn
 /// count: the head does not know how far it has to travel, so a programme
 /// that ends early simply yields more turns at the same spacing. Music sits
 /// at roughly 0.1–0.2 mm per turn and the spiral feed around 1 mm, so a
-/// lead-out reads five to ten times coarser than the programme it follows.
+/// deadwax reads five to ten times coarser than the programme it follows.
 ///
 /// The turn counts that fall out of it are the ones a real disc has. A 12"
 /// LP whose programme ends near 127 mm diameter, with its lock groove at
@@ -70,8 +70,8 @@ pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 /// one four-minute track ends near 239 mm and has 66 mm left — about sixty
 /// turns, which is the broad ladder of concentric lines on any clip of one
 /// spinning.
-pub const LEAD_OUT_PITCH_MM: f64 = 1.0;
-pub const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
+pub const DEADWAX_PITCH_MM: f64 = 1.0;
+pub const LEAD_IN_OUTER_EDGE_INSET: i32 = 1;
 pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
 pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "ten", "lp"];
 
@@ -937,7 +937,7 @@ fn resolve_record_geometry(
 }
 
 fn header_outer_radius(g: &RecordGeometry) -> i32 {
-    (g.outer_radius - HEADER_SPIRAL_OUTER_EDGE_INSET).max(1)
+    (g.outer_radius - LEAD_IN_OUTER_EDGE_INSET).max(1)
 }
 
 fn payload_outer_radius(g: &RecordGeometry) -> i32 {
@@ -1015,20 +1015,20 @@ pub fn pixels_per_mm(record_profile: &str) -> Result<f64> {
     Ok(record_profile_def(record_profile)?.pixels_per_mm)
 }
 
-/// Centre-to-centre distance between lead-out turns, in rendered pixels.
+/// Centre-to-centre distance between deadwax turns, in rendered pixels.
 ///
-/// Derived from [`LEAD_OUT_PITCH_MM`] and the profile's own scale, so the
-/// lead-out is cut at true physical pitch even though the programme groove
+/// Derived from [`DEADWAX_PITCH_MM`] and the profile's own scale, so the
+/// deadwax is cut at true physical pitch even though the programme groove
 /// cannot be — a real music groove is a third of a pixel at this raster, and
-/// the payload spiral is some fifteen times coarser than one. The lead-out
+/// the payload spiral is some fifteen times coarser than one. The deadwax
 /// is the one band of the record rendered at life size.
-pub fn lead_out_turn_separation_px(record_profile: &str) -> Result<f64> {
-    Ok(LEAD_OUT_PITCH_MM * pixels_per_mm(record_profile)?)
+pub fn deadwax_turn_separation_px(record_profile: &str) -> Result<f64> {
+    Ok(DEADWAX_PITCH_MM * pixels_per_mm(record_profile)?)
 }
 
-/// The lead-out's pitch as a spiral `b`, for [`trace_record_spiral`].
-pub fn lead_out_spiral_pitch(record_profile: &str) -> Result<f64> {
-    Ok((lead_out_turn_separation_px(record_profile)? / (2.0 * PI)).max(MIN_B_VALUE))
+/// The deadwax's pitch as a spiral `b`, for [`trace_record_spiral`].
+pub fn deadwax_spiral_pitch(record_profile: &str) -> Result<f64> {
+    Ok((deadwax_turn_separation_px(record_profile)? / (2.0 * PI)).max(MIN_B_VALUE))
 }
 
 pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {
@@ -1110,18 +1110,18 @@ pub fn metadata_byte_capacity_for_pixel_count(pixel_count: usize) -> usize {
     pixel_count / 2
 }
 
-fn header_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
+fn lead_in_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
     (header_outer_radius(g) - payload_outer_radius(g)).max(1) as f64
-        / (2.0 * PI * HEADER_SPIRAL_TURNS.max(0.01))
+        / (2.0 * PI * LEAD_IN_TURNS.max(0.01))
 }
 
-fn trailer_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
+fn run_out_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
     (payload_inner_radius(g) - g.label_radius).max(1) as f64
-        / (2.0 * PI * TRAILER_SPIRAL_TURNS.max(0.01))
+        / (2.0 * PI * RUN_OUT_TURNS.max(0.01))
 }
 
-pub fn header_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
-    Ok(header_spiral_pitch_for_geometry(&resolve_record_geometry(
+pub fn lead_in_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
+    Ok(lead_in_spiral_pitch_for_geometry(&resolve_record_geometry(
         record_profile,
         None,
         None,
@@ -1129,8 +1129,8 @@ pub fn header_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
     )?))
 }
 
-pub fn trailer_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
-    Ok(trailer_spiral_pitch_for_geometry(&resolve_record_geometry(
+pub fn run_out_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
+    Ok(run_out_spiral_pitch_for_geometry(&resolve_record_geometry(
         record_profile,
         None,
         None,
@@ -1287,7 +1287,7 @@ pub fn build_band_spiral_indices(
         .collect())
 }
 
-pub fn build_header_spiral_indices(
+pub fn build_lead_in_spiral_indices(
     width: usize,
     height: usize,
     record_profile: &str,
@@ -1306,11 +1306,11 @@ pub fn build_header_spiral_indices(
         Some(g.outer_radius),
         header_outer_radius(&g) as f64,
         payload_outer_radius(&g) as f64,
-        header_spiral_pitch_for_geometry(&g),
+        lead_in_spiral_pitch_for_geometry(&g),
     )
 }
 
-pub fn build_trailer_spiral_indices(
+pub fn build_run_out_spiral_indices(
     width: usize,
     height: usize,
     record_profile: &str,
@@ -1329,7 +1329,7 @@ pub fn build_trailer_spiral_indices(
         Some(g.outer_radius),
         payload_inner_radius(&g) as f64,
         g.label_radius as f64,
-        trailer_spiral_pitch_for_geometry(&g),
+        run_out_spiral_pitch_for_geometry(&g),
     )
 }
 

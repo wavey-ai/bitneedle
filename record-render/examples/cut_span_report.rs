@@ -48,7 +48,7 @@ fn main() -> Result<()> {
                     p.b_value,
                     record_core::turn_separation_px(p.b_value),
                     p.cut_inner_radius,
-                    p.lead_out_turns,
+                    p.deadwax_turns,
                     p.status,
                 );
             }

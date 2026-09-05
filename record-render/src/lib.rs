@@ -41,9 +41,9 @@ const DEFAULT_HARD_MIN_PERCEPTIBLE_TURN_GAP: f64 = 0.9;
 const DEFAULT_MAX_PERCEPTIBLE_OUTER_SECTOR_COVERAGE_RATIO: f64 = 0.98;
 const EMPTY_GROOVE_VISIBLE_TURNS: f64 = 64.0;
 
-const HEADER_SPIRAL_TURNS: f64 = 2.0;
-const TRAILER_SPIRAL_TURNS: f64 = 4.0;
-const HEADER_SPIRAL_OUTER_EDGE_INSET: i32 = 1;
+const LEAD_IN_TURNS: f64 = 2.0;
+const RUN_OUT_TURNS: f64 = 4.0;
+const LEAD_IN_OUTER_EDGE_INSET: i32 = 1;
 
 /// A wheel's rotation: one for all of it, or one per ring.
 #[derive(Debug, Clone, Deserialize)]
@@ -330,11 +330,11 @@ pub struct RenderPayload {
     /// in over its nominal runs past this, inward, toward
     /// `payloadInnerRadius`.
     pub cut_inner_radius: i32,
-    /// Turns of lead-out the cut left behind, at the lathe's spiral feed.
-    pub lead_out_turns: f64,
-    /// Addressable pixels in the lead-out carrier. Empty today; addressable
+    /// Turns of deadwax the cut left behind, at the lathe's spiral feed.
+    pub deadwax_turns: f64,
+    /// Addressable pixels in the deadwax carrier. Empty today; addressable
     /// regardless, which is the point.
-    pub lead_out_pixel_capacity: usize,
+    pub deadwax_pixel_capacity: usize,
     pub source_width: usize,
     pub source_height: usize,
     pub source_pixel_count: usize,
@@ -401,14 +401,14 @@ struct TransparentRender {
     pixels_remaining: isize,
     unused_spiral_pixels: usize,
     overflow_track_pixels: usize,
-    /// Addressable pixels in the lead-out. It carries nothing today, but it
+    /// Addressable pixels in the deadwax. It carries nothing today, but it
     /// is a carrier: the indices are ordered, continuous with the programme
     /// groove, and reproducible from the same figures a decoder already
     /// has, so anything that wants to write there can.
-    lead_out_pixel_capacity: usize,
-    /// The lead-out's first and last pixel, so a traversal can be checked
+    deadwax_pixel_capacity: usize,
+    /// The deadwax's first and last pixel, so a traversal can be checked
     /// to join the programme rather than restart inside it.
-    lead_out_bounds: Option<(usize, usize)>,
+    deadwax_bounds: Option<(usize, usize)>,
     descriptor: RecordDescriptor,
 }
 
@@ -444,7 +444,7 @@ struct TransparentRenderResult {
     b_value: f64,
     groove_span_fraction: f64,
     cut_inner_radius: i32,
-    lead_out_turns: f64,
+    deadwax_turns: f64,
     source_width: usize,
     source_height: usize,
     source_pixel_count: usize,
@@ -552,8 +552,8 @@ pub fn render_payload_codes_to_png(
         b_value: result.b_value,
         groove_span_fraction: result.groove_span_fraction,
         cut_inner_radius: result.cut_inner_radius,
-        lead_out_turns: result.lead_out_turns,
-        lead_out_pixel_capacity: result.rendered.lead_out_pixel_capacity,
+        deadwax_turns: result.deadwax_turns,
+        deadwax_pixel_capacity: result.rendered.deadwax_pixel_capacity,
         source_width: result.source_width,
         source_height: result.source_height,
         source_pixel_count: result.source_pixel_count,
@@ -843,20 +843,20 @@ fn cut_inner_radius(geometry: &RecordProfileGeometry, span_fraction: f64) -> Res
 }
 
 fn header_outer_radius(geometry: &RecordProfileGeometry) -> i32 {
-    (geometry.outer_radius - HEADER_SPIRAL_OUTER_EDGE_INSET).max(1)
+    (geometry.outer_radius - LEAD_IN_OUTER_EDGE_INSET).max(1)
 }
 
-fn header_spiral_pitch_for_geometry(geometry: &RecordProfileGeometry) -> f64 {
+fn lead_in_spiral_pitch_for_geometry(geometry: &RecordProfileGeometry) -> f64 {
     let radial_travel =
         (header_outer_radius(geometry) - payload_outer_radius(geometry)).max(1) as f64;
 
-    radial_travel / (2.0 * PI * HEADER_SPIRAL_TURNS.max(0.01))
+    radial_travel / (2.0 * PI * LEAD_IN_TURNS.max(0.01))
 }
 
-fn trailer_spiral_pitch_for_geometry(geometry: &RecordProfileGeometry) -> f64 {
+fn run_out_spiral_pitch_for_geometry(geometry: &RecordProfileGeometry) -> f64 {
     let radial_travel = (payload_inner_radius(geometry) - geometry.label_radius).max(1) as f64;
 
-    radial_travel / (2.0 * PI * TRAILER_SPIRAL_TURNS.max(0.01))
+    radial_travel / (2.0 * PI * RUN_OUT_TURNS.max(0.01))
 }
 
 fn resolve_pitch(b_value: f64, pitch: Option<f64>) -> Result<f64> {
@@ -950,8 +950,8 @@ fn build_band_spiral_indices(
     band_inner_radius: f64,
     band_pitch: f64,
     start_angle: f64,
-    // The header and trailer sit *inside* their bands, so their outer edge is
-    // exclusive. The lead-out instead begins exactly on its outer edge — it
+    // The lead-in and run-out sit *inside* their bands, so their outer edge is
+    // exclusive. The deadwax instead begins exactly on its outer edge — it
     // is the same groove continuing — and dropping that first turn would put
     // its first addressable pixel most of a revolution away from the
     // programme's last.
@@ -986,7 +986,7 @@ fn build_band_spiral_indices(
         let dy = y as f64 - center_y;
         let distance = (dx * dx + dy * dy).sqrt();
 
-        // The trace begins on the outer edge, so for the lead-out there is
+        // The trace begins on the outer edge, so for the deadwax there is
         // nothing above it to exclude — and testing the radius would drop the
         // whole first turn to rounding, putting the carrier's first pixel a
         // third of a revolution away from the programme's last.
@@ -1000,7 +1000,7 @@ fn build_band_spiral_indices(
     Ok(ordered)
 }
 
-fn build_header_spiral_indices(
+fn build_lead_in_spiral_indices(
     width: usize,
     height: usize,
     record_profile: &str,
@@ -1012,13 +1012,13 @@ fn build_header_spiral_indices(
         height,
         header_outer_radius(&geometry) as f64,
         payload_outer_radius(&geometry) as f64,
-        header_spiral_pitch_for_geometry(&geometry),
+        lead_in_spiral_pitch_for_geometry(&geometry),
         DEFAULT_START_ANGLE,
         false,
     )
 }
 
-fn build_trailer_spiral_indices(
+fn build_run_out_spiral_indices(
     width: usize,
     height: usize,
     record_profile: &str,
@@ -1030,16 +1030,16 @@ fn build_trailer_spiral_indices(
         height,
         payload_inner_radius(&geometry) as f64,
         geometry.label_radius as f64,
-        trailer_spiral_pitch_for_geometry(&geometry),
+        run_out_spiral_pitch_for_geometry(&geometry),
         DEFAULT_START_ANGLE,
         false,
     )
 }
 
-/// The lead-out: the groove the head keeps cutting after the programme has
+/// The deadwax: the groove the head keeps cutting after the programme has
 /// finished, from where the cut stopped in to the descriptor's own band.
 ///
-/// It is unmodulated, which is not an omission — a real lead-out carries no
+/// It is unmodulated, which is not an omission — a real deadwax carries no
 /// signal either. It is a groove because the cutter head was still down, and
 /// it is the reason a record has a wide silver run-out instead of a blank
 /// annulus. The pitch is the lathe's spiral feed, so the turn count is
@@ -1047,7 +1047,7 @@ fn build_trailer_spiral_indices(
 /// The angle the programme's groove has reached by the time it crosses
 /// `target_radius`, walked with the same arithmetic the mask is traced with.
 ///
-/// This is what makes the lead-out a continuation rather than a second
+/// This is what makes the deadwax a continuation rather than a second
 /// spiral that happens to sit inside the first. The vari-pitch radius is a
 /// running integral with no closed form, so the only way to land on the
 /// same phase is to take the same steps.
@@ -1093,7 +1093,7 @@ fn groove_angle_at_radius(
     Ok(angle)
 }
 
-fn build_lead_out_spiral_indices(
+fn build_deadwax_spiral_indices(
     width: usize,
     height: usize,
     b_value: f64,
@@ -1110,8 +1110,8 @@ fn build_lead_out_spiral_indices(
     }
 
     // Pick the groove up where the programme put it down. Without this the
-    // lead-out is a second spiral that happens to sit inside the first, and
-    // nothing can walk from the last programme pixel into the first lead-out
+    // deadwax is a second spiral that happens to sit inside the first, and
+    // nothing can walk from the last programme pixel into the first deadwax
     // one — which is the whole point of it being a carrier.
     let start_angle =
         groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
@@ -1121,19 +1121,19 @@ fn build_lead_out_spiral_indices(
         height,
         band_outer,
         band_inner,
-        record_core::lead_out_spiral_pitch(record_profile)?,
+        record_core::deadwax_spiral_pitch(record_profile)?,
         start_angle,
         true,
     )
 }
 
-/// How many turns of lead-out a cut that stopped at `cut_inner_radius`
+/// How many turns of deadwax a cut that stopped at `cut_inner_radius`
 /// leaves behind, at the lathe's spiral feed.
-fn lead_out_turns(record_profile: &str, cut_inner_radius: i32) -> Result<f64> {
+fn deadwax_turns(record_profile: &str, cut_inner_radius: i32) -> Result<f64> {
     let geometry = describe_record_profile(record_profile)?;
     let travel = (cut_inner_radius - payload_inner_radius(&geometry)).max(0) as f64;
 
-    Ok(travel / record_core::lead_out_turn_separation_px(record_profile)?)
+    Ok(travel / record_core::deadwax_turn_separation_px(record_profile)?)
 }
 
 fn build_spiral_mask(
@@ -1847,12 +1847,12 @@ fn paint_descriptor_spiral(
     main_b_value: f64,
     descriptor: &RecordDescriptorInput,
 ) -> Result<RecordDescriptor> {
-    let header_indices = build_header_spiral_indices(width, height, record_profile)?;
-    let trailer_indices = build_trailer_spiral_indices(width, height, record_profile)?;
-    let mut metadata_indices = header_indices.clone();
-    let trailer_start = metadata_indices.len();
+    let lead_in_indices = build_lead_in_spiral_indices(width, height, record_profile)?;
+    let run_out_indices = build_run_out_spiral_indices(width, height, record_profile)?;
+    let mut metadata_indices = lead_in_indices.clone();
+    let run_out_start = metadata_indices.len();
 
-    metadata_indices.extend_from_slice(&trailer_indices);
+    metadata_indices.extend_from_slice(&run_out_indices);
 
     let byte_capacity =
         record_descriptor::metadata_byte_capacity_for_pixel_count(metadata_indices.len());
@@ -1866,14 +1866,14 @@ fn paint_descriptor_spiral(
     let written_pixels =
         paint_metadata_bytes_as_grayscale(data, &metadata_indices, &descriptor_bytes);
 
-    let header_fade_pixels = metadata_fade_pixel_count(header_indices.len(), HEADER_SPIRAL_TURNS);
-    let trailer_fade_pixels =
-        metadata_fade_pixel_count(trailer_indices.len(), TRAILER_SPIRAL_TURNS);
+    let lead_in_fade_pixels = metadata_fade_pixel_count(lead_in_indices.len(), LEAD_IN_TURNS);
+    let run_out_fade_pixels =
+        metadata_fade_pixel_count(run_out_indices.len(), RUN_OUT_TURNS);
 
-    let boundary_fade_pixels = if written_pixels < trailer_start {
-        header_fade_pixels
+    let boundary_fade_pixels = if written_pixels < run_out_start {
+        lead_in_fade_pixels
     } else {
-        trailer_fade_pixels
+        run_out_fade_pixels
     };
 
     paint_unused_metadata_groove(
@@ -1884,8 +1884,8 @@ fn paint_descriptor_spiral(
         boundary_fade_pixels,
     );
 
-    if written_pixels < trailer_start {
-        paint_unused_metadata_groove(data, &metadata_indices, trailer_start, 31, 0);
+    if written_pixels < run_out_start {
+        paint_unused_metadata_groove(data, &metadata_indices, run_out_start, 31, 0);
     }
 
     record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
@@ -1987,9 +1987,9 @@ fn render_track_scanline_onto_transparent_spiral(
     }
 
     // Cut before the programme so that a payload which overran its nominal
-    // paints over its own lead-out rather than the other way round — the
+    // paints over its own deadwax rather than the other way round — the
     // groove that carries something always wins the pixel.
-    let lead_out_indices = build_lead_out_spiral_indices(
+    let deadwax_indices = build_deadwax_spiral_indices(
         width,
         height,
         b_value,
@@ -1997,17 +1997,17 @@ fn render_track_scanline_onto_transparent_spiral(
         record_profile,
         cut_inner_radius,
     )?;
-    let lead_out_pixel_capacity = lead_out_indices.len();
-    let lead_out_bounds = lead_out_indices
+    let deadwax_pixel_capacity = deadwax_indices.len();
+    let deadwax_bounds = deadwax_indices
         .first()
-        .zip(lead_out_indices.last())
+        .zip(deadwax_indices.last())
         .map(|(first, last)| (*first, *last));
-    paint_unused_metadata_groove(&mut data, &lead_out_indices, 0, 53, 0);
+    paint_unused_metadata_groove(&mut data, &deadwax_indices, 0, 53, 0);
 
     // What the cut left standing between the programme and the descriptor's
     // inner band, declared so that something other than this renderer can
     // use it. The geometry was already knowable — the prefix carries the
-    // radius the cut stopped at and the feed the lead-out is cut with — but
+    // radius the cut stopped at and the feed the deadwax is cut with — but
     // knowable is not the same as offered: without this a writer has to
     // re-derive the band from the profile's own tables and guess whether
     // anyone else is already in there.
@@ -2022,10 +2022,10 @@ fn render_track_scanline_onto_transparent_spiral(
         let geometry = describe_record_profile(record_profile)?;
         let inner = payload_inner_radius(&geometry).max(0);
         let outer = cut_inner_radius.max(0);
-        if lead_out_pixel_capacity == 0 || outer <= inner {
+        if deadwax_pixel_capacity == 0 || outer <= inner {
             None
         } else {
-            let pixel_capacity = u32::try_from(lead_out_pixel_capacity)
+            let pixel_capacity = u32::try_from(deadwax_pixel_capacity)
                 .context("deadwax pixel capacity exceeds u32")?;
             Some(record_descriptor::DeadwaxExtent {
                 outer_radius: u16::try_from(outer).context("deadwax outer radius exceeds u16")?,
@@ -2157,8 +2157,8 @@ fn render_track_scanline_onto_transparent_spiral(
             .saturating_sub(track_pixel_count),
         overflow_track_pixels: track_pixel_count
             .saturating_sub(spiral_mask.addressable_pixel_count),
-        lead_out_pixel_capacity,
-        lead_out_bounds,
+        deadwax_pixel_capacity,
+        deadwax_bounds,
         descriptor,
     })
 }
@@ -2519,19 +2519,19 @@ fn render_payload_codes_to_transparent_spiral(
         .map(record_descriptor::CacheEncryptionDescriptor::from_secret_base64url)
         .transpose()?;
 
-    // A cut that reaches the label declares no lead-out; anything short
+    // A cut that reaches the label declares no deadwax; anything short
     // declares where its groove stops and what feed the rest is cut at, so a
     // reader holding only the PNG can walk the whole spiral.
-    let declares_lead_out =
+    let declares_deadwax =
         cut_inner_radius > payload_inner_radius(&describe_record_profile(&normalized_profile)?);
     let descriptor_input = RecordDescriptorInput {
-        cut_inner_radius: if declares_lead_out {
+        cut_inner_radius: if declares_deadwax {
             u16::try_from(cut_inner_radius).context("cut inner radius does not fit u16")?
         } else {
             0
         },
-        lead_out_b_value: if declares_lead_out {
-            record_core::lead_out_spiral_pitch(&normalized_profile)?
+        deadwax_b_value: if declares_deadwax {
+            record_core::deadwax_spiral_pitch(&normalized_profile)?
         } else {
             0.0
         },
@@ -2598,7 +2598,7 @@ fn render_payload_codes_to_transparent_spiral(
         b_value: fit.b_value,
         groove_span_fraction,
         cut_inner_radius,
-        lead_out_turns: lead_out_turns(&normalized_profile, cut_inner_radius)?,
+        deadwax_turns: deadwax_turns(&normalized_profile, cut_inner_radius)?,
         source_width: source_dimensions.0,
         source_height: source_dimensions.1,
         source_pixel_count: source_dimensions.2,
@@ -3243,17 +3243,17 @@ mod tests {
         );
     }
 
-    /// The lead-out is a feed rate, not a turn count. A lathe's spiral lever
+    /// The deadwax is a feed rate, not a turn count. A lathe's spiral lever
     /// does not know how far it has to travel, so a programme that stops
     /// early leaves more turns at the same spacing — never the same turns
     /// spread thinner. Pin the count to the physical pitch so it can only
     /// move if the feed does.
     #[test]
-    fn the_lead_out_is_cut_at_the_lathes_spiral_feed() {
+    fn the_deadwax_is_cut_at_the_lathes_spiral_feed() {
         let px_per_mm = record_core::pixels_per_mm("lp").unwrap();
-        let separation = record_core::LEAD_OUT_PITCH_MM * px_per_mm;
+        let separation = record_core::DEADWAX_PITCH_MM * px_per_mm;
         assert!(
-            (record_core::lead_out_turn_separation_px("lp").unwrap() - separation).abs() < 1e-9,
+            (record_core::deadwax_turn_separation_px("lp").unwrap() - separation).abs() < 1e-9,
         );
 
         let geometry = describe_record_profile("lp").unwrap();
@@ -3267,16 +3267,16 @@ mod tests {
             let travel = (cut.cut_inner_radius - geometry.payload_inner_radius).max(0) as f64;
 
             assert!(
-                (cut.lead_out_turns - travel / separation).abs() < 1e-6,
+                (cut.deadwax_turns - travel / separation).abs() < 1e-6,
                 "span {span} reported {} turns over {travel} px of travel",
-                cut.lead_out_turns,
+                cut.deadwax_turns,
             );
             assert!(
-                cut.lead_out_turns < previous,
-                "a wider cut must leave less lead-out, not more: {span} gave {} after {previous}",
-                cut.lead_out_turns,
+                cut.deadwax_turns < previous,
+                "a wider cut must leave less deadwax, not more: {span} gave {} after {previous}",
+                cut.deadwax_turns,
             );
-            previous = cut.lead_out_turns;
+            previous = cut.deadwax_turns;
         }
 
         assert_eq!(
@@ -3285,19 +3285,19 @@ mod tests {
         );
     }
 
-    /// A dubplate's lead-out is tens of turns, not a handful. One four-minute
+    /// A dubplate's deadwax is tens of turns, not a handful. One four-minute
     /// track leaves about 66 mm of travel on a 12", which at the spiral feed
     /// is some sixty turns — the broad ladder you can see on a real one. If
     /// this ever falls to single figures the run-out has stopped being a
     /// run-out and gone back to being three rings near the label.
     #[test]
-    fn a_dubplate_sized_cut_leaves_a_lead_out_of_the_right_order() {
+    fn a_dubplate_sized_cut_leaves_a_deadwax_of_the_right_order() {
         let cut = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
 
         assert!(
-            (40.0..90.0).contains(&cut.lead_out_turns),
-            "expected a real dubplate's lead-out, got {} turns",
-            cut.lead_out_turns,
+            (40.0..90.0).contains(&cut.deadwax_turns),
+            "expected a real dubplate's deadwax, got {} turns",
+            cut.deadwax_turns,
         );
     }
 
@@ -3330,10 +3330,10 @@ mod tests {
         }
     }
 
-    /// One groove, rim to label. The lead-out picks the head up exactly
+    /// One groove, rim to label. The deadwax picks the head up exactly
     /// where the programme put it down — same radius, same angle, new feed —
     /// so a traversal walks straight out of the payload and into the
-    /// lead-out. Without the phase carried across it restarts at the top of
+    /// deadwax. Without the phase carried across it restarts at the top of
     /// the disc and the join is most of a revolution.
     ///
     /// Measured against the analytic crossing rather than against a
@@ -3341,7 +3341,7 @@ mod tests {
     /// "the last pixel above the transition" can sit a fifth of a turn from
     /// where the groove actually crosses.
     #[test]
-    fn the_lead_out_picks_the_groove_up_where_the_programme_left_it() {
+    fn the_deadwax_picks_the_groove_up_where_the_programme_left_it() {
         for span in [0.25_f64, 0.33, 0.50] {
             let cut = render_lp(
                 &rgb_code_block(60_000),
@@ -3358,7 +3358,7 @@ mod tests {
             )
             .unwrap();
 
-            let lead_out = build_lead_out_spiral_indices(
+            let lead_out = build_deadwax_spiral_indices(
                 RECORD_WIDTH,
                 RECORD_HEIGHT,
                 cut.b_value,
@@ -3367,12 +3367,12 @@ mod tests {
                 cut.cut_inner_radius,
             )
             .unwrap();
-            let first = *lead_out.first().expect("a short cut has a lead-out");
+            let first = *lead_out.first().expect("a short cut has a deadwax");
 
             let radius = radius_of(first);
             assert!(
                 (radius - cut.cut_inner_radius as f64).abs() <= 1.5,
-                "span {span}: the lead-out starts at r={radius:.1}, not on the transition at {}",
+                "span {span}: the deadwax starts at r={radius:.1}, not on the transition at {}",
                 cut.cut_inner_radius,
             );
 
@@ -3381,16 +3381,16 @@ mod tests {
             let drift = angle_difference(expected, actual).to_degrees();
             assert!(
                 drift.abs() <= 2.0,
-                "span {span}: the lead-out starts {drift:.1} degrees off the programme's crossing",
+                "span {span}: the deadwax starts {drift:.1} degrees off the programme's crossing",
             );
         }
     }
 
-    /// Empty is not the same as absent. The lead-out is a carrier whose
+    /// Empty is not the same as absent. The deadwax is a carrier whose
     /// addresses exist whether or not anything has been written into them,
     /// and its capacity grows as the programme leaves more room.
     #[test]
-    fn the_lead_out_is_an_addressable_carrier_even_while_it_holds_nothing() {
+    fn the_deadwax_is_an_addressable_carrier_even_while_it_holds_nothing() {
         let mut previous = 0usize;
 
         for span in [0.67_f64, 0.50, 0.33, 0.25] {
@@ -3400,17 +3400,17 @@ mod tests {
             );
 
             assert!(
-                cut.lead_out_pixel_capacity > previous,
-                "a shorter cut must leave more lead-out to address: span {span} gave {} after {previous}",
-                cut.lead_out_pixel_capacity,
+                cut.deadwax_pixel_capacity > previous,
+                "a shorter cut must leave more deadwax to address: span {span} gave {} after {previous}",
+                cut.deadwax_pixel_capacity,
             );
-            previous = cut.lead_out_pixel_capacity;
+            previous = cut.deadwax_pixel_capacity;
         }
 
         let full = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":1.0}"#);
         assert_eq!(
-            full.lead_out_pixel_capacity, 0,
-            "a cut that reaches the label leaves no lead-out to carry anything",
+            full.deadwax_pixel_capacity, 0,
+            "a cut that reaches the label leaves no deadwax to carry anything",
         );
     }
 

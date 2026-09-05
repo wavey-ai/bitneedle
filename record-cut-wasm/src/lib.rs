@@ -2358,8 +2358,8 @@ fn record_profile_spec(record_profile: &str) -> Result<ProfileSpec> {
         outer_radius: geometry.outer_radius,
         outer_rim_thickness: geometry.outer_rim_thickness,
         lead_in_band_thickness: geometry.lead_in_band_thickness,
-        lead_in_turns: record_core::HEADER_SPIRAL_TURNS,
-        run_out_turns: record_core::TRAILER_SPIRAL_TURNS,
+        lead_in_turns: record_core::LEAD_IN_TURNS,
+        run_out_turns: record_core::RUN_OUT_TURNS,
     })
 }
 

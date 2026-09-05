@@ -30,12 +30,12 @@ pub const RECORD_DESCRIPTOR_CREATOR_TEXT_LIMIT: usize = 1024;
 #[derive(Debug, Clone, Default)]
 pub struct RecordDescriptorInput {
     /// The radius, in rendered pixels, at which the programme's groove stops
-    /// and the lead-out takes over. Zero for a cut that reaches the label.
+    /// and the deadwax takes over. Zero for a cut that reaches the label.
     pub cut_inner_radius: u16,
-    /// The lead-out's spiral `b`. The feed, never the turn count: a lathe's
+    /// The deadwax's spiral `b`. The feed, never the turn count: a lathe's
     /// spiral lever does not know how far it has to travel, and neither does
     /// a reader — both derive the turns from the space that is left.
-    pub lead_out_b_value: f64,
+    pub deadwax_b_value: f64,
     pub record_profile: String,
     pub stream_byte_length: usize,
     pub payload_encoding: Option<String>,
@@ -117,16 +117,16 @@ pub fn encode_record_descriptor_stream(
         bail!("a positive finite b_value is required");
     }
 
-    // A cut that reached the label declares no lead-out, and its feed is
+    // A cut that reached the label declares no deadwax, and its feed is
     // meaningless rather than zero — write it as such instead of letting an
     // unset field read as an infinitely fine groove.
-    let lead_out_b_value = if descriptor.cut_inner_radius == 0 {
+    let deadwax_b_value = if descriptor.cut_inner_radius == 0 {
         0.0
     } else {
-        if !(descriptor.lead_out_b_value.is_finite() && descriptor.lead_out_b_value > 0.0) {
-            bail!("a cut that stops short of the label must declare a positive lead-out feed");
+        if !(descriptor.deadwax_b_value.is_finite() && descriptor.deadwax_b_value > 0.0) {
+            bail!("a cut that stops short of the label must declare a positive deadwax feed");
         }
-        descriptor.lead_out_b_value
+        descriptor.deadwax_b_value
     };
 
     let (body, segment_count) = encode_segmented_body(descriptor)?;
@@ -135,7 +135,7 @@ pub fn encode_record_descriptor_stream(
         .context("record descriptor length overflow")?;
 
     if payload_len > byte_capacity {
-        bail!("record descriptor exceeds combined lead-in and lead-out capacity");
+        bail!("record descriptor exceeds combined lead-in and deadwax capacity");
     }
     if payload_len > u16::MAX as usize {
         bail!("record descriptor payload is too large");
@@ -155,7 +155,7 @@ pub fn encode_record_descriptor_stream(
     full.extend_from_slice(&(body.len() as u16).to_be_bytes());
     full.extend_from_slice(&b_value.to_bits().to_be_bytes());
     full.extend_from_slice(&descriptor.cut_inner_radius.to_be_bytes());
-    full.extend_from_slice(&lead_out_b_value.to_bits().to_be_bytes());
+    full.extend_from_slice(&deadwax_b_value.to_bits().to_be_bytes());
     full.extend_from_slice(&body);
 
     let crc32 = compute_descriptor_crc32(&full);

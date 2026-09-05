@@ -5,7 +5,7 @@ use bytes2rgb::{
     ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig,
 };
 use record_core::{
-    build_header_spiral_indices, build_spiral_mask_with_family, build_trailer_spiral_indices,
+    build_lead_in_spiral_indices, build_spiral_mask_with_family, build_run_out_spiral_indices,
     known_record_profile_names, normalize_record_profile_name, SpiralFamily, RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{
@@ -191,22 +191,22 @@ fn record_descriptor_bytes_from_rgba(
     height: usize,
     record_profile: &str,
 ) -> Result<Vec<u8>> {
-    let header_indices =
-        build_header_spiral_indices(width, height, record_profile, None, None, None)?;
-    let trailer_indices =
-        build_trailer_spiral_indices(width, height, record_profile, None, None, None)?;
+    let lead_in_indices =
+        build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
+    let run_out_indices =
+        build_run_out_spiral_indices(width, height, record_profile, None, None, None)?;
 
     let prefix_bytes = record_descriptor::metadata_bytes_from_grayscale_rgba(
         rgba,
-        &header_indices,
+        &lead_in_indices,
         record_descriptor::RECORD_DESCRIPTOR_PREFIX_LENGTH,
         "record descriptor prefix",
     )?;
 
     let payload_len = descriptor_payload_len_from_prefix(&prefix_bytes)?;
 
-    let mut descriptor_indices = header_indices;
-    descriptor_indices.extend_from_slice(&trailer_indices);
+    let mut descriptor_indices = lead_in_indices;
+    descriptor_indices.extend_from_slice(&run_out_indices);
 
     record_descriptor::metadata_bytes_from_grayscale_rgba(
         rgba,

@@ -1053,7 +1053,7 @@ fn sidecar_label_outer_radius(geometry: &record_core::RecordProfileGeometry) -> 
 }
 
 fn sidecar_lead_in_outer_radius(geometry: &record_core::RecordProfileGeometry) -> i32 {
-    (geometry.outer_radius - record_core::HEADER_SPIRAL_OUTER_EDGE_INSET)
+    (geometry.outer_radius - record_core::LEAD_IN_OUTER_EDGE_INSET)
         .max(geometry.payload_outer_radius + 1)
 }
 
@@ -1064,12 +1064,12 @@ fn build_sidecar_protected_metadata_pixels(
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
-        record_core::build_header_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?
     {
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_trailer_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?
     {
         protected[pixel_index] = true;
     }
