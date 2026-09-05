@@ -59,9 +59,18 @@ fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// How many palettes stay resident. A record carries a handful of tone spans
-/// at most, so this holds a whole record's worth and then some.
-const PALETTE_CACHE_CAPACITY: usize = 8;
+/// How many palettes stay resident.
+///
+/// Eight was a whole record's worth when a record carried a handful of tone
+/// spans. A clock carries one palette per pocket — thirty for a 12 + 18
+/// wheel, sixty with track gaps — so eight meant every decode evicted its
+/// own palettes as it built them and the next one rebuilt all of them.
+/// Sized to a wheel now.
+///
+/// Not free: a palette is `2^bits_per_pixel` colours, so a twenty-bit one is
+/// megabytes. This is a ceiling on a cache that only fills with what a cut
+/// actually used, and a cut that used them needed them.
+const PALETTE_CACHE_CAPACITY: usize = 64;
 
 /// Number of RGB pixels needed to carry `byte_length` bytes at 3 bytes per pixel.
 pub fn pixel_count_for_byte_length(byte_length: usize) -> usize {

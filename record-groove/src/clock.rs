@@ -536,6 +536,10 @@ pub fn decode_toned_clock(
     Ok(bytes)
 }
 
+/// Which palette each of the first `angles.len()` pixels uses, as
+/// `cell * 2 + gap`. Kept for the tests: the loops below group by key
+/// instead of scanning per key (see `pixels_by_key`).
+#[cfg(test)]
 fn distinct_keys(keys: &[u16]) -> Vec<u16> {
     let mut seen = [false; 2 * TONE_CLOCK_MAX_CELLS];
     for &key in keys {

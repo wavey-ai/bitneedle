@@ -143,6 +143,20 @@ pub struct RenderOptions {
     /// decided per pixel from its groove index — or step hard. Defaults to
     /// `true`. Ignored without slots.
     pub groove_tone_blend: Option<bool>,
+    /// Preview tones: paint each groove pixel in its pocket's flat base
+    /// colour instead of encoding the payload into per-pocket palettes.
+    ///
+    /// The placement is the real one — same rings, span, rotations, blend
+    /// and gap pattern, and the same bits per pixel, so the spiral is the
+    /// same length and the pockets sit where the press puts them — but no
+    /// palette is built and no bit is packed, which is the part of a
+    /// many-pocket cut that costs. A progressive redraw lands in about the
+    /// time of the spiral trace plus the PNG.
+    ///
+    /// A preview carries no payload and cannot prove it reads: the facade
+    /// skips its decode-and-compare when this is set, whatever `verify`
+    /// says. Never kept, never pressed.
+    pub groove_tone_preview: Option<bool>,
     #[serde(default)]
     pub guide_outlines: bool,
     /// How much of the payload band this cut lays its programme across,
@@ -461,12 +475,34 @@ pub fn render_chunk_stream_to_png(
     duration_seconds: f64,
     render_options_json: Option<&str>,
 ) -> Result<RenderOutput> {
-    render_payload_codes_to_png(
+    render_chunk_stream_to_png_with_progress(
+        stream,
+        record_profile,
+        duration_seconds,
+        render_options_json,
+        &|_| {},
+    )
+}
+
+/// The same cut, narrating itself: `progress` hears each stage as it
+/// starts — `"toning…"`, `"groove…"`, `"pressing…"`, `"proving…"` — so a
+/// page can say what a seconds-long render is doing rather than that it is
+/// doing something. A handful of calls per cut; pass a no-op when nobody
+/// is listening.
+pub fn render_chunk_stream_to_png_with_progress(
+    stream: &[u8],
+    record_profile: &str,
+    duration_seconds: f64,
+    render_options_json: Option<&str>,
+    progress: &dyn Fn(&str),
+) -> Result<RenderOutput> {
+    render_payload_codes_to_png_with_progress(
         stream,
         PAYLOAD_CODE_FORMAT_RGB,
         record_profile,
         duration_seconds,
         render_options_json,
+        progress,
     )
 }
 
@@ -477,6 +513,26 @@ pub fn render_payload_codes_to_png(
     duration_seconds: f64,
     render_options_json: Option<&str>,
 ) -> Result<RenderOutput> {
+    render_payload_codes_to_png_with_progress(
+        codes,
+        code_format,
+        record_profile,
+        duration_seconds,
+        render_options_json,
+        &|_| {},
+    )
+}
+
+/// The same cut, narrating itself — see
+/// [`render_chunk_stream_to_png_with_progress`].
+pub fn render_payload_codes_to_png_with_progress(
+    codes: &[u8],
+    code_format: &str,
+    record_profile: &str,
+    duration_seconds: f64,
+    render_options_json: Option<&str>,
+    progress: &dyn Fn(&str),
+) -> Result<RenderOutput> {
     let render_options = parse_render_options(render_options_json)?;
     let result = render_payload_codes_to_transparent_spiral(
         codes,
@@ -485,6 +541,7 @@ pub fn render_payload_codes_to_png(
         duration_seconds,
         None,
         &render_options,
+        progress,
     )?;
 
     normalize_spiral_fit_mode(render_options.spiral_fit_mode.as_deref())?;
@@ -523,7 +580,7 @@ pub fn render_payload_codes_to_png(
             result.validation.min_perceptible_turn_gap,
         );
     }
-
+    progress("pressing…");
     let png_bytes = write_rgba_png(
         result.rendered.width,
         result.rendered.height,
@@ -537,8 +594,13 @@ pub fn render_payload_codes_to_png(
     // not a debug aid — it catches toned capacity mismatches, palette drift,
     // and groove-extraction errors before any corrupted PNG leaves the encoder.
     // Skipped only for inputs that are not BRS1 record streams (e.g. raw RGB
-    // code blocks), which have no chunk-stream decode contract.
-    if codes.starts_with(record_core::RECORD_STREAM_MAGIC) {
+    // code blocks), which have no chunk-stream decode contract — and for
+    // preview tones, which carry no payload by design and so have nothing to
+    // reconstruct.
+    if codes.starts_with(record_core::RECORD_STREAM_MAGIC)
+        && !render_options.groove_tone_preview.unwrap_or(false)
+    {
+        progress("proving…");
         verify_rendered_record_roundtrip(&png_bytes, &normalized_profile, codes)
             .context("rendered PNG groove could not be decoded")?;
     }
@@ -1978,6 +2040,7 @@ fn render_track_scanline_onto_transparent_spiral(
     guide_outlines: bool,
     dummy_spiral_regions: &[DummySpiralPixelRegion],
     tone_clock: Option<(&[u8], &record_groove::ToneClock)>,
+    tone_preview: bool,
 ) -> Result<TransparentRender> {
     let spiral_mask = build_spiral_mask(width, height, b_value, family, record_profile)?;
     let mut data = vec![0_u8; width * height * 4];
@@ -2120,9 +2183,35 @@ fn render_track_scanline_onto_transparent_spiral(
                 )
             })
             .collect();
-        let toned = record_groove::encode_toned_clock(codes, clock, &angles, &radii)?;
-        for (&index, pixel) in placements.iter().zip(toned.chunks_exact(4)) {
-            data[index * 4..index * 4 + 4].copy_from_slice(pixel);
+        if tone_preview {
+            // The fast tone path: each pixel in its pocket's flat base
+            // colour — track or gap — with no palette built and no bit
+            // packed. The placement, the pocket assignment and the gap
+            // pattern are the press's own; only the grain is missing, which
+            // is what a preview is for. Carries no payload, so the facade
+            // never asks it to prove it reads.
+            for (groove_index, ((&pixel_index, &angle), &away)) in placements
+                .iter()
+                .zip(&angles)
+                .zip(&radii)
+                .enumerate()
+            {
+                let cell = clock.cell_index(groove_index, angle, away);
+                let pocket = &clock.slots[cell];
+                let tone = if clock.is_gap(groove_index) {
+                    pocket.gap_base
+                } else {
+                    pocket.base
+                };
+                let at = pixel_index * 4;
+                data[at..at + 3].copy_from_slice(&tone);
+                data[at + 3] = 255;
+            }
+        } else {
+            let toned = record_groove::encode_toned_clock(codes, clock, &angles, &radii)?;
+            for (&index, pixel) in placements.iter().zip(toned.chunks_exact(4)) {
+                data[index * 4..index * 4 + 4].copy_from_slice(pixel);
+            }
         }
     }
 
@@ -2414,8 +2503,22 @@ fn render_payload_codes_to_transparent_spiral(
     duration_seconds: f64,
     fit_track_pixel_count: Option<usize>,
     render_options: &RenderOptions,
+    progress: &dyn Fn(&str),
 ) -> Result<TransparentRenderResult> {
     let normalized_profile = normalize_record_profile_name(record_profile)?;
+    // Only when a toning was asked for: without slots or a tone colour
+    // there is nothing to tune and the caption should move straight on.
+    if render_options
+        .groove_tone_slots
+        .as_deref()
+        .is_some_and(|slots| !slots.is_empty())
+        || render_options
+            .groove_tone_color
+            .as_deref()
+            .is_some_and(|colour| !colour.trim().is_empty())
+    {
+        progress("toning…");
+    }
     let groove_clock = groove_clock_track(codes, render_options, &normalized_profile)?;
     let groove_tone = if groove_clock.is_some() {
         None
@@ -2565,6 +2668,7 @@ fn render_payload_codes_to_transparent_spiral(
         deadwax: None,
     };
 
+    progress("groove…");
     let rendered = render_track_scanline_onto_transparent_spiral(
         RECORD_WIDTH,
         RECORD_HEIGHT,
@@ -2578,6 +2682,7 @@ fn render_payload_codes_to_transparent_spiral(
         render_options.guide_outlines,
         &dummy_spiral_regions,
         tone_clock.as_ref().map(|clock| (codes, clock)),
+        render_options.groove_tone_preview.unwrap_or(false),
     )?;
 
     let min_perceptible_turn_gap = resolve_render_min_perceptible_turn_gap(render_options)?
@@ -2831,8 +2936,24 @@ fn groove_clock_track(
         })
         .collect::<Result<_>>()?;
     let blend = render_options.groove_tone_blend.unwrap_or(true);
+    let preview = render_options.groove_tone_preview.unwrap_or(false);
     let predominant_gap_tone_lightness =
         normalize_gap_tone_lightness(render_options.gap_tone_lightness)?;
+
+    // A preview's tolerances, never tuned and never used to build a
+    // palette — the pixels are flat base colours either way. They ride the
+    // descriptor so it stays structurally valid; the bits per pixel and the
+    // ordering below are the nominal ones, which are also the tuned ones:
+    // the budget fixes the count and the search always lands on chroma
+    // proximity, so a preview's spiral is the press's spiral to the pixel.
+    const PREVIEW_LUMA_TOLERANCE: u8 = 32;
+    let preview_config = || -> (u32, CarrierToneOrdering, u8) {
+        (
+            ((24.0 / GROOVE_TONE_MAX_SIZE_FACTOR).ceil() as u32).clamp(1, 24),
+            CarrierToneOrdering::ChromaProximity,
+            PREVIEW_LUMA_TOLERANCE,
+        )
+    };
 
     let mut slots = Vec::with_capacity(slot_hexes.len());
     let mut shared: Option<(u32, CarrierToneOrdering)> = None;
@@ -2842,6 +2963,27 @@ fn groove_clock_track(
             bail!("grooveToneSlots[{index}] is empty");
         }
         let base = TonedConfig::from_hex(hex, 0, 1).base;
+        if preview {
+            let effective_gap_tone_lightness = adaptive_gap_tone_lightness(
+                oklch_lightness(base),
+                predominant_gap_tone_lightness,
+            )?;
+            let gap_base = lighten_base_oklch(base, effective_gap_tone_lightness)?;
+            let (bits_per_pixel, ordering, luma_tolerance) = preview_config();
+            match shared {
+                None => shared = Some((bits_per_pixel, ordering)),
+                Some(held) => {
+                    debug_assert!(held == (bits_per_pixel, ordering));
+                }
+            }
+            slots.push(record_groove::ClockSlot {
+                base,
+                luma_tolerance,
+                gap_base,
+                gap_luma_tolerance: luma_tolerance,
+            });
+            continue;
+        }
         let config = TonedConfig::balanced(base, GROOVE_TONE_MAX_SIZE_FACTOR)
             .with_context(|| format!("grooveToneSlots[{index}] {hex} cannot be toned"))?;
         match shared {

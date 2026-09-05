@@ -654,6 +654,10 @@ struct RenderOptions {
     /// the work; the pixels are the same either way, only the proof is
     /// skipped.
     verify: Option<bool>,
+    /// Preview tones: flat pocket colours, no payload encoded — see
+    /// `grooveTonePreview` in record-render. A preview carries nothing to
+    /// prove, so the decode-and-compare is skipped whatever `verify` says.
+    groove_tone_preview: Option<bool>,
 }
 
 #[wasm_bindgen(js_name = renderPayloadCodesToPng)]
@@ -777,6 +781,7 @@ pub fn wasm_render_payload_entries_with_descriptor_to_png(
         record_profile,
         duration_seconds,
         render_options_json,
+        &|_| {},
     )
     .map_err(to_js_error)
 }
@@ -883,6 +888,7 @@ fn render_payload_codes_to_png(
         duration_seconds,
         render_options_json,
         &render_options,
+        &|_| {},
     )
 }
 
@@ -912,6 +918,7 @@ fn render_payload_container_to_png(
         duration_seconds,
         render_options_json,
         &render_options,
+        &|_| {},
     )
 }
 
@@ -977,6 +984,7 @@ fn render_payload_entries_to_png(
         duration_seconds,
         render_options_json,
         &render_options,
+        &|_| {},
     )
 }
 
@@ -1006,6 +1014,7 @@ fn render_payload_entries_with_descriptor_to_png(
     record_profile: &str,
     duration_seconds: f64,
     render_options_json: &str,
+    progress: &dyn Fn(&str),
 ) -> Result<WasmRenderResult> {
     normalize_payload_code_format(code_format)?;
 
@@ -1028,6 +1037,7 @@ fn render_payload_entries_with_descriptor_to_png(
         duration_seconds,
         render_options_json,
         &render_options,
+        progress,
     )
 }
 
@@ -1046,6 +1056,33 @@ pub fn render_payload_entries_with_descriptor_to_png_native(
         record_profile,
         duration_seconds,
         render_options_json,
+        &|_| {},
+    )
+    .map(Into::into)
+}
+
+/// The same cut, narrating itself: `progress` hears each stage as it
+/// starts — `"toning…"`, `"groove…"`, `"pressing…"`, `"proving…"` — so a
+/// page can say what a seconds-long render is doing rather than that it is
+/// doing something. A handful of calls per cut; pass a no-op when nobody
+/// is listening.
+pub fn render_payload_entries_with_descriptor_to_png_native_with_progress(
+    payload_entries: Vec<Vec<u8>>,
+    payload_descriptor_json: &str,
+    code_format: &str,
+    record_profile: &str,
+    duration_seconds: f64,
+    render_options_json: &str,
+    progress: &dyn Fn(&str),
+) -> Result<NativeRenderResult> {
+    render_payload_entries_with_descriptor_to_png(
+        payload_entries,
+        payload_descriptor_json,
+        code_format,
+        record_profile,
+        duration_seconds,
+        render_options_json,
+        progress,
     )
     .map(Into::into)
 }
@@ -1386,6 +1423,7 @@ fn render_record_programme_to_png(
         duration_seconds,
         render_options_json,
         &render_options,
+        &|_| {},
     )
 }
 
@@ -1488,6 +1526,7 @@ fn render_chunk_input_to_png(
     duration_seconds: f64,
     render_options_json: &str,
     _render_options: &RenderOptions,
+    progress: &dyn Fn(&str),
 ) -> Result<WasmRenderResult> {
     let resolved_dummy_spiral_regions = chunk_input.dummy_spiral_regions.clone();
     let resolved_render_options_json = render_options_json_with_chunk_metadata(
@@ -1507,11 +1546,12 @@ fn render_chunk_input_to_png(
         chunk_input.stream_bytes.len()
     ));
 
-    let rendered = record_render::render_chunk_stream_to_png(
+    let rendered = record_render::render_chunk_stream_to_png_with_progress(
         &chunk_input.stream_bytes,
         normalized_profile,
         duration_seconds,
         render_options_json_option(&resolved_render_options_json),
+        progress,
     )
     .with_context(|| {
         format!(
@@ -1553,7 +1593,15 @@ fn render_chunk_input_to_png(
     // indexes built for the way back — so an interactive preview may ask out
     // of it. The stream was already parsed on the way in, and nothing here
     // touches a pixel either way.
-    if resolved_render_options.verify.unwrap_or(true) {
+    //
+    // A preview never proves: its pixels are flat pocket colours carrying no
+    // payload, so there is nothing to compare against, whatever `verify`
+    // says.
+    let preview = resolved_render_options.groove_tone_preview.unwrap_or(false);
+    if preview {
+        wasm_log("[record-cut-wasm] preview tones: skipping the round-trip proof");
+    }
+    if resolved_render_options.verify.unwrap_or(true) && !preview {
         let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
             &rendered.png_bytes,
             normalized_profile,
@@ -2407,6 +2455,7 @@ mod tests {
             "single45",
             211.33060416666666,
             render_options_json,
+            &|_| {},
         );
         let elapsed = started.elapsed();
         assert!(
@@ -2434,6 +2483,7 @@ mod tests {
             "single45",
             211.33060416666666,
             r##"{"fitTrackPixelCount":12000}"##,
+            &|_| {},
         )
         .expect("progressive fast-fit render should accept a fixed track-pixel target");
         let payload: serde_json::Value =
@@ -2456,6 +2506,7 @@ mod tests {
             "single45",
             211.33060416666666,
             r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}]}"##,
+            &|_| {},
         )
         .expect("fixture record should render");
         let original = record_decode::decode_record_png_to_chunk_stream_for_profile(
@@ -2559,6 +2610,7 @@ mod tests {
             "single45",
             1.333,
             "{}",
+            &|_| {},
         )
         .err()
         .expect("expected an error")
@@ -2577,6 +2629,7 @@ mod tests {
             "single45",
             1.333,
             "{}",
+            &|_| {},
         )
         .err()
         .expect("expected an error")
