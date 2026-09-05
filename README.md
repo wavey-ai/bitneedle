@@ -30,6 +30,80 @@ a dedicated 10 in file still specify 100 mm. A 10 in may also be pressed with a
 and each profile places it proportionally within the gap between the outermost
 groove and the disc edge.
 
+### The groove, rim to label
+
+One groove is cut, and it runs the whole way. The stylus travels left to
+right through every band below without a discontinuity — the deadwax picks
+the groove up on the exact angle the programme put it down, and a reader
+walks straight out of the payload into it.
+
+```
+   travel of the stylus  ──────────────────────────────────────────────▶
+
+   r_outer      payload_outer     cut_inner    payload_inner    label_radius
+      │              │                 │             │               │
+      ▼              ▼                 ▼             ▼               ▼
+   ┌──────┬──────────────┬─────────────────┬─────────────────┬────────────┐
+   │ rim  │   LEAD-IN    │    PROGRAMME    │     DEADWAX     │  RUN-OUT   │
+   │      │              │                 │                 │            │
+   │ flat │  2 turns     │  pitch = b      │  1.00 mm/turn   │  4 turns   │
+   │ no   │  fixed       │  from the fit   │  true physical  │  fixed     │
+   │groove│              │                 │                 │            │
+   ├──────┼──────────────┼─────────────────┼─────────────────┼────────────┤
+   │  ―   │ BRD1  [1/2]  │  audio payload  │  free carrier   │ BRD1 [2/2] │
+   │      │ grey nibble  │  rgb / toned    │  unwritten      │grey nibble │
+   │      │ 4 bits/px    │  20 bits/px     │  today          │ 4 bits/px  │
+   └──────┴──────────────┴─────────────────┴─────────────────┴────────────┘
+                          └── the cut stops wherever the programme ran out;
+                              everything it did not reach is deadwax
+```
+
+**Lead-in** — two fixed turns at the rim. Carries the first half of the BRD1
+descriptor, including the 29-byte prefix a decoder reads before anything
+else. Because the prefix must be readable before any palette is known, this
+band is painted in grey nibbles (base 120, one nibble per pixel).
+
+**Programme** — the audio, at the pitch the fit solved for. It is laid out
+from the rim against a nominal span and stops at `cut_inner_radius`, which
+the prefix carries.
+
+**Deadwax** — from where the programme stopped, in to the run-out. Cut at a
+true physical 1 mm per turn, so it is the one band rendered at life size,
+and its turn count is whatever travel the programme left over — typically 40
+to 90 turns on a short cut. It is a carrier in its own right: an ordered,
+addressable pixel sequence reproducible from the prefix alone. Declared by
+`SEGMENT_DEADWAX_EXTENT` (33) and offered to sidecars, which must write it
+as a groove, not as a canvas to paint on. A programme that fills the band
+leaves no deadwax and writes no segment at all.
+
+**Run-out** — the four fixed turns around the label. Reserved for strict
+header metadata: it carries the second half of the BRD1 stream and is never
+offered to a sidecar.
+
+The exact radii, in rendered pixels on the 576 x 576 canvas:
+
+| | `single45` | `ten` | `lp` |
+| --- | --- | --- | --- |
+| Disc edge | 287 | 287 | 287 |
+| Outer rim thickness | 4 | 4 | 4 |
+| Lead-in band thickness | 6 | 7 | 5 |
+| Payload outer radius | 280 | 279 | 281 |
+| Payload inner radius | 177 | 138 | 115 |
+| Label radius | 151 | 114 | 95 |
+| Spindle hole radius | 12 | 8 | 7 |
+| Lead-in turns | 2 | 2 | 2 |
+| Run-out turns | 4 | 4 | 4 |
+| Deadwax pitch, px/turn | 3.2875 | 2.2884 | 1.9032 |
+| Pixels per mm | 3.2875 | 2.2884 | 1.9032 |
+
+The deadwax pitch equals the pixels-per-mm figure exactly, because the band
+is cut at 1.00 mm per turn by definition. Every other pitch in the table is
+derived from a turn count and the travel available, not chosen.
+
+There is no lock groove. A pressed record ends its run-out in a closed
+concentric circle that traps the stylus; Bitneedle's run-out currently stops
+at the label radius instead. That terminator is not yet cut.
+
 ### How this reaches the 576 x 576 canvas
 
 The rendered disc always fills the canvas — `outer_radius_px` is **287** for
