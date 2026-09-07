@@ -6,8 +6,8 @@
 //! Canonical BRD1 metadata raster encoding helpers.
 
 use record_descriptor::{
-    metadata_byte_capacity_for_pixel_count, metadata_pixel_count_for_byte_length,
-    METADATA_GRAYSCALE_NIBBLE_BASE,
+    grayscale_value_for_level, metadata_byte_capacity_for_pixel_count,
+    metadata_pixel_count_for_byte_length, METADATA_GRAYSCALE_BITS_PER_PIXEL,
 };
 
 pub const UNUSED_METADATA_GROOVE_RGB_MIN: u8 = 112;
@@ -26,6 +26,10 @@ pub fn metadata_fade_pixel_count(pixel_count: usize, turns: f64) -> usize {
         .max(1.0) as usize
 }
 
+/// Paints `bytes` along `indices` as greys from the metadata ladder, packing
+/// [`METADATA_GRAYSCALE_BITS_PER_PIXEL`] bits into every pixel. The bit order
+/// is most-significant first, matching `metadata_bytes_from_grayscale_rgba`.
+/// Returns the number of pixels written.
 pub fn paint_metadata_bytes_as_grayscale(
     data: &mut [u8],
     indices: &[usize],
@@ -34,28 +38,49 @@ pub fn paint_metadata_bytes_as_grayscale(
     let byte_count = bytes
         .len()
         .min(metadata_byte_capacity_for_pixel_count(indices.len()));
+    let pixel_count = metadata_pixel_count_for_byte_length(byte_count);
+    let bits = METADATA_GRAYSCALE_BITS_PER_PIXEL;
 
-    for (byte_number, &byte) in bytes.iter().take(byte_count).enumerate() {
-        let high = METADATA_GRAYSCALE_NIBBLE_BASE + ((byte >> 4) & 0x0f);
-        let low = METADATA_GRAYSCALE_NIBBLE_BASE + (byte & 0x0f);
+    let mut written = 0usize;
+    let mut acc = 0u32;
+    let mut acc_bits = 0u32;
 
-        for (nibble_index, value) in [high, low].iter().enumerate() {
-            let pixel_index = indices[byte_number * 2 + nibble_index];
-            let Some(rgba_index) = pixel_index.checked_mul(4) else {
-                continue;
-            };
-            if rgba_index + 3 >= data.len() {
-                continue;
-            }
+    let mut put = |level: u32, written: &mut usize| {
+        if *written >= pixel_count {
+            return;
+        }
+        let pixel_index = indices[*written];
+        *written += 1;
+        let Some(rgba_index) = pixel_index.checked_mul(4) else {
+            return;
+        };
+        if rgba_index + 3 >= data.len() {
+            return;
+        }
+        let value = grayscale_value_for_level(level);
+        data[rgba_index] = value;
+        data[rgba_index + 1] = value;
+        data[rgba_index + 2] = value;
+        data[rgba_index + 3] = 255;
+    };
 
-            data[rgba_index] = *value;
-            data[rgba_index + 1] = *value;
-            data[rgba_index + 2] = *value;
-            data[rgba_index + 3] = 255;
+    for &byte in bytes.iter().take(byte_count) {
+        acc = (acc << 8) | byte as u32;
+        acc_bits += 8;
+        while acc_bits >= bits {
+            put((acc >> (acc_bits - bits)) & ((1 << bits) - 1), &mut written);
+            acc_bits -= bits;
+            acc &= (1 << acc_bits) - 1;
         }
     }
 
-    metadata_pixel_count_for_byte_length(byte_count)
+    // The tail byte rarely lands on a pixel boundary; pad the last pixel out
+    // with zero bits so the reader's accumulator sees the same bits back.
+    if acc_bits > 0 {
+        put((acc << (bits - acc_bits)) & ((1 << bits) - 1), &mut written);
+    }
+
+    written
 }
 
 pub fn paint_unused_metadata_groove(

@@ -33,7 +33,51 @@ pub const RECORD_DESCRIPTOR_VERSION_HOUSE: u8 = 5;
 /// spiral at the rim, so it is known before anything else is read.
 pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 
-pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 120;
+/// How many bits of the metadata stream each grey pixel carries.
+///
+/// The lead-in and run-out are the bands that must be readable before
+/// anything about the record is known, so they cannot be toned and cannot be
+/// palette-coded. Grey is not the problem. The old encoding's problem was that
+/// it spent a whole pixel on four bits and then put all sixteen levels between
+/// 120 and 135, one value apart: nothing in a spread that narrow reads as
+/// tone, and nothing one value apart survives a resample. It was flat to look
+/// at and brittle to read, for the same reason.
+///
+/// Six bits puts sixty-four levels across the full range in steps of
+/// [`METADATA_GRAYSCALE_STEP`]. The band gains real tonal range, a pixel may
+/// drift by half a step and still read back, and the stream gets half again
+/// as many bits per pixel as the nibble encoding it replaces — which is what
+/// pays for the run-out dropping from four turns to two.
+pub const METADATA_GRAYSCALE_BITS_PER_PIXEL: u32 = 6;
+
+/// The number of distinct greys, `2^METADATA_GRAYSCALE_BITS_PER_PIXEL`.
+pub const METADATA_GRAYSCALE_LEVELS: u32 = 1 << METADATA_GRAYSCALE_BITS_PER_PIXEL;
+
+/// The gap between adjacent levels, chosen so the ladder spans the full
+/// 0..=255 range as widely as it can while landing on whole values.
+pub const METADATA_GRAYSCALE_STEP: u8 = (255 / (METADATA_GRAYSCALE_LEVELS - 1)) as u8;
+
+/// Retained so callers that only wanted the darkest level keep working; the
+/// ladder now starts at zero and climbs by [`METADATA_GRAYSCALE_STEP`].
+pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 0;
+
+/// The grey a level is painted as.
+pub fn grayscale_value_for_level(level: u32) -> u8 {
+    ((level % METADATA_GRAYSCALE_LEVELS) as u8).saturating_mul(METADATA_GRAYSCALE_STEP)
+}
+
+/// The level a grey reads back as: the nearest rung of the ladder, so a pixel
+/// that drifted by up to half a step still decodes. A value past the top rung
+/// by more than half a step is not one of ours and is refused.
+pub fn level_for_grayscale_value(value: u8) -> Option<u32> {
+    let step = METADATA_GRAYSCALE_STEP as u32;
+    let half = step / 2;
+    let top = (METADATA_GRAYSCALE_LEVELS - 1) * step;
+    if value as u32 > top + half {
+        return None;
+    }
+    Some(((value as u32 + half) / step).min(METADATA_GRAYSCALE_LEVELS - 1))
+}
 
 /// Fixed by the BRD1 v2 format: release commitments are always SHA-256,
 /// signatures are always Ed25519. No per-reference algorithm selector.
@@ -60,7 +104,12 @@ pub const CACHE_ENCRYPTION_NONCE_DOMAIN: &[u8] = b"bitneedle-cache-nonce-v1";
 pub const RECORD_PROFILE_SINGLE45_CODE: u8 = 0;
 pub const RECORD_PROFILE_LP_CODE: u8 = 1;
 pub const RECORD_PROFILE_TEN_CODE: u8 = 2;
+/// The 7" with the smaller of the two label sizes plants publish. Registered
+/// after the first three, so it takes the next code rather than a place in
+/// the historical order.
+pub const RECORD_PROFILE_SINGLE45_VINTAGE_CODE: u8 = 3;
 pub const RECORD_PROFILE_SINGLE45: &str = "single45";
+pub const RECORD_PROFILE_SINGLE45_VINTAGE: &str = "single45vintage";
 pub const RECORD_PROFILE_LP: &str = "lp";
 pub const RECORD_PROFILE_TEN: &str = "ten";
 
@@ -151,6 +200,51 @@ pub const SEGMENT_TONE_CLOCK_MAP: u8 = 32;
 /// versioned, as [`SEGMENT_SPIRAL_GEOMETRY`] is: a longer payload from a
 /// later writer decodes to what these mean.
 pub const SEGMENT_DEADWAX_EXTENT: u8 = 33;
+
+/// Which way round the programme's groove is cut.
+///
+/// A lathe's cutter does not move: the record turns under it, and the
+/// spiral that leaves the head therefore winds against the turn. Every
+/// record written before this segment existed was traced clockwise from
+/// twelve o'clock, which is the mirror of a disc cut on a lathe turning
+/// clockwise — self-consistent, since the same tracer reads it back, but
+/// the wrong hand for anything that has to sit under a real cutter or be
+/// drawn as one.
+///
+/// Payload: one byte, `0` counter-clockwise, `1` clockwise. Absent means
+/// clockwise, so every record already pressed decodes exactly as it did and
+/// its bytes do not move — the segment is written only when a cut departs
+/// from that.
+pub const SEGMENT_GROOVE_HANDEDNESS: u8 = 34;
+
+/// Which revision of the lead-out geometry the record was cut under.
+///
+/// The run-out and its lock groove are not described on the wire. Their
+/// geometry follows from the profile and from `cut_inner_radius`, which the
+/// prefix already carries, so a decoder derives the band rather than being
+/// told it — no flag, and no way for the two sides to disagree about a record
+/// they both computed.
+///
+/// The cost of deriving is that the constants become part of the format. The
+/// gap ladder, the taper, the clearance the lock groove sits at: change any
+/// of them and every record already cut stops reading back, silently, because
+/// nothing in the record says which numbers drew it. This segment is what
+/// says so. One byte, and a decoder that does not know the revision refuses
+/// the record instead of tracing the wrong band through it and returning
+/// plausible rubbish.
+///
+/// Payload: one byte, the revision. Absent means
+/// [`LEAD_OUT_GEOMETRY_REVISION_ORIGINAL`], so a record written before this
+/// existed decodes as what it is.
+pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
+
+/// The first lead-out geometry: a fine deadwax at the lathe's feed, a run-out
+/// of one to four rings opening outward by [`record_core::RUN_OUT_TAPER`],
+/// and a lock groove closing on itself.
+pub const LEAD_OUT_GEOMETRY_REVISION_ORIGINAL: u8 = 1;
+
+/// The revision this build cuts and can read.
+pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_ORIGINAL;
 
 /// The deadwax is a groove with nothing painted into it: whatever a writer
 /// puts there is between that writer and whoever reads it back.
@@ -1467,6 +1561,14 @@ pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
 /// decode the raster geometry. BRD1 does not use this field to assign logical
 /// sample counts to BRS1 payload entries; programme timing belongs to BRS1 and
 /// codec-specific validation.
+fn clockwise_by_default() -> bool {
+    true
+}
+
+fn original_lead_out_geometry() -> u8 {
+    LEAD_OUT_GEOMETRY_REVISION_ORIGINAL
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordDescriptor {
@@ -1490,6 +1592,12 @@ pub struct RecordDescriptor {
     /// existing serialized form valid.
     #[serde(default)]
     pub spiral_family: SpiralFamily,
+    /// Whether the programme's groove winds clockwise from its start angle.
+    /// True for every record written before [`SEGMENT_GROOVE_HANDEDNESS`]
+    /// existed, and the default here, so an absent segment reads as the cut
+    /// it always was. See that segment for why the other hand exists.
+    #[serde(default = "clockwise_by_default")]
+    pub spiral_clockwise: bool,
     pub record_profile: String,
     pub stream_byte_length: usize,
     pub payload_encoding: String,
@@ -1525,6 +1633,10 @@ pub struct RecordDescriptor {
     /// The signature covering everything above that was added after the
     /// press. Required whenever any of them is present.
     pub deferred_attestation: Option<SignedReleaseReference>,
+    /// Which revision of the lead-out geometry drew this record's run-out.
+    /// See [`SEGMENT_LEAD_OUT_GEOMETRY`].
+    #[serde(default = "original_lead_out_geometry")]
+    pub lead_out_geometry_revision: u8,
     /// The deadwax, if the cut left any: how much groove is standing between
     /// the programme and the descriptor's inner band, and whether anything
     /// has claimed it. Absent on a record whose programme ran to the label.
@@ -1575,11 +1687,13 @@ pub struct DescriptorPrefix {
 }
 
 pub fn metadata_pixel_count_for_byte_length(byte_length: usize) -> usize {
-    byte_length.saturating_mul(2)
+    byte_length
+        .saturating_mul(8)
+        .div_ceil(METADATA_GRAYSCALE_BITS_PER_PIXEL as usize)
 }
 
 pub fn metadata_byte_capacity_for_pixel_count(pixel_count: usize) -> usize {
-    pixel_count / 2
+    pixel_count.saturating_mul(METADATA_GRAYSCALE_BITS_PER_PIXEL as usize) / 8
 }
 
 pub fn metadata_bytes_from_grayscale_rgba(
@@ -1593,39 +1707,44 @@ pub fn metadata_bytes_from_grayscale_rgba(
         bail!("{label} spiral capacity is too small");
     }
 
+    let bits = METADATA_GRAYSCALE_BITS_PER_PIXEL;
     let mut bytes = Vec::with_capacity(byte_length);
-    for byte_number in 0..byte_length {
-        let mut nibbles = [0u8; 2];
-        for nibble_index in 0..2 {
-            let pixel_index = indices[byte_number * 2 + nibble_index];
-            let rgba_index = pixel_index
-                .checked_mul(4)
-                .context("metadata RGBA index overflow")?;
-            if rgba_index + 3 >= rgba.len() {
-                bail!("{label} spiral pixel index is outside RGBA buffer");
-            }
+    let mut acc = 0u32;
+    let mut acc_bits = 0u32;
 
-            let red = rgba[rgba_index];
-            let green = rgba[rgba_index + 1];
-            let blue = rgba[rgba_index + 2];
-            let alpha = rgba[rgba_index + 3];
-
-            if alpha == 0 {
-                bail!("{label} spiral pixel is empty");
-            }
-            if red != green || green != blue {
-                bail!("{label} metadata pixel is not grayscale");
-            }
-
-            let nibble = red
-                .checked_sub(METADATA_GRAYSCALE_NIBBLE_BASE)
-                .context("metadata pixel is below grayscale nibble range")?;
-            if nibble > 0x0f {
-                bail!("{label} metadata pixel is outside grayscale nibble range");
-            }
-            nibbles[nibble_index] = nibble;
+    for &pixel_index in indices.iter().take(pixel_count) {
+        let rgba_index = pixel_index
+            .checked_mul(4)
+            .context("metadata RGBA index overflow")?;
+        if rgba_index + 3 >= rgba.len() {
+            bail!("{label} spiral pixel index is outside RGBA buffer");
         }
-        bytes.push((nibbles[0] << 4) | nibbles[1]);
+
+        let red = rgba[rgba_index];
+        let green = rgba[rgba_index + 1];
+        let blue = rgba[rgba_index + 2];
+        if rgba[rgba_index + 3] == 0 {
+            bail!("{label} spiral pixel is empty");
+        }
+        if red != green || green != blue {
+            bail!("{label} metadata pixel is not grayscale");
+        }
+
+        let Some(level) = level_for_grayscale_value(red) else {
+            bail!("{label} metadata pixel is outside the grayscale ladder");
+        };
+
+        acc = (acc << bits) | level;
+        acc_bits += bits;
+        while acc_bits >= 8 && bytes.len() < byte_length {
+            bytes.push((acc >> (acc_bits - 8)) as u8);
+            acc_bits -= 8;
+            acc &= (1 << acc_bits) - 1;
+        }
+    }
+
+    if bytes.len() < byte_length {
+        bail!("{label} spiral did not yield {byte_length} bytes");
     }
     Ok(bytes)
 }
@@ -1635,6 +1754,7 @@ pub fn record_profile_code(record_profile: &str) -> Result<u8> {
         RECORD_PROFILE_SINGLE45 => Ok(RECORD_PROFILE_SINGLE45_CODE),
         RECORD_PROFILE_LP => Ok(RECORD_PROFILE_LP_CODE),
         RECORD_PROFILE_TEN => Ok(RECORD_PROFILE_TEN_CODE),
+        RECORD_PROFILE_SINGLE45_VINTAGE => Ok(RECORD_PROFILE_SINGLE45_VINTAGE_CODE),
         other => bail!("unsupported canonical record profile {other}"),
     }
 }
@@ -1644,6 +1764,9 @@ pub fn record_profile_from_code(code: u8) -> Result<String> {
         RECORD_PROFILE_SINGLE45_CODE => Ok(RECORD_PROFILE_SINGLE45.to_string()),
         RECORD_PROFILE_LP_CODE => Ok(RECORD_PROFILE_LP.to_string()),
         RECORD_PROFILE_TEN_CODE => Ok(RECORD_PROFILE_TEN.to_string()),
+        RECORD_PROFILE_SINGLE45_VINTAGE_CODE => {
+            Ok(RECORD_PROFILE_SINGLE45_VINTAGE.to_string())
+        }
         other => bail!("unknown record profile code {other}"),
     }
 }
@@ -2234,7 +2357,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut upc = None;
     let mut deferred_attestation = None;
     let mut deadwax = None;
+    let mut lead_out_geometry = None;
     let mut spiral_family = None;
+    let mut spiral_clockwise = None;
 
     while offset < body.len() {
         if parsed_segments >= prefix.segment_count {
@@ -2502,6 +2627,30 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 }
                 deadwax = Some(decode_deadwax_extent(payload)?);
             }
+            SEGMENT_GROOVE_HANDEDNESS => {
+                if payload.len() != 1 {
+                    bail!("groove handedness segment has invalid length");
+                }
+                assign_once(&mut spiral_clockwise, payload[0] != 0, "groove handedness")?;
+            }
+            SEGMENT_LEAD_OUT_GEOMETRY => {
+                if payload.len() != 1 {
+                    bail!("lead-out geometry segment has invalid length");
+                }
+                // The one segment a decoder must not skip. Every other
+                // unknown is a feature it does without; this one says the
+                // band under its own trailer was drawn by numbers it does not
+                // have, and tracing it anyway returns bytes that look like
+                // bytes.
+                if payload[0] > LEAD_OUT_GEOMETRY_REVISION {
+                    bail!(
+                        "record was cut under lead-out geometry revision {}, and this build \
+                         knows up to {LEAD_OUT_GEOMETRY_REVISION}",
+                        payload[0]
+                    );
+                }
+                assign_once(&mut lead_out_geometry, payload[0], "lead-out geometry")?;
+            }
             // A segment type this build does not know is skipped, not
             // refused.
             //
@@ -2583,6 +2732,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         cut_inner_radius: prefix.cut_inner_radius,
         deadwax_b_value_bits: prefix.deadwax_b_value_bits,
         spiral_family: spiral_family.unwrap_or_default(),
+        spiral_clockwise: spiral_clockwise.unwrap_or(true),
         record_profile,
         stream_byte_length,
         payload_encoding,
@@ -2607,6 +2757,8 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         upc,
         deferred_attestation,
         deadwax,
+        lead_out_geometry_revision: lead_out_geometry
+            .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_ORIGINAL),
     };
     // Null or signed: a deferred field with no attestation over it is a
     // malformed record, not merely an untrusted one.
@@ -2830,6 +2982,7 @@ mod tests {
 
     fn test_descriptor(secret: Vec<u8>) -> RecordDescriptor {
         RecordDescriptor {
+            spiral_clockwise: true,
             version: RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
@@ -2865,6 +3018,7 @@ mod tests {
             upc: None,
             deferred_attestation: None,
             deadwax: None,
+            lead_out_geometry_revision: LEAD_OUT_GEOMETRY_REVISION,
         }
     }
 
@@ -3035,10 +3189,12 @@ mod tests {
         assert_eq!(record_profile_code("single45").unwrap(), 0);
         assert_eq!(record_profile_code("lp").unwrap(), 1);
         assert_eq!(record_profile_code("ten").unwrap(), 2);
+        assert_eq!(record_profile_code("single45vintage").unwrap(), 3);
         assert_eq!(record_profile_from_code(0).unwrap(), "single45");
         assert_eq!(record_profile_from_code(1).unwrap(), "lp");
         assert_eq!(record_profile_from_code(2).unwrap(), "ten");
-        assert!(record_profile_from_code(3).is_err());
+        assert_eq!(record_profile_from_code(3).unwrap(), "single45vintage");
+        assert!(record_profile_from_code(4).is_err());
     }
 
     #[test]
@@ -3432,4 +3588,129 @@ mod tests {
         assert_eq!(hash_a.len(), 64);
         assert_ne!(hash_a, hash_b);
     }
+
+    #[test]
+    fn every_level_round_trips_through_its_grey() {
+        for level in 0..METADATA_GRAYSCALE_LEVELS {
+            let grey = grayscale_value_for_level(level);
+            assert_eq!(
+                level_for_grayscale_value(grey),
+                Some(level),
+                "level {level} painted as {grey} did not read back"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ladder_spans_the_range_and_fits_in_u8() {
+        let top = grayscale_value_for_level(METADATA_GRAYSCALE_LEVELS - 1);
+        assert_eq!(grayscale_value_for_level(0), 0);
+        assert!(
+            top as u32 >= 200,
+            "the ladder tops out at {top}; it should reach most of the range"
+        );
+        // The band this replaced was sixteen values wide and read as one flat
+        // tone. This one has to be far wider than that to read as tone.
+        assert!(top > 16, "the ladder spans {top} — no wider than the flat band");
+    }
+
+    #[test]
+    fn a_pixel_that_drifted_under_half_a_step_still_reads() {
+        // Exactly half a step is the tie between two rungs and rounds up, so
+        // the guaranteed tolerance is one short of it either way.
+        let tolerance = (METADATA_GRAYSCALE_STEP / 2) as i32 - 1;
+        assert!(tolerance >= 1, "the ladder must tolerate at least one value of drift");
+        for level in 0..METADATA_GRAYSCALE_LEVELS {
+            let grey = grayscale_value_for_level(level) as i32;
+            for drift in -tolerance..=tolerance {
+                let drifted = (grey + drift).clamp(0, 255) as u8;
+                let Some(read) = level_for_grayscale_value(drifted) else {
+                    panic!("level {level} at {grey} drifted by {drift} and was refused");
+                };
+                assert_eq!(read, level, "level {level} drifted by {drift} and misread");
+            }
+        }
+    }
+
+    #[test]
+    fn a_grey_far_past_the_top_rung_is_refused() {
+        assert_eq!(level_for_grayscale_value(255), None);
+    }
+
+    #[test]
+    fn the_ladder_carries_more_bits_than_the_nibble_encoding_it_replaced() {
+        // The run-out went from four turns to two; the bits per pixel have to
+        // make that back or the descriptor a record can carry shrinks.
+        assert!(
+            METADATA_GRAYSCALE_BITS_PER_PIXEL > 4,
+            "six bits per pixel is what pays for the shorter run-out"
+        );
+        let pixels = 5197; // single45 lead-in + two-turn run-out
+        let was_four_turn_nibble = 7138 / 2; // the original band, at 4 bits/px
+        assert!(
+            metadata_byte_capacity_for_pixel_count(pixels) >= was_four_turn_nibble,
+            "capacity must not fall below the four-turn nibble encoding"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lead_out_geometry_tests {
+    use super::*;
+
+    /// A descriptor carrying exactly one segment, so the segment is the only
+    /// thing under test.
+    fn descriptor_carrying(segment: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BRD1");
+        bytes.push(RECORD_DESCRIPTOR_VERSION);
+        bytes.extend_from_slice(
+            &u16::try_from(RECORD_DESCRIPTOR_PREFIX_LENGTH + segment.len())
+                .expect("descriptor fits")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(
+            &u16::try_from(segment.len()).expect("segments fit").to_be_bytes(),
+        );
+        bytes.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(segment);
+        bytes
+    }
+
+    fn revision_segment(revision: u8) -> Vec<u8> {
+        let mut segment = vec![SEGMENT_LEAD_OUT_GEOMETRY];
+        segment.extend_from_slice(&1u16.to_be_bytes());
+        segment.push(revision);
+        segment
+    }
+
+    /// A record that says nothing about its lead-out geometry was cut before
+    /// the segment existed, and that is the first revision.
+    #[test]
+    fn an_absent_revision_is_the_original() {
+        assert_eq!(
+            original_lead_out_geometry(),
+            LEAD_OUT_GEOMETRY_REVISION_ORIGINAL
+        );
+    }
+
+    /// The one segment a decoder must not skip. Everything else it does not
+    /// understand is a feature it goes without; this one says the band under
+    /// its own trailer was drawn by numbers it does not have, and tracing it
+    /// anyway returns bytes that look like bytes.
+    #[test]
+    fn a_future_revision_is_refused_rather_than_guessed_at() {
+        let bytes = descriptor_carrying(&revision_segment(LEAD_OUT_GEOMETRY_REVISION + 1));
+        let error = decode_record_descriptor_bytes(&bytes)
+            .expect_err("a revision this build cannot draw is not a record it can read");
+
+        assert!(
+            error.to_string().contains("lead-out geometry revision"),
+            "{error}"
+        );
+    }
+
 }

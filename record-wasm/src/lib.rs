@@ -1069,7 +1069,7 @@ fn build_sidecar_protected_metadata_pixels(
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?
     {
         protected[pixel_index] = true;
     }

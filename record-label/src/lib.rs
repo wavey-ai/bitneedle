@@ -23,6 +23,8 @@ pub struct LabelProfileGeometry {
     pub label_radius: i32,
     pub spindle_hole_radius: i32,
     pub dink_radius: Option<i32>,
+    /// The knockout centre the dink is exposed by removing.
+    pub dink_cutout_radius: Option<i32>,
     pub default_cutout_mode: LabelCutoutMode,
     pub default_cutout_radius: i32,
 }
@@ -86,6 +88,7 @@ pub fn label_profile_geometry(record_profile: &str) -> Result<LabelProfileGeomet
         label_radius: geometry.label_radius,
         spindle_hole_radius: geometry.spindle_hole_radius,
         dink_radius: geometry.dink_radius,
+        dink_cutout_radius: geometry.dink_cutout_radius,
         default_cutout_mode: LabelCutoutMode::Spindle,
         default_cutout_radius: geometry.spindle_hole_radius,
     })

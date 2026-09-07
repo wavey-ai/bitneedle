@@ -5,7 +5,7 @@ A compact visual guide to the canonical **BRD1 + BRS1 + optional BSC1** format.
 BPK1 transports these exact components before PNG rendering.
 
 This README gives explanatory information. The normative specification is
-`draft-bitneedle-picture-record-format-04.txt`.
+`draft-bitneedle-picture-record-format-05.txt`.
 
 ## At a glance
 
@@ -76,34 +76,49 @@ decode exact RGBA
 
 ## Record profiles
 
-| Profile | Spindle radius | Label radius | Payload inner | Payload outer | Outer radius |
-|---|---:|---:|---:|---:|---:|
-| `single45` | 63 | 151 | 169 | 280 | 287 |
-| `lp` | 7 | 95 | 109 | 280 | 287 |
+| Profile | Spindle radius | Label radius | Lock groove | Payload inner | Payload outer | Outer radius |
+|---|---:|---:|---:|---:|---:|---:|
+| `single45` | 12 | 151 | 162.5 | 177 | 280 | 287 |
+| `single45vintage` | 12 | 138 | 149.5 | 177 | 280 | 287 |
+| `ten` | 8 | 114 | 122.0 | 138 | 279 | 287 |
+| `lp` | 7 | 95 | 101.7 | 115 | 281 | 287 |
+
+Both 7 in profiles additionally carry a 38.1 mm dink at radius 63, with a
+35.1 mm knockout at radius 58 inside it.
 
 ```text
-radius 0                                                     radius 287
-   │                                                             │
-   ├── spindle ── label ── trailer ── payload groove ── header ──┤
+radius 0                                                              radius 287
+   │                                                                      │
+   ├─ spindle ─ label ─ lock ─ run-out ─ deadwax ─ payload ─── header ─────┤
+                        └──── the trailer carrier ────┘
 ```
+
+The lock groove and the run-out rings above it are one carrier, and the second
+half of BRD1 is written across it. How many rings the run-out has follows from
+where the programme stopped, so it is computed rather than declared.
 
 ## BRD1 structure
 
 ### Prefix
 
 ```text
-0               4 5      7      9      11                 19
-┌────────────────┬─┬──────┬──────┬───────┬──────────────────┐
-│ "BRD1"         │v│ total│ segs │ seg   │ b_value bits     │
-│ 4 bytes        │2│ u16be│ u16be│ bytes │ f64be / u64be    │
-└────────────────┴─┴──────┴──────┴───────┴──────────────────┘
+0               4 5      7      9      11             19    21          29
+┌────────────────┬─┬──────┬──────┬───────┬─────────────┬─────┬───────────┐
+│ "BRD1"         │v│ total│ segs │ seg   │ b_value bits│ cut │ deadwax b │
+│ 4 bytes        │4│ u16be│ u16be│ bytes │ f64be/u64be │u16be│  f64be    │
+└────────────────┴─┴──────┴──────┴───────┴─────────────┴─────┴───────────┘
 ```
 
-`total` is the whole descriptor payload including this 19-byte prefix, and
-must equal `19 + seg bytes`. `segs` is the number of segments that follow,
+`total` is the whole descriptor payload including this 29-byte prefix, and
+must equal `29 + seg bytes`. `segs` is the number of segments that follow,
 and a reader that parses a different number fails. `b_value` must decode
-finite and positive. The version is `2` for an Archimedean cut and `3` for a
+finite and positive. The version is `4` for an Archimedean cut and `5` for a
 record carrying a spiral-geometry segment; a reader refuses any other.
+
+`cut` is the radius the programme's groove stopped at, zero for a side cut to
+the payload inner radius. It is read from the header spiral **before** the
+trailer is traced, because the run-out's geometry follows from it. `deadwax b`
+is the pitch of the deadwax band, never its turn count.
 
 ### Segment framing
 
@@ -119,7 +134,7 @@ record carrying a spiral-geometry segment; a reader refuses any other.
 |---:|---|---|---|:---:|
 | 1 | Descriptor CRC-32 | `u32be`, zeroed while hashing | 4 | yes |
 | 2 | Exact BRS1 length | `u32be`, non-zero | 4 | yes |
-| 4 | Record profile | profile code (`0` single45, `1` lp, `2` ten) | 1 | yes |
+| 4 | Record profile | profile code (`0` single45, `1` lp, `2` ten, `3` single45vintage) | 1 | yes |
 | 5 | Title | UTF-8 | ≤ 96 | no |
 | 6 | Artist | UTF-8 | ≤ 96 | no |
 | 7 | Payload encoding | encoding code (`0` rgb, `1` toned-v1) | 1 | yes |
@@ -139,10 +154,20 @@ record carrying a spiral-geometry segment; a reader refuses any other.
 | 27 | ISRCs | count + `(track u16be, 12 ASCII)` | variable | deferred |
 | 28 | Barcode | 12–14 ASCII digits, mod-10 checked | 12–14 | deferred |
 | 29 | Deferred attestation | signature envelope | variable | with 26–28 |
-| 30 | Spiral geometry | binary, see below | 17/25/34/42/90 | with v3 |
+| 30 | Spiral geometry | binary, see below | 17/25/34/42/90 | with v5 |
 | 31 | Additional signatures | count + length-prefixed envelopes | variable | no |
+| 32 | Tone clock map | versioned binary clockface | variable | with toned-v2 |
+| 33 | Deadwax extent | radii, capacity, encoding, optional claim | 13/21 | no |
+| 34 | Groove handedness | `0` anticlockwise, `1` clockwise | 1 | no |
+| 35 | Lead-out geometry | revision the run-out was drawn by | 1 | yes |
 
-Types 3, 12, 15, 17–20 and 32 upward are unallocated. A text segment written
+Types 3, 12, 15, 17–20 and 36 upward are unallocated.
+
+Segment 35 is the one a reader may not skip. The run-out is computed from the
+prefix rather than described on the wire, so the constants that draw it are
+part of the format; a reader handed a revision it does not know traces a
+different band and recovers bytes that look like bytes. It refuses the record
+instead. A text segment written
 with an empty payload is indistinguishable from an absent one: the encoder
 omits both.
 
@@ -578,7 +603,7 @@ JSON here is content inside an item, not structural BSC1 metadata.
 
 ```text
 [1] PNG → exact RGBA
-[2] profile → single45 or lp
+[2] profile → single45, single45vintage, ten or lp
 [3] metadata spirals → BRD1
 [4] BRD1 CRC and required segments
 [5] main groove → RGB bytes

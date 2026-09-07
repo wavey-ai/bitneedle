@@ -73,6 +73,15 @@ pub struct RecordDescriptorInput {
     /// vari-pitch writes the house v3 descriptor with a spiral-geometry
     /// segment.
     pub spiral_family: SpiralFamily,
+    /// Whether the programme's groove winds *anti*-clockwise from its start
+    /// angle — the hand a lathe cuts, since the platter turns clockwise
+    /// under a head that does not travel.
+    ///
+    /// Named for the departure rather than the state, because this struct
+    /// derives `Default` and `bool::default()` is `false`: the default has
+    /// to be the hand every record already carries, or a caller that fills
+    /// this struct field by field silently cuts the other way.
+    pub spiral_anticlockwise: bool,
 }
 
 pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Result<Vec<u8>> {
@@ -166,6 +175,19 @@ pub fn encode_record_descriptor_stream(
 }
 
 pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<u8>, u16)> {
+    // Empty for a clockwise cut, so an ordinary record's bytes and segment
+    // count are exactly what they always were.
+    let handedness: Vec<u8> = if descriptor.spiral_anticlockwise {
+        vec![0u8]
+    } else {
+        Vec::new()
+    };
+    // Written on every record. The run-out is derived rather than declared,
+    // so this byte is the only thing standing between a future change to the
+    // gap ladder and a decoder that traces the wrong band through an old
+    // record and hands back plausible rubbish.
+    let lead_out_geometry: Vec<u8> = vec![record_descriptor::LEAD_OUT_GEOMETRY_REVISION];
+
     if descriptor.stream_byte_length == 0 {
         bail!("stream byte length must not be zero");
     }
@@ -389,6 +411,11 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_ADDITIONAL_SIGNATURES, additional_signatures),
         (SEGMENT_SPIRAL_GEOMETRY, spiral_geometry),
         (SEGMENT_DEADWAX_EXTENT, deadwax),
+        (record_descriptor::SEGMENT_GROOVE_HANDEDNESS, handedness),
+        (
+            record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY,
+            lead_out_geometry,
+        ),
     ] {
         if payload.is_empty() {
             continue;
@@ -518,6 +545,48 @@ mod tests {
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
 
         assert!(decoded.deadwax.is_none());
+    }
+
+    #[test]
+    fn a_clockwise_cut_writes_no_handedness_segment() {
+        // The hand every record already carries costs nothing to say, so it
+        // is not said: an ordinary cut's bytes must not move.
+        let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+
+        assert!(decoded.spiral_clockwise);
+        assert!(!bytes.contains(&record_descriptor::SEGMENT_GROOVE_HANDEDNESS));
+    }
+
+    /// The run-out is derived from the prefix rather than described on the
+    /// wire, so the numbers that drew it are part of the format. Every record
+    /// says which revision of them it was cut under, and this build reads
+    /// back the one it writes.
+    #[test]
+    fn every_record_declares_the_geometry_its_run_out_was_drawn_by() {
+        let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+
+        assert_eq!(
+            decoded.lead_out_geometry_revision,
+            record_descriptor::LEAD_OUT_GEOMETRY_REVISION,
+        );
+        assert!(bytes.contains(&record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY));
+    }
+
+    #[test]
+    fn a_lathe_cut_carries_its_hand_to_the_reader() {
+        // A groove cut the way a lathe cuts one — anticlockwise inward,
+        // because the platter turns clockwise under a head that does not
+        // travel — has to say so, or a reader retraces the mirror of it and
+        // lifts the pixels in the wrong order.
+        let mut input = base_input();
+        input.spiral_anticlockwise = true;
+
+        let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
+        let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
+
+        assert!(!decoded.spiral_clockwise);
     }
 
     #[test]

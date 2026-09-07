@@ -17,7 +17,7 @@ against how conspicuous the result is.
 
 ### RGB
 
-```rust
+```rust,ignore
 let rgba = record_groove::bytes_to_rgba(&bytes);
 let back = record_groove::rgba_to_bytes(&rgba, Some(bytes.len()))?;
 ```
@@ -28,7 +28,7 @@ like random color noise.
 
 ### Grayscale (luma)
 
-```rust
+```rust,ignore
 let rgba = record_groove::bytes_to_grayscale_rgba(&bytes);
 let back = record_groove::grayscale_rgba_to_bytes(&rgba, Some(bytes.len()))?;
 ```
@@ -44,7 +44,7 @@ drift** around a base tone. The algorithm finds each 8-bit RGB color within
 color. Then, it keeps the nearest `2^bits_per_pixel` entries. Each pixel contains
 one palette index.
 
-```rust
+```rust,ignore
 use record_groove::{TonedConfig, TonedPalette, rgba_to_square_png};
 
 // Pink base, brightness held within ±2 luma steps, 18 bits per pixel.
@@ -74,7 +74,7 @@ the palette and recover the exact byte stream.
 `TonedConfig::balanced` picks the luma tolerance that best trades brightness
 drift against color cast for a given base tone and size budget:
 
-```rust
+```rust,ignore
 // Best-balanced pink palette within a 1.2x size budget.
 let palette = TonedPalette::balanced([0xff, 0xc0, 0xcb], 1.2)?;
 let config  = palette.config(); // ordinary TonedConfig; decode side rebuilds from this
@@ -191,7 +191,7 @@ error values from 3 through 18.
 
 ## Square PNG output
 
-```rust
+```rust,ignore
 let png  = record_groove::rgba_to_square_png(&rgba)?;   // smallest fitting square
 let rgba = record_groove::square_png_to_rgba(&png)?;     // round-trips exactly
 ```

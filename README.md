@@ -10,18 +10,33 @@ differ in their outer diameter and in where the recorded band starts; a 10 in
 and a 12 in share an inner recording diameter, and all three share a centre
 hole.
 
-| | 7 in `single45` | 10 in `ten` | 12 in `lp` |
-| --- | --- | --- | --- |
-| Outside diameter | 6 7/8 in = **174.6 mm** | 9 7/8 in = **250.8 mm** | 11 7/8 in = **301.6 mm** |
-| Outermost groove at recording pitch | 6 5/8 in = **168.3 mm** | 9 1/2 in = **241.3 mm** | 11 1/2 in = **292.1 mm** |
-| Minimum inside diameter of recording | 4 1/4 in = **107.95 mm** | 4 3/4 in = **120.65 mm** | 4 3/4 in = **120.65 mm** |
-| Label diameter | 92.1 mm | 100.0 mm | 100.0 mm |
-| Centre hole | 7.5 mm (+ 38.1 mm dink) | 7.24 mm | 7.24 mm |
+| | 7 in `single45` | 7 in `single45vintage` | 10 in `ten` | 12 in `lp` |
+| --- | --- | --- | --- | --- |
+| Outside diameter | 6 7/8 in = **174.6 mm** | 6 7/8 in = **174.6 mm** | 9 7/8 in = **250.8 mm** | 11 7/8 in = **301.6 mm** |
+| Outermost groove at recording pitch | 6 5/8 in = **168.3 mm** | 6 5/8 in = **168.3 mm** | 9 1/2 in = **241.3 mm** | 11 1/2 in = **292.1 mm** |
+| Minimum inside diameter of recording | 4 1/4 in = **107.95 mm** | 4 1/4 in = **107.95 mm** | 4 3/4 in = **120.65 mm** | 4 3/4 in = **120.65 mm** |
+| Label diameter | 92.1 mm | **84.0 mm** | 100.0 mm | 100.0 mm |
+| Centre hole | 7.5 mm (+ 38.1 mm dink) | 7.5 mm (+ 38.1 mm dink) | 7.24 mm | 7.24 mm |
 
 Label diameter is the one dimension the RIAA standard leaves to the plant, so
-these three come from the curated pressing-plant template registry in
-`record-plant`, where the published trim clusters hard: 92 mm on a 7 in (25 of
-44 templates), 100 mm on a 12 in (18 of 26), and 100 mm on a 10 in (6 of 9).
+these come from the curated pressing-plant template registry in `record-plant`,
+where the published trim clusters hard: 92 mm on a 7 in (25 of 44 templates),
+100 mm on a 12 in (18 of 26), and 100 mm on a 10 in (6 of 9).
+
+The 7 in has a second cluster, and `single45vintage` is it: ten templates trim
+at 83.6–84 mm — GZ, Memphis, Press On, Precision, Sonic Wax UK, XVINYLX — where
+the other twenty-five trim at 92. Neither follows from the hole. Precision
+publishes 83.94 mm for its small-hole and large-hole labels alike, Gotta Groove
+92.07 for both, and thirteen templates cover either hole under one spec. A
+record is a profile and a hole independently, so a dinked 1950s single is
+`single45vintage` with its knockout removed rather than a profile of its own.
+The smaller paper buys 39 px of label clearance against the modern profile's
+26, which is the band the run-out and the locked groove are cut in.
+
+Both 7 in profiles carry a 35.1 mm knockout inside the 38.1 mm dink — the
+removable centre, derived as the dink less a 1.5 mm perforation either side.
+That perforation is what a plant specifies; a caliper laid across the knockout
+reads its moulded edge and comes back at 35.
 Most plants ship one shared "10/12 in label" template, and the plants that draw
 a dedicated 10 in file still specify 100 mm. A 10 in may also be pressed with a
 7 in label, which plants offer as a customer option; 100 mm stays the default.
@@ -35,27 +50,28 @@ groove and the disc edge.
 One groove is cut, and it runs the whole way. The stylus travels left to
 right through every band below without a discontinuity — the deadwax picks
 the groove up on the exact angle the programme put it down, and a reader
-walks straight out of the payload into it.
+walks straight out of the payload into it. It ends where a record ends: in a
+closed ring that never lets go.
 
 ```
-   travel of the stylus  ──────────────────────────────────────────────▶
+   travel of the stylus  ──────────────────────────────────────────────────▶
 
-   r_outer      payload_outer     cut_inner    payload_inner    label_radius
-      │              │                 │             │               │
-      ▼              ▼                 ▼             ▼               ▼
-   ┌──────┬──────────────┬─────────────────┬─────────────────┬────────────┐
-   │ rim  │   LEAD-IN    │    PROGRAMME    │     DEADWAX     │  RUN-OUT   │
-   │      │              │                 │                 │            │
-   │ flat │  2 turns     │  pitch = b      │  1.00 mm/turn   │  4 turns   │
-   │ no   │  fixed       │  from the fit   │  true physical  │  fixed     │
-   │groove│              │                 │                 │            │
-   ├──────┼──────────────┼─────────────────┼─────────────────┼────────────┤
-   │  ―   │ BRD1  [1/2]  │  audio payload  │  free carrier   │ BRD1 [2/2] │
-   │      │ grey nibble  │  rgb / toned    │  unwritten      │grey nibble │
-   │      │ 4 bits/px    │  20 bits/px     │  today          │ 4 bits/px  │
-   └──────┴──────────────┴─────────────────┴─────────────────┴────────────┘
-                          └── the cut stops wherever the programme ran out;
-                              everything it did not reach is deadwax
+   r_outer   payload_outer   cut_inner        entry      lock   label_radius
+      │           │              │              │          │         │
+      ▼           ▼              ▼              ▼          ▼         ▼
+   ┌──────┬────────────┬───────────────┬─────────────┬──────────┬─────────┐
+   │ rim  │  LEAD-IN   │   PROGRAMME   │   DEADWAX   │ RUN-OUT  │  LOCK   │
+   │      │            │               │             │          │         │
+   │ flat │ 2 turns    │ pitch = b     │ 1.00 mm/trn │ 1-4 rings│ 1 turn  │
+   │ no   │ fixed      │ from the fit  │ true physical│ tapered │ closed  │
+   │groove│            │               │             │ 3.2 mm in│ 3.5 mm  │
+   ├──────┼────────────┼───────────────┼─────────────┼──────────┼─────────┤
+   │  ―   │ BRD1 [1/2] │ audio payload │ free carrier│ BRD1 [2/2]         │
+   │      │ grey nibble│ rgb / toned   │ unwritten   │ grey nibble        │
+   │      │ 4 bits/px  │ 20 bits/px    │ today       │ 4 bits/px          │
+   └──────┴────────────┴───────────────┴─────────────┴──────────┴─────────┘
+                        └── the cut stops wherever the programme ran out;
+                            the run-out claims what it can reach of the rest
 ```
 
 **Lead-in** — two fixed turns at the rim. Carries the first half of the BRD1
@@ -67,42 +83,66 @@ band is painted in grey nibbles (base 120, one nibble per pixel).
 from the rim against a nominal span and stops at `cut_inner_radius`, which
 the prefix carries.
 
-**Deadwax** — from where the programme stopped, in to the run-out. Cut at a
-true physical 1 mm per turn, so it is the one band rendered at life size,
-and its turn count is whatever travel the programme left over — typically 40
-to 90 turns on a short cut. It is a carrier in its own right: an ordered,
-addressable pixel sequence reproducible from the prefix alone. Declared by
-`SEGMENT_DEADWAX_EXTENT` (33) and offered to sidecars, which must write it
-as a groove, not as a canvas to paint on. A programme that fills the band
-leaves no deadwax and writes no segment at all.
+**Deadwax** — from where the programme stopped, in to the run-out's outermost
+ring. Cut at a true physical 1 mm per turn, so it is the one band rendered at
+life size, and its turn count is whatever travel the run-out did not claim. It
+is a carrier in its own right: an ordered, addressable pixel sequence
+reproducible from the prefix alone. Declared by `SEGMENT_DEADWAX_EXTENT` (33)
+and offered to sidecars, which must write it as a groove, not as a canvas to
+paint on. A record with no palette to offer it under declares nothing rather
+than declaring a band whose encoding it cannot honour.
 
-**Run-out** — the four fixed turns around the label. Reserved for strict
-header metadata: it carries the second half of the BRD1 stream and is never
-offered to a sidecar.
+**Run-out** — one to four widely spaced rings above the lock. The gaps taper
+outward from a fixed 3.2 mm at the inside, each ring standing 1.5 times
+further out than the one within, so a four-ring band divides its travel
+3.375 : 2.25 : 1.5 : 1 and the outermost ring stands well clear of the rest.
+
+How many rings it has is **derived, not declared**. The band asks for four and
+drops a ring whenever one will not fit above the cut, so a side carrying one
+short track gets a wide run-out and a side cut to the label gets a single ring
+— and both the encoder and the decoder compute the same band from
+`cut_inner_radius`, which the prefix already carries. Nothing on the wire names
+the extent, so the two cannot disagree.
+
+A ring that will not fit is dropped rather than squeezed. The gaps are the
+ladder above or the band is narrower, never both.
+
+**Locked groove** — one closed revolution 3.5 mm out from the label edge, which
+is where a pressed record puts its lock groove and leaves the annulus inside it
+smooth for matrix and stamper marks. Its pixel sequence is cyclic: walk off the
+end and you return to the first pixel of the lock, not to the run-out above it.
+The run-out is walked once and the lock forever, which is what makes it a
+locked groove rather than the last turn of a spiral.
+
+The run-out and the lock together are the trailer carrier — one ordered
+sequence holding the second half of the BRD1 stream, guaranteed to hold **512
+bytes** on every profile at every extent. A wider band holds more, up to about
+2.5 KB, and that surplus is real addressable groove the format does not
+promise.
 
 The exact radii, in rendered pixels on the 576 x 576 canvas:
 
-| | `single45` | `ten` | `lp` |
-| --- | --- | --- | --- |
-| Disc edge | 287 | 287 | 287 |
-| Outer rim thickness | 4 | 4 | 4 |
-| Lead-in band thickness | 6 | 7 | 5 |
-| Payload outer radius | 280 | 279 | 281 |
-| Payload inner radius | 177 | 138 | 115 |
-| Label radius | 151 | 114 | 95 |
-| Spindle hole radius | 12 | 8 | 7 |
-| Lead-in turns | 2 | 2 | 2 |
-| Run-out turns | 4 | 4 | 4 |
-| Deadwax pitch, px/turn | 3.2875 | 2.2884 | 1.9032 |
-| Pixels per mm | 3.2875 | 2.2884 | 1.9032 |
+| | `single45` | `single45vintage` | `ten` | `lp` |
+| --- | --- | --- | --- | --- |
+| Disc edge | 287 | 287 | 287 | 287 |
+| Outer rim thickness | 4 | 4 | 4 | 4 |
+| Lead-in band thickness | 6 | 6 | 7 | 5 |
+| Payload outer radius | 280 | 280 | 279 | 281 |
+| Payload inner radius | 177 | 177 | 138 | 115 |
+| Label radius | 151 | 138 | 114 | 95 |
+| Spindle hole radius | 12 | 12 | 8 | 7 |
+| Dink radius | 63 | 63 | none | none |
+| Dink knockout radius | 58 | 58 | none | none |
+| Lead-in turns | 2 | 2 | 2 | 2 |
+| Locked groove radius | 162.5 | 149.5 | 122.0 | 101.7 |
+| Deadwax pitch, px/turn | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
+| Pixels per mm | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
 
 The deadwax pitch equals the pixels-per-mm figure exactly, because the band
-is cut at 1.00 mm per turn by definition. Every other pitch in the table is
-derived from a turn count and the travel available, not chosen.
-
-There is no lock groove. A pressed record ends its run-out in a closed
-concentric circle that traps the stylus; Bitneedle's run-out currently stops
-at the label radius instead. That terminator is not yet cut.
+is cut at 1.00 mm per turn by definition. The run-out's gaps are likewise
+physical: 3.2 mm at the inside on every profile, because the four render to one
+canvas at four scales and a gap fixed in pixels would be a different distance
+on each.
 
 ### How this reaches the 576 x 576 canvas
 
@@ -114,9 +154,9 @@ occupies more of it:
 
 | Profile | Label radius | Ratio of canvas | Label / disc | Payload band |
 | --- | --- | --- | --- | --- |
-| `single45` | 151 px | 0.5243 | **52.7 %** | 169 -> 280 px (111 px) |
-| `ten` | 114 px | 0.3958 | **39.9 %** | 130 -> 280 px (150 px) |
-| `lp` | 95 px | 0.3299 | **33.2 %** | 109 -> 280 px (171 px) |
+| `single45` | 151 px | 0.5243 | **52.7 %** | 177 -> 280 px (103 px) |
+| `ten` | 114 px | 0.3958 | **39.9 %** | 138 -> 279 px (141 px) |
+| `lp` | 95 px | 0.3299 | **33.2 %** | 115 -> 281 px (166 px) |
 
 Radii are scaled from each profile's own physical geometry and rounded to whole
 pixels:
@@ -132,9 +172,12 @@ proportions are accurate to the real object, and a UI may take the ratio above
 as the truthful glyph for a format.
 
 `margin_radius` lands on 283 px for all three profiles, so every format shares
-an `outer_rim_thickness` of 4 px, a `lead_in_band_thickness` of 6 px, and a
-`payload_outer_radius` of 280 px. The inner edge of the payload band is the one
-edge that moves, and it moves with the label.
+an `outer_rim_thickness` of 4 px. Everything below that moves. The
+`lead_in_band_thickness` is the gap left between the margin and the scaled
+outer recorded diameter — 6, 7, and 5 px — so `payload_outer_radius` comes out
+at 280, 279, and 281. The inner edge moves further, and it moves with the
+minimum inside diameter of recording rather than with the label: the label
+clearance below it is the difference the two leave, at 26, 24, and 20 px.
 
 ## What a record attests
 

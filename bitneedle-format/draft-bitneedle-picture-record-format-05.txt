@@ -1,9 +1,9 @@
 # The Bitneedle Picture Record Format
 
-Internet-Draft: draft-bitneedle-picture-record-format-04
+Internet-Draft: draft-bitneedle-picture-record-format-05
 Intended status: Informational
-Date: 2 September 2026
-Expires: 2 March 2027
+Date: 7 September 2026
+Expires: 7 March 2027
 SPDX-License-Identifier: CC0-1.0
 
 ## Abstract
@@ -12,7 +12,7 @@ This document specifies the Bitneedle Picture Record Format. It is an
 exact-digital raster image format. The visible spiral groove of the image
 contains a recoverable byte stream.
 
-The base format uses a 576 by 576 PNG/RGBA carrier. It has three registered
+The base format uses a 576 by 576 PNG/RGBA carrier. It has four registered
 annular record profiles. The outer and inner grayscale metadata spirals contain
 a BRD1 record descriptor. The main payload spiral contains a BRS1 Bitneedle
 Record Stream.
@@ -44,10 +44,38 @@ Certain aspects of Bitneedle records, encoding, decoding, rendering, caching,
 and playback are patent pending. This document grants CC0 rights to its text.
 Patent rights require a separate license.
 
+## Changes from draft-04
+
+This revision specifies the lead-out. Where draft-04 described a single
+Archimedean spiral running from the cut inner radius to the payload inner
+radius, a record now carries three distinct bands between the programme and the
+label, and the last of them closes on itself. The substantive changes are:
+
+* Section 5.1 registers the `single45vintage` record profile, adds the dink
+  knockout as a column, and states the derivation of the knockout from the
+  perforation rather than from a measurement of its own edge.
+* Section 5.2 registers profile code 3.
+* Section 6.5 is rewritten. It specifies the deadwax, the run-out and the
+  locked groove as three bands of one groove, gives the gap ladder the run-out
+  is drawn by, and defines the extent the run-out resolves to.
+* Section 6.6 specifies the locked groove: a closed ring whose pixel sequence
+  is cyclic, and the terminating carrier of every record.
+* Section 7.2 adds a normative ordering requirement. The prefix MUST be read
+  from the header spiral alone before the trailer is traced, because the
+  trailer's geometry follows from the cut inner radius the prefix carries.
+* Section 7.4 registers segment types 32 through 35: the tone clock map, the
+  deadwax extent, the groove handedness, and the lead-out geometry revision.
+* Section 7.14 specifies the lead-out geometry revision. It is the one segment
+  a decoder MUST NOT skip.
+
+Records written under draft-04 remain readable, and their bytes do not move.
+The lead-out bands they were cut with are revision 1 of Section 7.14, which is
+what an absent segment declares.
+
 ## Changes from draft-03
 
-This revision brings the specification level with the reference implementation.
-The substantive changes are:
+This revision brought the specification level with the reference
+implementation. The substantive changes were:
 
 * Section 5 registers the `ten` record profile, adds the spindle and dink
   radii as separate columns, and states the derivation from physical
@@ -119,7 +147,7 @@ The format is exact-digital. Exact RGBA samples carry the recoverable data.
 This document specifies:
 
 * the 576 by 576 RGBA carrier
-* the registered record profiles single45, ten, and lp
+* the registered record profiles single45, single45vintage, ten, and lp
 * deterministic spiral tracing, the registered geometry families, and
   duplicate-pixel handling
 * the BRD1 binary record descriptor at versions 2 and 3
@@ -208,7 +236,32 @@ Spirals rotate clockwise.
 ### 2.4 Terms
 
 record profile
-    A named annular geometry. Registered profiles are single45, ten, and lp.
+    A named annular geometry. Registered profiles are single45,
+    single45vintage, ten, and lp.
+
+deadwax
+    The band between where the programme's groove stopped and where the
+    run-out begins, cut at the lathe's own feed. It is fine, it carries no
+    programme, and on a side that stopped early it is most of the record.
+
+run-out
+    The band of widely spaced rings between the deadwax and the locked groove.
+    It is the trailer carrier: the second half of the record descriptor is
+    written into it.
+
+locked groove
+    The closed ring the run-out descends onto. Its pixel sequence is cyclic:
+    walking off its end returns to its start rather than to the start of the
+    run-out above it.
+
+lead-out
+    The deadwax, the run-out and the locked groove together, which are one
+    groove seen at three pitches.
+
+extent
+    How many rings the run-out has. Derived from the cut inner radius rather
+    than declared, so that a side which stopped early gets a wider band and
+    both encoder and decoder compute the same one.
 
 geometry family
     The rule that maps swept angle to groove radius. Registered families are
@@ -681,35 +734,146 @@ leaves nowhere to put them.
 BRD1 is one logical byte stream written to the header first and then continued
 in the trailer.
 
-### 6.5 Lead-Out Spiral
+### 6.5 The Lead-Out
 
 Where a record declares a non-zero cut inner radius, the groove continues past
-the programme as the lead-out: a single Archimedean spiral from the cut inner
-radius inward to the payload inner radius, at the pitch the prefix declares.
+the programme to the label. It does so at three pitches, and they are three
+bands of one groove rather than three spirals:
 
-The lead-out is a continuation of the payload groove, not a second spiral. It
-begins at the cut inner radius on the angle the payload walk of Section 6.1
-has reached by the time its radius crosses that value, so a traversal passes
-from the last payload pixel into the first lead-out pixel without a
-discontinuity. A decoder MUST obtain that angle by performing the payload walk
-itself, since a shaped vari-pitch radius is a running integral with no closed
-form and no other method reproduces the phase.
+    programme  ->  deadwax  ->  run-out  ->  locked groove
 
-Unlike the header and trailer bands, the lead-out band keeps the pixel on its
-outer edge: the walk begins on that radius, so there is nothing above it to
-discard, and rejecting it would drop the whole first turn to pixel rounding.
-Pixels at distance at most the payload inner radius are discarded.
+The deadwax is cut at the lathe's own feed and is fine. The run-out is a
+handful of widely spaced rings. The locked groove is a closed ring that does
+not descend at all. A traversal passes from the last programme pixel through
+all three without a discontinuity.
 
-The declared value is a pitch, never a turn count. The turns a record has are
-whatever the remaining travel yields:
+Every radius below is in the pixel units of Section 5.1, and every millimetre
+is converted at that profile's own scale. The constants are normative and are
+identified by the lead-out geometry revision of Section 7.14. This section
+specifies revision 1.
 
-    lead_out_turns = (cut_inner_radius - payload_inner_radius)
-                     / (2 * PI * lead_out_b_value)
+#### 6.5.1 Constants
 
-The lead-out carries no payload. It is nonetheless a carrier: its pixel
-sequence is ordered, addressable, and reproducible from the prefix alone, and
-a future revision may write into it without moving any pixel of the payload,
-the header, or the trailer.
+    lock_groove_clearance_mm = 3.5
+    run_out_inner_gap_mm     = 3.2
+    run_out_taper            = 1.5
+    run_out_max_rings        = 4
+    deadwax_pitch_mm         = 1.0
+    min_turn_separation_px   = 2.0
+
+The lock groove clearance is the band between the label edge and the locked
+groove. A pressed record carries its matrix and stamper marks there, which is
+why the last groove does not run to the paper.
+
+The run-out inner gap is the distance between the innermost run-out ring and
+the locked groove. It is stated in millimetres and not in pixels because the
+profiles render to one canvas at four scales, and a gap fixed in pixels is a
+different distance on every record. It is the tightest gap the band has, and
+it is three times the minimum turn separation at the coarsest profile's scale.
+
+#### 6.5.2 The Locked Groove Radius
+
+    lock_radius = label_radius + lock_groove_clearance_mm * scale
+
+The locked groove sits at this radius on every record of a profile. It does
+not move with the cut.
+
+#### 6.5.3 The Run-Out Extent
+
+The run-out has between one and run_out_max_rings rings. The count is derived
+from the cut inner radius and is not declared:
+
+    inner_gap = run_out_inner_gap_mm * scale
+
+    descent(n) = sum over i in 0..n of inner_gap * run_out_taper^i
+
+The gaps taper outward. The innermost gap is inner_gap, and each ring above it
+stands run_out_taper times further from its neighbour than the ring within. A
+four-ring band therefore divides its travel 3.375 : 2.25 : 1.5 : 1.
+
+Two ceilings bound the band:
+
+    compact_ceiling = payload_inner_radius - min_turn_separation_px
+
+    ceiling = cut_inner_radius - min_turn_separation_px, where the cut is
+              declared and the band has more than one ring
+            = compact_ceiling otherwise
+
+An encoder MUST take the largest n from 1 to run_out_max_rings for which
+lock_radius + descent(n) is at most ceiling, and MUST then set:
+
+    entry_radius = min(lock_radius + descent(n), ceiling)
+
+A ring that will not fit is not taken. The band drops to fewer rings rather
+than keeping its count and compressing its gaps, so the gaps are the ladder
+above or the band is narrower, never both.
+
+The programme's edge is cleared by min_turn_separation_px rather than met
+exactly. Each band rounds its own walk onto the integer grid and eliminates
+duplicates only against itself, so two bands sharing a radius round onto
+shared pixels and the outer band's bytes are overwritten by the inner one. A
+single pixel of separation is not enough; the minimum turn separation is the
+distance at which two turns are known to resolve apart.
+
+#### 6.5.4 The Run-Out Walk
+
+The run-out is walked as n complete revolutions from the entry radius to the
+lock radius. Within a revolution the radius falls at that revolution's own
+constant pitch; the taper is between revolutions and never within one.
+
+Let boundary(0) be entry_radius and boundary(i) be entry_radius less the sum
+of the first i gaps, scaled so that boundary(n) is lock_radius. For a swept
+angle theta, with turn = floor(theta / 2pi) bounded above by n-1 and
+within = theta / 2pi - turn:
+
+    radius = boundary(turn)
+           + (boundary(turn + 1) - boundary(turn)) * within
+
+The walk begins at the default start angle and proceeds in the record's
+handedness, stepping by the common trace of Section 6.1.
+
+A decoder MUST NOT ease the final revolution onto the lock radius. An eased
+arrival flattens onto that radius part way through its last revolution and
+draws the locked groove itself; the locked groove of Section 6.6 then lands on
+pixels already taken and contributes nothing, and the record loses a ring of
+carrier without any error being raised. A lathe does not ease into a locked
+groove either. It cuts at pitch and the feed is switched off.
+
+#### 6.5.5 The Deadwax
+
+The deadwax fills whatever the run-out did not claim:
+
+    deadwax_outer = cut_inner_radius
+    deadwax_inner = entry_radius + min_turn_separation_px
+
+    deadwax_turns = (deadwax_outer - deadwax_inner) / (deadwax_pitch_mm * scale)
+
+It is an Archimedean band at deadwax_pitch_mm and carries no programme. Where
+deadwax_inner is at or above deadwax_outer the record has no deadwax, which is
+the case for a side cut to its last usable radius.
+
+The deadwax is nonetheless a carrier. Its extent is declared by the segment of
+Section 7.11 where the record has a palette to offer it under, and a record
+without one declares nothing rather than declaring a band whose encoding it
+cannot honour.
+
+### 6.6 The Locked Groove
+
+The locked groove is one complete revolution at lock_radius, walked from the
+angle the run-out reached, in the record's handedness, stepping by the common
+trace of Section 6.1.
+
+Its pixel sequence is cyclic. A traversal that walks off the end of the locked
+groove returns to the first pixel of the locked groove and not to the first
+pixel of the run-out above it: the run-out is walked once and the locked
+groove forever. This is the property that makes it a locked groove rather than
+the last turn of a spiral, and a decoder MUST reproduce it.
+
+The run-out and the locked groove together are the trailer carrier. They are
+one ordered pixel sequence, and the second half of the BRD1 stream is written
+across it. The guaranteed capacity of that carrier is 512 bytes on every
+registered profile at every extent. A profile at a wider extent holds more,
+and that surplus is addressable groove which this document does not promise.
 
 ## 7. BRD1 Record Descriptor
 
@@ -753,10 +917,23 @@ A non-zero value MUST be greater than the profile's payload inner radius and
 at most its payload outer radius, and the lead-out b_value MUST decode finite
 and positive.
 
-The lead-out b_value is a pitch and not a turn count, for the same reason the
-main groove declares one: the number of turns a lead-out has is a consequence
-of how much travel the programme left, and storing it would let the two
-disagree. Section 6.5 gives the derivation.
+The lead-out b_value is the pitch of the deadwax band of Section 6.5.5. It is
+a pitch and not a turn count, for the same reason the main groove declares one:
+the number of turns a deadwax has is a consequence of how much travel the
+programme left, and storing it would let the two disagree.
+
+The cut inner radius is read before the trailer is traced. A decoder MUST
+recover the prefix from the header spiral alone, MUST read the cut inner radius
+from it, and MUST only then trace the trailer, because the trailer's geometry
+follows from that radius by Section 6.5.3 and is not a constant of the profile.
+The prefix is 29 octets against a header spiral of some thousands of pixels, so
+it is never in the part of the descriptor that spills into the trailer, and the
+order is always available.
+
+This is what lets the extent be derived rather than declared. Both sides
+compute the same band from a value the record already carries, so no segment
+names the extent and the two cannot disagree about a record they both worked
+out.
 
 An encoder writes version 4 for an Archimedean record and version 5 for a
 record carrying any other geometry family. A decoder MUST accept both versions
@@ -821,9 +998,17 @@ registered by this document appears at most once.
     | 29   | deferred attestation     | version-2 binary envelope           | with 26 through 28    |
     | 30   | spiral geometry          | versioned binary family record      | required for v3       |
     | 31   | additional signatures    | count and length-prefixed envelopes | no                    |
+    | 32   | tone clock map           | versioned binary clockface          | required for toned-v2 |
+    | 33   | deadwax extent           | 13 or 21 octets, see Section 7.11   | no                    |
+    | 34   | groove handedness        | one octet, 0 anticlockwise          | no                    |
+    | 35   | lead-out geometry        | one octet, see Section 7.14         | no                    |
     +------+--------------------------+-------------------------------------+-----------------------+
 
-Types 3, 12, 15, 17 through 20, and 32 upward are unallocated.
+Types 3, 12, 15, 17 through 20, and 36 upward are unallocated.
+
+Segment 35 is the one exception to the skipping rule of Section 7.3. A decoder
+that does not recognise its value MUST reject the record. Section 7.14 gives
+the reason.
 
 An optional text segment with a zero-length payload decodes as absent, which is
 indistinguishable from an omitted segment. Canonical encoders therefore omit
@@ -1060,6 +1245,34 @@ Carrier flags are 0x01 label, 0x02 intergroove, and 0x04 lead-in/deadwax.
 
 Segment 22 is present with the toned-v1 payload encoding and required by it.
 Section 8.2 defines its layout and use.
+
+### 7.14 Lead-Out Geometry Revision
+
+Segment 35 carries one octet: the revision of the lead-out geometry the record
+was cut under.
+
+    +--------+------+---------------------------------+
+    | Offset | Size | Meaning                         |
+    +--------+------+---------------------------------+
+    | 0      | 1    | lead-out geometry revision      |
+    +--------+------+---------------------------------+
+
+Revision 1 is the geometry of Sections 6.5 and 6.6: a deadwax at the lathe's
+feed, a run-out of one to four rings opening outward by the taper, and a
+locked groove closing on itself. An absent segment declares revision 1, so a
+record written before this segment existed decodes as what it is.
+
+A decoder MUST reject a record whose revision it does not recognise. This is
+the one segment it may not skip, and the reason is that the trailer is derived
+rather than described. Every other unregistered segment is a feature the
+decoder does without; this one says the band beneath its own trailer was drawn
+by constants it does not have. Tracing that band with the wrong constants does
+not fail — it walks a different set of pixels in a different order and returns
+octets that look like octets, and the CRC of Section 7.5 then rejects the
+descriptor with no indication of why. A record that says which numbers drew it
+can be refused for the right reason instead.
+
+An encoder MUST write this segment.
 
 ## 8. Main Payload Pixel Mapping
 

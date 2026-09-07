@@ -2319,7 +2319,7 @@ fn build_sidecar_protected_metadata_pixels(
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?
     {
         protected[pixel_index] = true;
     }
@@ -2664,6 +2664,9 @@ fn descriptor_input_with_rewrite_options(
     };
 
     Ok(record_cut::descriptor::RecordDescriptorInput {
+        // Carried through, not re-decided: rewriting a descriptor must not
+        // change the hand the groove in the PNG was actually cut with.
+        spiral_anticlockwise: !descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
         deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
@@ -2719,6 +2722,9 @@ fn descriptor_input_with_cache_encryption_option(
     cache_encryption: Option<record_descriptor::CacheEncryptionDescriptor>,
 ) -> record_cut::descriptor::RecordDescriptorInput {
     record_cut::descriptor::RecordDescriptorInput {
+        // Carried through, not re-decided: rewriting a descriptor must not
+        // change the hand the groove in the PNG was actually cut with.
+        spiral_anticlockwise: !descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
         deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
@@ -2766,7 +2772,7 @@ fn paint_descriptor_spiral(
     let lead_in_indices =
         record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
     let run_out_indices =
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None, None, None)?;
+        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?;
     let mut metadata_indices = lead_in_indices.clone();
     metadata_indices.extend_from_slice(&run_out_indices);
     let byte_capacity =
@@ -3848,6 +3854,8 @@ mod attestation_tests {
             cut_inner_radius: 0,
             deadwax_b_value_bits: 0,
             deadwax: None,
+            lead_out_geometry_revision: record_descriptor::LEAD_OUT_GEOMETRY_REVISION,
+            spiral_clockwise: true,
             spiral_family: record_core::SpiralFamily::Archimedean,
             record_profile: record_descriptor::RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,

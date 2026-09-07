@@ -5,7 +5,7 @@ use bytes2rgb::{
     ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig,
 };
 use record_core::{
-    build_lead_in_spiral_indices, build_spiral_mask_with_family, build_run_out_spiral_indices,
+    build_lead_in_spiral_indices, build_run_out_spiral_indices, build_spiral_mask_with_handedness,
     known_record_profile_names, normalize_record_profile_name, SpiralFamily, RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{
@@ -193,9 +193,13 @@ fn record_descriptor_bytes_from_rgba(
 ) -> Result<Vec<u8>> {
     let lead_in_indices =
         build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
-    let run_out_indices =
-        build_run_out_spiral_indices(width, height, record_profile, None, None, None)?;
 
+    // The prefix comes out of the lead-in alone, and it carries the radius the
+    // cut stopped at. That has to be read before the lead-out can be walked:
+    // the band widens into whatever room the programme left, so its geometry
+    // is a consequence of the cut rather than a constant. The prefix is 29
+    // bytes against a lead-in of some thousands of pixels, so it is never in
+    // the part of the stream that spills.
     let prefix_bytes = record_descriptor::metadata_bytes_from_grayscale_rgba(
         rgba,
         &lead_in_indices,
@@ -204,6 +208,13 @@ fn record_descriptor_bytes_from_rgba(
     )?;
 
     let payload_len = descriptor_payload_len_from_prefix(&prefix_bytes)?;
+    let cut_inner_radius = match u16::from_be_bytes([prefix_bytes[19], prefix_bytes[20]]) {
+        0 => None,
+        radius => Some(i32::from(radius)),
+    };
+
+    let run_out_indices =
+        build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?;
 
     let mut descriptor_indices = lead_in_indices;
     descriptor_indices.extend_from_slice(&run_out_indices);
@@ -216,6 +227,7 @@ fn record_descriptor_bytes_from_rgba(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_record_groove_to_track_data(
     rgba: &[u8],
     width: usize,
@@ -223,6 +235,10 @@ fn decode_record_groove_to_track_data(
     record_profile: &str,
     b_value: f64,
     spiral_family: &SpiralFamily,
+    // Read off the descriptor, never assumed: a groove has to be retraced
+    // with the hand it was cut with or the pixels come back in the wrong
+    // order — which is not a wrong picture, it is a wrong stream.
+    clockwise: bool,
 ) -> Result<(Vec<u8>, usize, Vec<usize>)> {
     let expected_rgba_len = width
         .checked_mul(height)
@@ -233,7 +249,7 @@ fn decode_record_groove_to_track_data(
         bail!("record RGBA length does not match width * height * 4");
     }
 
-    let mask = build_spiral_mask_with_family(
+    let mask = build_spiral_mask_with_handedness(
         width,
         height,
         b_value,
@@ -242,6 +258,7 @@ fn decode_record_groove_to_track_data(
         None,
         None,
         None,
+        clockwise,
     )?;
     let mut track_data = Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
     let mut lifted_indices = Vec::with_capacity(mask.ordered_pixel_indices.len());
@@ -354,6 +371,7 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
         &normalized_profile,
         descriptor.b_value(),
         &descriptor.spiral_family,
+        descriptor.spiral_clockwise,
     )?;
 
     let bytes = match descriptor.payload_encoding.as_str() {
