@@ -3,34 +3,16 @@
 Bitneedle is the public reference implementation for Bitneedle picture records.
 A Bitneedle picture record is an image that contains recoverable audio data.
 
-## The picture is the press
+## Record anatomy
 
-![Plate I — the same bytes cut as RGB noise and as a toned picture](docs/plates/plate-01-picture-is-press.svg)
+![Plate I — anatomy of a picture record: pixel radii for a 12 in lp](docs/plates/plate-01-anatomy.svg)
 
-*Fig. 1 — the same bytes, two palettes. The lead-in stays grey; the programme takes the picture.*
+*Fig. 1 shows pixel radii for a 12 in lp. Every profile uses the 287 px rim.*
 
-Every groove pixel holds part of the payload, and the encoding decides what
-the disc looks like:
-
-- **RGB** lays three bytes to a pixel — the densest cut, and full-colour noise.
-- **Toned** holds each pixel's brightness and drifts its chroma about a base
-  tone, at twenty bits to a pixel — so the song reads as haze, sage, dusty
-  rose, and still decodes bit-exact.
-- **The wheel** tones by position instead of by record: twenty-four pockets
-  across the band, each taking its colour from the artwork it covers, so a
-  finished record can carry the whole picture and remain a carrier.
-
-### The tone clock
-
-![Plate IV — the house wheel: eight pockets inside, sixteen outside](docs/plates/plate-04-tone-clock.svg)
-
-*Fig. 2 — radius picks the ring, rotation picks the slot. Turn it and the
-edition changes while the picture holds.*
-
-Two controls make a re-press a different record: **rotation**, in hundredths
-of a degree per ring, and a **base nudge** of one 8-bit step, which re-sorts
-nearly the whole million-entry palette while moving the colour less than a
-just-noticeable difference. The picture holds; the pressing changes.
+Bitneedle picture records take their dimensions from the RIAA standard.
+Every profile uses one image size: 287 px from rim to centre in a 576² image.
+The label share differs by profile: 52.7% on a 7 in record, 39.9% on a
+10 in record, and 33.2% on a 12 in record.
 
 ## Record geometry
 
@@ -39,9 +21,9 @@ three outer diameters, and each size starts its recorded band at its own
 diameter. A 10 in and a 12 in share one inner recording diameter. All three
 sizes share one centre hole.
 
-![Plate II — every profile draws at one size, so the label's share of the canvas is the format's face](docs/plates/plate-02-geometry.svg)
+![Plate II — three profiles at one image size](docs/plates/plate-02-geometry.svg)
 
-*Fig. 3 — one canvas, three formats. Exact figures below.*
+*Fig. 2 shows three profiles at one image size. The table gives the exact figures.*
 
 | | 7 in `single45` | 7 in `single45vintage` | 10 in `ten` | 12 in `lp` |
 | --- | --- | --- | --- | --- |
@@ -91,8 +73,8 @@ the locked groove.
 
 ![Plate III — rim to label: one continuous groove through six bands](docs/plates/plate-03-groove.svg)
 
-*Fig. 4 — bands true to order; widths not to scale. The programme claims what
-it can reach, the run-out claims the rest.*
+*Fig. 3 shows the bands in groove order. Widths are not to scale. The
+programme uses the space it reaches. The run-out uses the remaining space.*
 
 <details>
 <summary>The same section as text</summary>

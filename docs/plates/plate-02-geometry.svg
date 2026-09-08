@@ -17,10 +17,10 @@
   <rect x="16" y="16" width="928" height="488" fill="none" stroke="#201A15" stroke-width="0.75"/>
 
   <text x="40" y="54" font-family="'Courier New', monospace" font-size="12" letter-spacing="4" fill="#201A15">PLATE II</text>
-  <text x="40" y="82" font-size="26" fill="#201A15">ONE CANVAS, THREE FORMATS</text>
+  <text x="40" y="82" font-size="26" fill="#201A15">ONE IMAGE SIZE</text>
   <text x="920" y="54" text-anchor="end" font-family="'Courier New', monospace" font-size="11" fill="#201A15">RIAA GEOMETRY · 576²</text>
   <line x1="40" y1="94" x2="920" y2="94" stroke="#201A15" stroke-width="0.75"/>
-  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every profile draws at one size — 287 px from rim to centre — so the label's share of the canvas is the format's face.</text>
+  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every profile uses one image size: 287 px from rim to centre. The label share differs by profile.</text>
 
   <!-- dimension lines -->
   <g font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">
@@ -44,7 +44,7 @@
     <circle cx="190" cy="272" r="5" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
     <text x="190" y="414" text-anchor="middle" font-size="17" fill="#201A15">7″ · single45</text>
     <text x="190" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 92 mm · + dink 38.1</text>
-    <text x="190" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 52.7% of canvas</text>
+    <text x="190" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 52.7% of image</text>
   </g>
 
   <!-- DISC 2: 10in ten -->
@@ -57,7 +57,7 @@
     <circle cx="480" cy="272" r="3.2" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
     <text x="480" y="414" text-anchor="middle" font-size="17" fill="#201A15">10″ · ten</text>
     <text x="480" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 100 mm</text>
-    <text x="480" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 39.9% of canvas</text>
+    <text x="480" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 39.9% of image</text>
   </g>
 
   <!-- DISC 3: 12in lp -->
@@ -70,7 +70,7 @@
     <circle cx="770" cy="272" r="3" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
     <text x="770" y="414" text-anchor="middle" font-size="17" fill="#201A15">12″ · lp</text>
     <text x="770" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 100 mm</text>
-    <text x="770" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 33.2% of canvas</text>
+    <text x="770" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 33.2% of image</text>
   </g>
 
   <!-- legend -->
