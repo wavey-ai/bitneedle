@@ -63,11 +63,16 @@ pub struct RecordDescriptorInput {
     /// Signatures beyond the first: a pressing may be attested by the
     /// artist, by yl.vin, or by both.
     pub additional_signatures: Vec<SignedReleaseReference>,
-    /// The deadwax the cut left behind, and whether anything has claimed it.
-    /// `None` when the programme ran to the label and there is no band, and
-    /// the renderer fills this in — the extent is a property of where the
-    /// groove actually stopped, which nothing above the lathe knows.
+    /// The deadwax that the cut left, and the owner of any claim on it.
+    /// `None` when the programme ran to the label and left no band. The
+    /// renderer sets this field, because the extent states the radius at which
+    /// the groove stopped.
     pub deadwax: Option<DeadwaxExtent>,
+    /// The one tone the trailer is cut in, when the cut was given one.
+    ///
+    /// `None` is a trailer that follows the record's wheel, which a reader
+    /// has out of the tone clock map, or an untoned record.
+    pub run_out_tone: Option<[u8; 3]>,
     /// The groove geometry family. Archimedean writes a v2 descriptor,
     /// byte-identical to every record before spiral families existed;
     /// vari-pitch writes the house v3 descriptor with a spiral-geometry
@@ -186,7 +191,14 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
     // so this byte is the only thing standing between a future change to the
     // gap ladder and a decoder that traces the wrong band through an old
     // record and hands back plausible rubbish.
-    let lead_out_geometry: Vec<u8> = vec![record_descriptor::LEAD_OUT_GEOMETRY_REVISION];
+    // Written on every record. The run-out is derived rather than declared,
+    // so this byte is what stops a decoder tracing an old record's band with
+    // new constants. The tone follows it where the trailer was cut in one:
+    // the band is a carrier, and its palette is on no other segment.
+    let mut lead_out_geometry: Vec<u8> = vec![record_descriptor::LEAD_OUT_GEOMETRY_REVISION];
+    if let Some(tone) = descriptor.run_out_tone {
+        lead_out_geometry.extend_from_slice(&tone);
+    }
 
     if descriptor.stream_byte_length == 0 {
         bail!("stream byte length must not be zero");
@@ -389,6 +401,15 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         ),
         (SEGMENT_RECORD_PROFILE, record_profile),
         (SEGMENT_PAYLOAD_ENCODING, payload_encoding),
+        // Both of these say how the trailer is toned, and the stream crosses
+        // into the trailer once the lead-in is full. A reader has to have
+        // them before it gets there, so they go before any field a writer
+        // chooses the length of.
+        (
+            record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY,
+            lead_out_geometry,
+        ),
+        (record_descriptor::SEGMENT_TONE_CLOCK_MAP, tone_clock_map),
         (SEGMENT_TITLE, title),
         (SEGMENT_ARTIST, artist),
         (SEGMENT_RELEASE_ID, release_id),
@@ -402,7 +423,6 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_SIGNED_RELEASE_REFERENCE, signed_release_reference),
         (SEGMENT_BSC_POINTER, bsc_pointer),
         (SEGMENT_TONED_CARRIER_MAP, toned_carrier_map),
-        (record_descriptor::SEGMENT_TONE_CLOCK_MAP, tone_clock_map),
         (SEGMENT_CACHE_ENCRYPTION, cache_encryption),
         (SEGMENT_CHAIN_ANCHOR, chain_anchor),
         (SEGMENT_ISRC, isrcs),
@@ -412,10 +432,6 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_SPIRAL_GEOMETRY, spiral_geometry),
         (SEGMENT_DEADWAX_EXTENT, deadwax),
         (record_descriptor::SEGMENT_GROOVE_HANDEDNESS, handedness),
-        (
-            record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY,
-            lead_out_geometry,
-        ),
     ] {
         if payload.is_empty() {
             continue;

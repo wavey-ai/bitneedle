@@ -12,7 +12,8 @@ pub mod encode;
 pub mod raster;
 
 pub use raster::{
-    metadata_fade_pixel_count, paint_metadata_bytes_as_grayscale, paint_unused_metadata_groove,
+    metadata_fade_pixel_count, paint_band_bytes_as_toned, paint_metadata_bytes_as_grayscale,
+    paint_unused_metadata_groove,
     UNUSED_METADATA_GROOVE_ALPHA, UNUSED_METADATA_GROOVE_FADE_TURNS,
     UNUSED_METADATA_GROOVE_RGB_MIN, UNUSED_METADATA_GROOVE_RGB_SPAN,
 };

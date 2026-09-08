@@ -2151,12 +2151,11 @@ mod programme_summary_tests {
 
 /// The sidecar, in the verbose report.
 ///
-/// A record's sidecar is not a footnote to its payload: it carries the map
-/// that puts the groove back in order, the package the record is shown as,
-/// and whatever else the presser chose to hide in the label. It is reported
-/// at the same weight as BRS1, and every check that ran over it is listed —
-/// including the passes, because "the arbitrary items were checked" is the
-/// thing a reader actually wants to know.
+/// The sidecar of a record carries the map that restores the groove order, the
+/// package that the record is shown as, and any further items that the presser
+/// stored in the label. The report gives the sidecar the same weight as BRS1,
+/// and it lists every check that ran over it, including the passes. A reader
+/// therefore sees that the arbitrary items were checked.
 fn report_sidecar(out: &mut String, png: &[u8], record_profile: &str) -> Result<()> {
     let report = sidecars::inspect(png, Some(record_profile));
 

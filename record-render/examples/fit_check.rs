@@ -1,9 +1,9 @@
-//! Does a cut below the raster floor actually hold its payload?
+//! Payload capacity of a cut below the raster floor.
 //!
 //! The fit solves for a pitch that puts N carrier pixels across the band.
-//! Below 2 px the tracer rounds turns onto pixels already taken and skips
-//! them, so the drawn spiral has fewer addressable pixels than the fit
-//! assumed. This asks whether that shortfall is real.
+//! Below 2 px the tracer rounds turns onto taken pixels and skips them, so the
+//! drawn spiral holds fewer addressable pixels than the fit assumed. This
+//! example measures that shortfall.
 use anyhow::Result;
 use record_core::{build_spiral_mask_with_family, SpiralFamily};
 
@@ -17,9 +17,9 @@ fn main() -> Result<()> {
             SIDE, SIDE, b, &SpiralFamily::Archimedean, "ten", None, None, None,
         )?;
         let n = mask.addressable_pixel_count;
-        // Turns the pitch implies across the band, against pixels actually
-        // laid: if the tracer is losing turns to merging, the pixels per turn
-        // will not hold.
+        // The turns that the pitch implies across the band, against the laid
+        // pixels. A tracer that loses turns to merging changes the pixels per
+        // turn.
         let turns = (279.0 - 138.0) / asked;
         println!("{asked:>10.2} {n:>14} {:>13.1}% {:>10.0}", n as f64 / 92_354.0 * 100.0, n as f64 / turns);
     }

@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let lead_out = record_core::lead_out_geometry_with_extent(
         &profile,
         Some(rendered.payload.cut_inner_radius),
-        record_core::LeadOutExtent::Compact,
+        record_core::LeadOutExtent::Fill,
     )?;
     let scale = record_core::pixels_per_mm(&profile)?;
 

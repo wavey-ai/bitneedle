@@ -54,10 +54,9 @@ fn main() -> Result<()> {
     // ten reaches radius 190 with 62.8% of the band left, measured off the
     // real render rather than guessed.
     let ends_at: f64 = args.next().and_then(|v| v.parse().ok()).unwrap_or(190.0);
-    // `real` renders whole records through the same call CUT makes — the
-    // payload laid down as RGB, the fit, the lead-out, the lot. Slower by two
-    // orders of magnitude, and the only way to judge the surface as it will
-    // actually be pressed.
+    // `real` renders whole records through the call that CUT makes: the
+    // payload laid down as RGB, the fit, and the lead-out. It runs two orders
+    // of magnitude slower, and it shows the surface as the press writes it.
     let real = args.next().map(|v| v == "real").unwrap_or(false);
     // Which axis this dataset moves. Everything not named is held at the
     // house cut, so a reel shows one decision and not a soup of them.
@@ -71,8 +70,9 @@ fn main() -> Result<()> {
         "goldenfiles/records/lori-asha-westside-lp-hq/lori-asha-westside-lp-hq.ecdc",
     )?;
     let full_len = codes.len();
-    // The whole side unless asked otherwise. A truncated payload leaves room
-    // the fit does not have in practice, so it flatters every pitch.
+    // The whole side by default. A truncated payload leaves the fit room that
+    // a real payload takes, and every pitch then measures better than it
+    // performs.
     if let Some(bytes) = std::env::var("PAYLOAD_BYTES").ok().and_then(|v| v.parse::<usize>().ok()) {
         codes.truncate(bytes.min(full_len));
     }
@@ -221,8 +221,8 @@ fn main() -> Result<()> {
                 SIDE, SIDE, sep / std::f64::consts::TAU, &fam, &profile, None, None, None,
             )?;
 
-        // Clip to where the programme actually ends. The mask runs the whole
-        // band; a real cut stops and leaves the rest as deadwax.
+        // Clip to the end of the programme. The mask covers the whole band,
+        // and a real cut stops and leaves the rest as deadwax.
         let centre = SIDE as f64 / 2.0;
         let mut rgba = vec![0u8; SIDE * SIDE * 4];
         let mut ink = 0usize;

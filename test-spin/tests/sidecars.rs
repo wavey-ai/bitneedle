@@ -1,12 +1,11 @@
 //! A record is pressed, given a sidecar, permuted, and read back.
 //!
-//! The sidecar checks in `test-spin` are the only thing standing between a
-//! record that opens and a record that merely decodes, so they are tested
-//! against a record that was actually cut rather than against a container
-//! assembled by hand: the container is the easy half, and the half that has
-//! never broken. What breaks is a reverse map that does not describe this
-//! groove, a pointer whose digest is of some earlier stream, an item whose
-//! declared type is not what it holds.
+//! The sidecar checks in `test-spin` separate a record that opens from a
+//! record that decodes alone. These tests therefore run against a pressed
+//! record rather than against a hand-assembled container. Three faults occur in
+//! practice: a reverse map that describes another groove, a pointer whose
+//! digest covers an earlier stream, and an item whose payload differs from its
+//! declared type.
 
 use base64::Engine as _;
 
@@ -73,8 +72,9 @@ fn a_record_without_a_sidecar_is_not_a_record_with_a_broken_one() {
 #[test]
 fn arbitrary_items_are_checked_as_closely_as_the_named_ones() {
     let png = press(&payload());
-    // Nothing here is a name this crate knows: the point is that an item a
-    // presser invented is walked, typed and reported like any other.
+    // Every name here is outside the registry of this crate. The inspection
+    // walks, types and reports an item that a presser invented, in the way
+    // that it handles a named item.
     let png = with_sidecar(
         &png,
         serde_json::json!([

@@ -1,16 +1,15 @@
-# Toned palette: auto-tune speed and the 20% overhead
+# Toned palette auto-tune speed and carrier overhead
 
-Notes from a pass over `record-groove` on 2026-09-04, prompted by the
-question: can the auto-tone be made faster, and can the extra 20% of carrier
-it costs be reduced? Yes on the speed. The 20% is a different story: it is a
-colour-quality knob, not an inefficiency.
+Notes from a pass over `record-groove` on 2026-09-04. The pass answered two
+questions: the speed of the auto-tone, and the 20% of carrier that toning costs.
+The auto-tone is now four times faster. The 20% is a colour-quality setting.
 
-## Speed (done, bit-identical)
+## Speed
 
-The toning cost is almost entirely `TonedConfig::balanced` (the auto-tune)
-plus building the palette twice on the cut path (track tone + gap tone).
-Encoding the pixels is under 1 ms. Measured on the house tone `#F2EEE5`,
-release build, an 8-core machine:
+Two operations hold the toning cost: `TonedConfig::balanced`, which is the
+auto-tune, and the two palette builds on the cut path, for the track tone and
+the gap tone. Encoding the pixels takes under 1 ms. Measured on the house tone
+`#F2EEE5`, in a release build, on an 8-core machine:
 
 | step | before | after |
 |---|---|---|
@@ -19,13 +18,14 @@ release build, an 8-core machine:
 | decode (140 KB payload) | 40 ms | 20 ms |
 | **cut path total** | **~340 ms** | **~85 ms** |
 
-What changed, all producing the same palettes (15 configs across 5 tones × 3
-budgets were fingerprinted before and after — identical hashes):
+Six changes produced these figures. All six produce the same palettes. The pass
+fingerprinted 15 configs, across 5 tones and 3 budgets, before and after, and
+the hashes match:
 
-- **Blue range by bisection** instead of testing every blue value — rounded
-  luma is monotone in blue, so the window's ends are found in 8 probes on the
-  same predicate. This alone makes the ladder's `iso_luma_count` calls (9 of
-  them) nearly free.
+- **Blue range by bisection**, in place of a test of every blue value. Rounded
+  luma is monotone in blue, so 8 probes on the same predicate find both ends of
+  the window. This change alone takes the 9 `iso_luma_count` calls of the ladder
+  to a small fraction of their earlier cost.
 - **Hoisted the base tone's chroma** and passed each colour's luma through
   instead of recomputing it three times per colour.
 - **One tally per colour** in the ladder histogram (under its narrowest rung,
@@ -35,31 +35,31 @@ budgets were fingerprinted before and after — identical hashes):
   sorted collections, so thread order can't change the result.
 - **Palette sort by bucket runs** in parallel instead of `select_nth` + one
   1M-element sort.
-- **Reverse index as a sorted packed `Vec<u64>`** instead of a SipHash
-  `HashMap` — faster to build, 8 MB instead of ~12+.
+- **Reverse index as a sorted packed `Vec<u64>`**, in place of a SipHash
+  `HashMap`. It builds faster, and it takes 8 MB in place of 12 MB or more.
 
-Single-threaded (i.e. what wasm gets), `balanced` went 207 → ~130 ms from the
-first three items; the bucket sort and index help there too but sequential
-numbers for those were not measured.
+Single-threaded, which is the wasm case, the first three items took `balanced`
+from 207 ms to about 130 ms. The bucket sort and the index also help in that
+case, and this pass left their sequential figures unmeasured.
 
-Verified: `record-groove` unit tests, clippy, `wasm32-unknown-unknown` check
-for `record-groove` and `record-cut-wasm`, and the full
-`record-render`/`record-decode`/`record-cut`/`test-spin` suites all pass. Two
-pre-existing failures are unrelated: the README doctests (already broken
-before this change) and two `--ignored` tests that read a `single45` fixture
-that isn't on disk.
+Verification: the `record-groove` unit tests pass, clippy passes, the
+`wasm32-unknown-unknown` check passes for `record-groove` and `record-cut-wasm`,
+and the full `record-render`, `record-decode`, `record-cut` and `test-spin`
+suites pass. Two failures predate this change: the README doctests, and two
+`--ignored` tests that read a `single45` fixture that is absent from disk.
 
-`record-groove/examples/tone_bench.rs` is the benchmark —
-`cargo run --release -p record-groove --example tone_bench -- 1.2 1.15 1.1`
-prints timing, chosen config, mean colour, drift and a palette hash per tone.
+`record-groove/examples/tone_bench.rs` is the benchmark. Run
+`cargo run --release -p record-groove --example tone_bench -- 1.2 1.15 1.1`. It
+prints the timing, the chosen config, the mean colour, the drift and a palette
+hash for each tone.
 
-## The 20%
+## Carrier overhead
 
-The overhead is exactly `24 / bits_per_pixel − 1`, and
-`GROOVE_TONE_MAX_SIZE_FACTOR = 1.2` in `record-render/src/lib.rs` pins it to
-20 bpp. Fewer pixels means more bits per pixel, which means the palette needs
-more colours near the tone — and there aren't more, so it drifts further. Same
-house tone, measured:
+The overhead is `24 / bits_per_pixel − 1`. `GROOVE_TONE_MAX_SIZE_FACTOR = 1.2`
+in `record-render/src/lib.rs` holds it at 20 bpp. Fewer pixels need more bits
+per pixel, and more bits per pixel need more colours near the tone. The gamut
+holds a fixed number of such colours, so the palette drifts further from the
+tone. Measured on the same house tone:
 
 | budget | bpp | overhead | mean colour | max drift |
 |---|---|---|---|---|
@@ -67,17 +67,19 @@ house tone, measured:
 | 1.15 | 21 | 14% | `B9BCAC` | 227 |
 | 1.1 | 22 | 9% | `A5A998` | 296 |
 
-So 21 bpp buys 6% of surface for a visibly greyer, grainier record; 22 bpp
-reads as pastel static (the `record-groove` README's "warm khaki"). Also note
-palette memory and decode time roughly double per extra bit. Changing the
-constant is safe format-wise — bpp travels in the tone-span descriptor, so old
-records still decode — but it's a look decision, so it has not been touched.
+21 bpp recovers 6% of the surface, and it gives a greyer and grainier record.
+22 bpp appears as pastel static, which the `record-groove` README calls "warm
+khaki". Palette memory and decode time each about double per extra bit. A change
+to the constant is compatible with the format, because the tone-span descriptor
+carries the bits per pixel, and older records therefore still decode. The
+constant sets the appearance of a record, and this pass left it at 1.2.
 
-Two things that would actually shave overhead without going to a full extra
-bit:
+One change reduces the overhead below a full extra bit:
 
-1. **Non-power-of-two palettes** — pack pixel pairs, so a palette of ~1.5 M
-   colours carries 41 bits per two pixels (20.5 bpp, 17% overhead). Finer
-   trade-off ladder, but it's a new encoding version.
-2. **Tone only the groove, not the BRS1 prefix** — already the case; nothing
-   to gain there.
+1. **Non-power-of-two palettes.** Pack pixel pairs, so a palette of about 1.5 M
+   colours carries 41 bits per two pixels, which is 20.5 bpp at 17% overhead.
+   This packing gives a finer trade-off ladder, and it needs a new encoding
+   version.
+
+The groove alone carries the tone. The BRS1 prefix is untoned already, so it
+offers no further saving.

@@ -597,11 +597,12 @@ pub fn sidecar_attestation(items: &[SidecarDecodedItem]) -> Result<Option<Sideca
     Ok(Some(attestation))
 }
 
-/// Whether a sidecar's attestation is over the items actually present.
+/// Whether the attestation of a sidecar covers the items that the sidecar
+/// holds.
 ///
-/// This is the structural half of verification: it says the signed digest
-/// matches what the sidecar now contains and that it is bound to this
-/// record. Whether the key is one to trust is a separate question, and one
+/// This check is the structural half of verification. It reports that the
+/// signed digest matches the current contents of the sidecar, and that the
+/// digest binds to this record. The trust of the key is a separate question,
 /// this crate deliberately does not answer.
 pub fn sidecar_attestation_covers(
     attestation: &SidecarAttestation,
@@ -2664,10 +2665,14 @@ fn descriptor_input_with_rewrite_options(
     };
 
     Ok(record_cut::descriptor::RecordDescriptorInput {
-        // Carried through, not re-decided: rewriting a descriptor must not
-        // change the hand the groove in the PNG was actually cut with.
+        // Carried through. A descriptor rewrite keeps the hand that the
+        // groove in the PNG was cut with.
         spiral_anticlockwise: !descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
+        // Carried through for the same reason. The trailer in the PNG is cut
+        // already, and a rewritten descriptor keeps naming the
+        // colour it was cut in.
+        run_out_tone: descriptor.run_out_tone,
         deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
@@ -2722,10 +2727,14 @@ fn descriptor_input_with_cache_encryption_option(
     cache_encryption: Option<record_descriptor::CacheEncryptionDescriptor>,
 ) -> record_cut::descriptor::RecordDescriptorInput {
     record_cut::descriptor::RecordDescriptorInput {
-        // Carried through, not re-decided: rewriting a descriptor must not
-        // change the hand the groove in the PNG was actually cut with.
+        // Carried through. A descriptor rewrite keeps the hand that the
+        // groove in the PNG was cut with.
         spiral_anticlockwise: !descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
+        // Carried through for the same reason. The trailer in the PNG is cut
+        // already, and a rewritten descriptor keeps naming the colour that it
+        // was cut in.
+        run_out_tone: descriptor.run_out_tone,
         deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
@@ -2769,24 +2778,65 @@ fn paint_descriptor_spiral(
     main_b_value: f64,
     descriptor: &record_cut::descriptor::RecordDescriptorInput,
 ) -> Result<record_descriptor::RecordDescriptor> {
+    // The same two bands the press writes, in the same order, so a descriptor
+    // rewritten onto a record lands where its reader looks for it.
     let lead_in_indices =
         record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
-    let run_out_indices =
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?;
-    let mut metadata_indices = lead_in_indices.clone();
-    metadata_indices.extend_from_slice(&run_out_indices);
-    let byte_capacity =
-        record_descriptor::metadata_byte_capacity_for_pixel_count(metadata_indices.len());
+    let trailer_clock = match (descriptor.run_out_tone, descriptor.tone_clock.as_ref()) {
+        (Some(tone), _) => Some(record_descriptor::trailer_clock(tone)?),
+        (None, Some(map)) => Some(record_descriptor::band_clock(
+            &record_descriptor::tone_clock_from_map(map),
+        )),
+        (None, None) => None,
+    };
+    let trailer_indices = match trailer_clock.as_ref() {
+        Some(clock) => Some((
+            record_core::build_run_out_spiral_indices(
+                width,
+                height,
+                record_profile,
+                match descriptor.cut_inner_radius {
+                    0 => None,
+                    radius => Some(i32::from(radius)),
+                },
+            )?,
+            clock,
+        )),
+        None => None,
+    };
+    let lead_in_capacity =
+        record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
+    let trailer_capacity = trailer_indices.as_ref().map_or(0, |(indices, clock)| {
+        record_descriptor::band_byte_capacity(indices.len(), clock)
+    });
     let descriptor_bytes = record_cut::descriptor::encode_record_descriptor_stream(
         main_b_value,
         descriptor,
-        byte_capacity,
+        lead_in_capacity + trailer_capacity,
     )?;
+    let head = descriptor_bytes.len().min(lead_in_capacity);
     record_cut::descriptor::paint_metadata_bytes_as_grayscale(
         data,
-        &metadata_indices,
-        &descriptor_bytes,
+        &lead_in_indices,
+        &descriptor_bytes[..head],
     );
+    if head < descriptor_bytes.len() {
+        let Some((indices, clock)) = trailer_indices.as_ref() else {
+            bail!("the descriptor overran the lead-in and this record has no trailer to hold it");
+        };
+        record_descriptor::trailer_clock_from_stream_head(&descriptor_bytes[..head]).context(
+            "the descriptor spills into the trailer, and what the trailer is read with did \
+             not fit in the lead-in",
+        )?;
+        record_cut::descriptor::paint_band_bytes_as_toned(
+            data,
+            width,
+            height,
+            indices,
+            &descriptor_bytes[head..],
+            clock,
+        )?;
+    }
 
     record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
 }
@@ -2952,11 +3002,12 @@ pub struct SidecarInspection {
     pub decoded: SidecarDecodedItems,
     /// The attestation over those items, if the sidecar carries one.
     pub attestation: Option<SidecarAttestation>,
-    /// Whether that attestation's digest matches the items actually present
-    /// and this record's descriptor. `None` when there is no attestation.
+    /// Whether the digest of that attestation matches the items that the
+    /// sidecar holds and the descriptor of this record. `None` when the sidecar
+    /// carries no attestation.
     ///
-    /// This is the structural half only. Whether the key is one to trust is
-    /// a question this crate deliberately does not answer.
+    /// This field reports the structural half. The caller decides the trust of
+    /// the key.
     pub attestation_covers: Option<bool>,
     /// Whether the pointer's SHA-256 matched the stream that was read. A
     /// record with no pointer has nothing to match, and reports `None`.
@@ -3848,6 +3899,7 @@ mod attestation_tests {
             signature: vec![3; record_descriptor::SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH],
         };
         let descriptor = record_descriptor::RecordDescriptor {
+            run_out_tone: None,
             version: record_descriptor::RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),

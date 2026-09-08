@@ -19,6 +19,25 @@ record-groove = { path = "../record-groove", version = "0.1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[features]
+default = []
+# The formats a pressed record can be written in, beside the PNG the press
+# always writes. See `src/export.rs` for why the list is what it is: every
+# groove pixel carries payload, so a format either returns all four channels
+# of every pixel exactly or it does not carry a record at all.
+#
+# Each feature turns on the codec in both directions — this crate writes it
+# and `record-decode` reads it — so a build cannot export a record it is
+# unable to read back.
+tiff = ["image/tiff", "record-decode/tiff"]
+bmp = ["image/bmp", "record-decode/bmp"]
+qoi = ["image/qoi", "record-decode/qoi"]
+webp = ["image/webp", "record-decode/webp"]
+tga = ["image/tga", "record-decode/tga"]
+pnm = ["image/pnm", "record-decode/pnm"]
+rgba = ["record-decode/rgba"]
+all-formats = ["tiff", "bmp", "qoi", "webp", "tga", "pnm", "rgba"]
+
 [dev-dependencies]
 ed25519-dalek = "2"
 serde_json = "1"

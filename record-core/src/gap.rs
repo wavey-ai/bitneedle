@@ -1,17 +1,15 @@
 //! First-class inter-track silence: the `GAP1` codec.
 //!
 //! A GAP is intentional PCM silence in the playable record timeline. It is a
-//! first-class payload entry and a first-class rendered groove region, but it is
-//! not a musical track: it has no title and no track number, and is never
-//! covered by a [`crate::TrackDescriptor`] range.
+//! payload entry and a rendered groove region. A GAP carries no title and no
+//! track number, and every [`crate::TrackDescriptor`] range excludes it.
 //!
-//! Unlike the placeholder representation it replaces (a bare `u64be` sample
-//! count, with the gap duration effectively living in descriptor geometry), a
-//! GAP entry carries a self-describing, versioned `GAP1` payload. The payload is
-//! authoritative for the sample count, its own total byte length, and a
-//! deterministic filler seed. The filler exists so the GAP occupies real carrier
-//! bytes — and therefore real groove pixels — producing a narrow, visually quiet
-//! band that round-trips exactly through the PNG.
+//! A GAP entry carries a self-describing, versioned `GAP1` payload. That payload
+//! is authoritative for the sample count, for its own total byte length, and for
+//! a deterministic filler seed. The earlier representation was a bare `u64be`
+//! sample count, and the descriptor geometry then held the gap duration. The
+//! filler makes the GAP occupy carrier bytes, and therefore groove pixels. It
+//! produces a narrow, quiet band that round-trips exactly through the PNG.
 //!
 //! The canonical layout is:
 //!
@@ -33,18 +31,17 @@ pub const GAP_MAGIC: &[u8; 4] = b"GAP1";
 /// Current GAP payload version.
 pub const GAP_VERSION: u8 = 1;
 
-/// `flags` bit marking a GAP entry whose filler has been *patternized* — i.e.
-/// the filler pixels were reordered after toning for visual effect, so the
-/// filler bytes no longer equal the raw `xorshift32(seed)` keystream. When set,
-/// the entry's integrity is guaranteed by its enclosing chunk CRC32 alone
-/// (exactly like every other, non-GAP chunk's payload), and the deterministic
-/// keystream-equality check in [`validate_gap_payload`] is intentionally
-/// skipped. The seed is retained as construction provenance, not as an
-/// integrity assertion.
+/// The `flags` bit that marks a GAP entry with a *patternized* filler. A
+/// patternized filler has its pixels reordered after toning, for visual effect,
+/// so its bytes differ from the raw `xorshift32(seed)` keystream. With this bit
+/// set, the enclosing chunk CRC32 carries the integrity of the entry, as it does
+/// for every chunk payload outside a GAP, and [`validate_gap_payload`] skips its
+/// keystream-equality check. The seed then records the construction of the
+/// entry.
 pub const GAP_FLAG_PATTERNIZED: u8 = 0x01;
 
-/// Mask of every `flags` bit this version understands; any other bit set means
-/// the entry was produced by a newer writer and must be rejected.
+/// Mask of every `flags` bit that this version reads. Any other bit set marks
+/// an entry from a later writer, and a reader must reject that entry.
 const GAP_KNOWN_FLAGS: u8 = GAP_FLAG_PATTERNIZED;
 
 /// Byte length of the fixed `GAP1` header preceding the deterministic filler.
@@ -59,27 +56,26 @@ pub const GAP_HEADER_LENGTH: usize = 4 // magic
 /// RGB24 carrier packing: three payload bytes per groove pixel.
 pub const GAP_BYTES_PER_PIXEL: f64 = 3.0;
 
-/// Defensive cap on a GAP's visible width, in groove revolutions, so a
-/// pathologically long gap cannot swallow the whole record.
+/// Upper bound on the visible width of a GAP, in groove revolutions. This cap
+/// keeps a long gap inside a part of the record.
 pub const MAX_GAP_REVOLUTIONS: f64 = 8.0;
 
-/// Minimum visible width, in groove revolutions, so a very short but non-zero
-/// gap still renders a clearly perceptible ring rather than a hairline.
+/// Lower bound on the visible width, in groove revolutions. This floor renders
+/// a short gap as a visible ring.
 pub const MIN_GAP_REVOLUTIONS: f64 = 0.25;
 
-/// The GAP band is painted as a single quiet tone — the median of the
-/// surrounding high-entropy audio carrier (which averages to mid-grey) — so it
-/// reads as a smooth inter-track boundary like a real record. The filler bytes
-/// *are* this tone (centered here, with a small deterministic dither), so the
-/// band is quiet and consistent while still round-tripping exactly through the
-/// PNG.
+/// The GAP band is painted in one quiet tone. That tone is the median of the
+/// surrounding high-entropy audio carrier, which averages to mid-grey, so the
+/// band reads as a smooth inter-track boundary. The filler bytes carry this
+/// tone, centered here with a small deterministic dither. The band is therefore
+/// quiet and even, and it round-trips exactly through the PNG.
 pub const GAP_QUIET_TONE: u8 = 128;
 /// Peak deterministic deviation, per channel byte, from [`GAP_QUIET_TONE`].
 pub const GAP_QUIET_VARIATION: u8 = 6;
 
-/// Defensive upper bound on a single GAP's sample count, guarding against
-/// pathological durations producing impossible carrier sizes. One hour per
-/// channel at 192 kHz is far beyond any musically reasonable inter-track gap.
+/// Upper bound on the sample count of one GAP. This bound keeps a long duration
+/// from requesting a carrier size beyond the record. The value is one hour per
+/// channel at 192 kHz, which is above every inter-track gap in use.
 pub const MAX_GAP_SAMPLE_COUNT: u64 = 192_000 * 3_600;
 
 /// Parsed `GAP1` header fields.
@@ -103,15 +99,17 @@ impl GapHeader {
     }
 }
 
-/// Profile-derived geometry used to size a GAP's visible band so that its width
-/// tracks playback time: a gap of one revolution's duration occupies one full
-/// turn of groove, wherever it falls.
+/// Profile-derived geometry that sizes the visible band of a GAP, so that its
+/// width follows playback time. A gap of one revolution in duration occupies one
+/// turn of groove at every radius.
 ///
-/// * `seconds_per_revolution` is the profile's physical revolution duration
-///   (single45 = 4/3 s, lp = 9/5 s) — the same constant the rotation clock uses.
-/// * `pixels_per_revolution` is the carrier-pixel count in one full turn at the
-///   mean payload radius (`2π·r_mid`); the spiral rasterizes ~one pixel per unit
-///   arc length, so this is a position-independent estimate of one turn.
+/// * `seconds_per_revolution` is the physical revolution duration of the
+///   profile: 4/3 s for single45, and 9/5 s for lp. The rotation clock uses the
+///   same constant.
+/// * `pixels_per_revolution` is the carrier-pixel count in one turn at the mean
+///   payload radius, which is `2π·r_mid`. The spiral rasterizes about one pixel
+///   per unit of arc length, so this figure estimates one turn at every
+///   position.
 #[derive(Debug, Clone, Copy)]
 pub struct GapRenderContext {
     pub seconds_per_revolution: f64,
@@ -133,9 +131,9 @@ impl GapRenderContext {
     }
 }
 
-/// Physical revolution duration, in seconds, for a record profile. One full turn
-/// of groove represents exactly this much playback time (single45 spins at
-/// 45 RPM → 4/3 s; lp at 33⅓ RPM → 9/5 s).
+/// Physical revolution duration, in seconds, for a record profile. One turn of
+/// groove holds this much playback time. single45 spins at 45 RPM, which gives
+/// 4/3 s. lp spins at 33⅓ RPM, which gives 9/5 s.
 pub fn seconds_per_revolution(record_profile: &str) -> Result<f64> {
     match record_profile {
         "single45" => Ok(4.0 / 3.0),
@@ -180,10 +178,9 @@ pub fn gap_sample_count_from_seconds(duration_seconds: f64, sample_rate: u32) ->
 }
 
 /// Visible width of a GAP band, in groove revolutions, for a given duration.
-/// This is the single source of truth for the duration→width mapping; the
-/// preview UI consumes it through WASM rather than reimplementing it. A gap of
-/// one revolution's duration is exactly one turn wide; the result is capped at
-/// [`MAX_GAP_REVOLUTIONS`].
+/// This function is the source of truth for the duration-to-width mapping, and
+/// the preview UI calls it through WASM. A gap of one revolution in duration is
+/// one turn wide. [`MAX_GAP_REVOLUTIONS`] caps the result.
 pub fn gap_revolutions(duration_seconds: f64, render_context: &GapRenderContext) -> Result<f64> {
     ensure!(
         duration_seconds.is_finite() && duration_seconds > 0.0,
@@ -199,9 +196,9 @@ pub fn gap_revolutions(duration_seconds: f64, render_context: &GapRenderContext)
 }
 
 /// Canonical total payload byte length for a GAP of the given duration on the
-/// given record profile. The band spans `gap_revolutions` full turns of groove,
-/// so the byte budget is `revolutions × pixels_per_revolution × 3`. Always at
-/// least [`GAP_HEADER_LENGTH`] so the header fits even for the smallest gaps.
+/// given record profile. The band spans `gap_revolutions` turns of groove, so
+/// the byte budget is `revolutions × pixels_per_revolution × 3`. The result has
+/// a floor of [`GAP_HEADER_LENGTH`], so the header fits the smallest gap.
 pub fn gap_payload_byte_length(
     duration_seconds: f64,
     _record_profile: &str,
@@ -219,15 +216,15 @@ pub fn gap_payload_byte_length(
     Ok((budget as usize).max(GAP_HEADER_LENGTH))
 }
 
-/// `xorshift32` deterministic byte generator. Cheap, requires no external
-/// randomness, and reproduces identical bytes for identical seeds.
+/// The `xorshift32` deterministic byte generator. It is cheap, it runs from the
+/// seed alone, and it reproduces identical bytes for identical seeds.
 struct XorShift32 {
     state: u32,
 }
 
 impl XorShift32 {
     fn new(seed: u32) -> Self {
-        // Avoid the zero fixed point, which would emit an all-zero stream.
+        // Move off the zero fixed point, which emits an all-zero stream.
         Self {
             state: if seed == 0 { 0x9E37_79B9 } else { seed },
         }
@@ -242,10 +239,10 @@ impl XorShift32 {
         x
     }
 
-    /// Fill `out` with a quiet, consistent tone centered on [`GAP_QUIET_TONE`]
-    /// with at most ±[`GAP_QUIET_VARIATION`] deterministic per-byte dither. The
-    /// result reads as a smooth mid-grey band against the colourful audio
-    /// carrier, yet is fully reproducible from the seed.
+    /// Fill `out` with a quiet, even tone centered on [`GAP_QUIET_TONE`], with
+    /// at most ±[`GAP_QUIET_VARIATION`] of deterministic per-byte dither. The
+    /// result reads as a smooth mid-grey band against the audio carrier, and the
+    /// seed reproduces it exactly.
     fn fill_quiet(&mut self, out: &mut [u8]) {
         let span = u32::from(GAP_QUIET_VARIATION) * 2 + 1;
         for byte in out.iter_mut() {
@@ -255,10 +252,10 @@ impl XorShift32 {
     }
 }
 
-/// Fill `out` with the deterministic quiet-tone filler for the given seed.
-/// Exposed so authoring code (see `record-cut`) can produce filler bytes that
-/// this crate's [`validate_gap_payload`] will accept; the keystream itself is
-/// already documented above and carries no additional disclosure.
+/// Fill `out` with the deterministic quiet-tone filler for the given seed. This
+/// function is public so that authoring code, such as `record-cut`, produces
+/// filler bytes that [`validate_gap_payload`] accepts. The comment above
+/// documents the keystream.
 pub fn fill_gap_quiet_filler(seed: u32, out: &mut [u8]) {
     XorShift32::new(seed).fill_quiet(out);
 }
@@ -317,11 +314,11 @@ pub fn validate_gap_payload(bytes: &[u8]) -> Result<GapHeader> {
         bytes.len()
     );
 
-    // A patternized GAP's filler is a post-toning reordering of the keystream,
-    // so it deliberately no longer equals `xorshift32(seed)`. Such an entry is
-    // trusted exactly like every other chunk's payload: by the enclosing chunk
-    // CRC32, with no extra determinism assertion. Only the original
-    // quiet-keystream form is verified byte-for-byte here.
+    // The filler of a patternized GAP is a post-toning reordering of the
+    // keystream, so it differs from `xorshift32(seed)`. The enclosing chunk
+    // CRC32 carries the integrity of such an entry, as it does for every other
+    // chunk payload. This function checks the quiet-keystream form byte for
+    // byte.
     if !header.is_patternized() {
         // Verify the deterministic filler so a strict parser rejects tampered or
         // corrupted carrier bytes that the enclosing integrity check might miss.
@@ -353,9 +350,10 @@ mod tests {
         GapRenderContext::for_profile("single45").unwrap()
     }
 
-    /// Test-only `GAP1` encoder mirroring `record-cut::gap::encode_gap_payload`,
-    /// kept here so this crate's decode-side tests don't need an authoring
-    /// dependency. Any change to the wire layout must be mirrored there.
+    /// A test-only `GAP1` encoder that mirrors
+    /// `record-cut::gap::encode_gap_payload`. It lives here so that the
+    /// decode-side tests of this crate run without an authoring dependency.
+    /// Mirror every change to the wire layout in both places.
     fn test_encode_gap_payload(
         sample_count: u64,
         payload_byte_length: usize,
@@ -388,11 +386,11 @@ mod tests {
     fn seconds_to_samples_round_half_up() {
         // 2.0 s at 48 kHz is exact.
         assert_eq!(gap_sample_count_from_seconds(2.0, 48_000).unwrap(), 96_000);
-        // Exactly half a sample rounds up: 0.5 s * 3 Hz = 1.5 -> 2.
+        // A value of exactly half a sample rounds up: 0.5 s * 3 Hz = 1.5 -> 2.
         assert_eq!(gap_sample_count_from_seconds(0.5, 3).unwrap(), 2);
-        // Just below half a sample rounds down: 1.4 -> 1.
+        // A value below half a sample rounds down: 1.4 -> 1.
         assert_eq!(gap_sample_count_from_seconds(1.4, 1).unwrap(), 1);
-        // Just above half a sample rounds up: 2.6 -> 3.
+        // A value above half a sample rounds up: 2.6 -> 3.
         assert_eq!(gap_sample_count_from_seconds(2.6, 1).unwrap(), 3);
     }
 
@@ -410,7 +408,8 @@ mod tests {
     #[test]
     fn gap_width_tracks_time_as_revolutions() {
         let c = ctx();
-        // One revolution's duration (4/3 s for single45) is exactly one turn.
+        // A duration of one revolution, which is 4/3 s for single45, gives one
+        // turn.
         let one_rev = gap_revolutions(4.0 / 3.0, &c).unwrap();
         assert!((one_rev - 1.0).abs() < 1e-9);
         // 2 s is 1.5 turns; 2/3 s is half a turn.
@@ -423,7 +422,8 @@ mod tests {
     #[test]
     fn payload_byte_length_is_one_revolution_of_pixels_per_revolution_duration() {
         let c = ctx();
-        // A one-revolution-duration gap occupies ~one turn of carrier pixels.
+        // A gap of one revolution in duration occupies about one turn of
+        // carrier pixels.
         let bytes = gap_payload_byte_length(4.0 / 3.0, "single45", &c).unwrap();
         let expected = (c.pixels_per_revolution * GAP_BYTES_PER_PIXEL).round() as usize;
         assert!(bytes.abs_diff(expected) <= 3, "{bytes} ~= {expected}");
@@ -517,7 +517,7 @@ mod tests {
         let last = payload.len() - 1;
         payload[last] ^= 0xFF;
         assert!(validate_gap_payload(&payload).is_err());
-        // ...but the lenient header decode still succeeds.
+        // The lenient header decode still succeeds.
         assert!(decode_gap_header(&payload).is_ok());
     }
 
@@ -535,10 +535,10 @@ mod tests {
         assert!(header.is_patternized());
         assert_eq!(header.flags, GAP_FLAG_PATTERNIZED);
 
-        // Structural checks still bite even when patternized: a declared-length
-        // mismatch is still rejected.
+        // The structural checks still run on a patternized entry, so a
+        // declared-length mismatch is rejected.
         assert!(validate_gap_payload(&payload[..255]).is_err());
-        // ...and a corrupted magic is still rejected.
+        // A corrupted magic is rejected.
         let mut broken = payload.clone();
         broken[0] = b'X';
         assert!(decode_gap_header(&broken).is_err());
@@ -549,15 +549,15 @@ mod tests {
         let mut payload = test_encode_gap_payload(96_000, 64, 1);
         payload[5] = 0x80; // a bit this version does not understand
         assert!(decode_gap_header(&payload).is_err());
-        // The defined patternized bit, by contrast, is accepted.
+        // The defined patternized bit is accepted.
         payload[5] = GAP_FLAG_PATTERNIZED;
         assert!(decode_gap_header(&payload).is_ok());
     }
 
     #[test]
     fn filler_never_starts_with_ecdc_magic() {
-        // The payload always begins with GAP1, so an entry can never be mistaken
-        // for a standalone ECDC stream.
+        // The payload begins with GAP1, so a reader distinguishes an entry from
+        // a standalone ECDC stream.
         let payload = test_encode_gap_payload(96_000, 3_000, 0x4543_4443 /* "ECDC" */);
         assert_eq!(&payload[0..4], GAP_MAGIC);
         assert_ne!(&payload[0..4], b"ECDC");

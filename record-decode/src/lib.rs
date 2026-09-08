@@ -69,23 +69,12 @@ fn bytes_tone_ordering(ordering: DescriptorToneOrdering) -> BytesToneOrdering {
     }
 }
 
-/// Decodes a toned-v2 groove. Each lifted pixel's slot follows from where it
-/// sits on the raster — its angle about the centre, in the record's frame —
-/// and its index in the groove, so the raster indices the walk visited are
-/// all the decoder needs beyond the wheel itself.
-fn decode_clock_toned_track_to_bytes(
-    track_data: &[u8],
-    pixel_indices: &[usize],
-    width: usize,
-    height: usize,
-    clock: &record_descriptor::ToneClockDescriptor,
-    expected_byte_length: Option<usize>,
-) -> Result<Vec<u8>> {
-    record_descriptor::validate_tone_clock(clock, expected_byte_length)
-        .context("invalid toned-v2 tone clock")?;
-    let wheel = ToneClock {
-        // A version 1 map comes back from the descriptor with its one ring
-        // written out, so nothing here has to know which version it was.
+/// The wheel as the groove encoder takes it.
+///
+/// A version 1 map comes back from the descriptor with its one ring written
+/// out, so no caller has to know which version it was.
+fn tone_clock_from_descriptor(clock: &record_descriptor::ToneClockDescriptor) -> ToneClock {
+    ToneClock {
         rings: clock.ring_slots(),
         span: clock.span,
         rotation_centidegrees: clock.rotation_centidegrees.clone(),
@@ -103,7 +92,24 @@ fn decode_clock_toned_track_to_bytes(
             })
             .collect(),
         gap_switch_offsets: clock.gap_switch_offsets.clone(),
-    };
+    }
+}
+
+/// Decodes a toned-v2 groove. Each lifted pixel's slot follows from where it
+/// sits on the raster — its angle about the centre, in the record's frame —
+/// and its index in the groove, so the raster indices the walk visited are
+/// all the decoder needs beyond the wheel itself.
+fn decode_clock_toned_track_to_bytes(
+    track_data: &[u8],
+    pixel_indices: &[usize],
+    width: usize,
+    height: usize,
+    clock: &record_descriptor::ToneClockDescriptor,
+    expected_byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    record_descriptor::validate_tone_clock(clock, expected_byte_length)
+        .context("invalid toned-v2 tone clock")?;
+    let wheel = tone_clock_from_descriptor(clock);
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let angles: Vec<f64> = pixel_indices
@@ -146,14 +152,76 @@ fn decode_clock_toned_track_to_bytes(
     .context("failed to decode toned-v2 groove pixels")
 }
 
-fn load_png_rgba(png_bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
-    let image = image::load_from_memory(png_bytes)
-        .context("failed to decode record PNG")?
-        .to_rgba8();
+/// The magic a raw sidecar starts with. See [`load_record_rgba`].
+#[cfg(feature = "rgba")]
+pub const RGBA_SIDECAR_MAGIC: &[u8; 8] = b"BNRGBA\0\0";
+
+/// How long the raw sidecar's header is: the magic, then the width and the
+/// height as little-endian `u32`.
+#[cfg(feature = "rgba")]
+pub const RGBA_SIDECAR_HEADER_LENGTH: usize = 16;
+
+/// A pressed record read back to pixels, whatever it was written as.
+///
+/// The format is identified by the bytes rather than by the caller. Every
+/// function in this crate that names a PNG takes this: PNG is what the
+/// press writes, and a record exported as TIFF or QOI is the same record
+/// with the same pixels in a different wrapper. Which wrappers a build
+/// understands is decided by its features.
+pub fn load_record_rgba(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
+    #[cfg(feature = "rgba")]
+    if bytes.starts_with(RGBA_SIDECAR_MAGIC) {
+        return load_rgba_sidecar(bytes);
+    }
+
+    let image = match image::load_from_memory(bytes) {
+        Ok(image) => image,
+        // TGA is the one format here that a reader cannot recognise: it
+        // opens with a length and a type byte and carries no magic at all,
+        // so a sniffer has nothing to match. It is tried by name when
+        // nothing else claims the bytes, and only then, because reading
+        // arbitrary bytes as TGA succeeds far too easily.
+        #[cfg(feature = "tga")]
+        Err(_) => image::load_from_memory_with_format(bytes, image::ImageFormat::Tga)
+            .context("failed to decode record image")?,
+        #[cfg(not(feature = "tga"))]
+        Err(error) => return Err(anyhow::Error::new(error).context("failed to decode record image")),
+    }
+    .to_rgba8();
 
     let (width, height) = image.dimensions();
 
     Ok((width as usize, height as usize, image.into_raw()))
+}
+
+/// The raw sidecar: no container, so the header is the whole of what says
+/// how to read the bytes after it.
+#[cfg(feature = "rgba")]
+fn load_rgba_sidecar(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
+    if bytes.len() < RGBA_SIDECAR_HEADER_LENGTH {
+        bail!("raw record is shorter than its own header");
+    }
+
+    let width = u32::from_le_bytes(bytes[8..12].try_into().expect("slice length")) as usize;
+    let height = u32::from_le_bytes(bytes[12..16].try_into().expect("slice length")) as usize;
+    let pixels = &bytes[RGBA_SIDECAR_HEADER_LENGTH..];
+    let expected = width
+        .checked_mul(height)
+        .and_then(|count| count.checked_mul(4))
+        .context("raw record dimensions overflow")?;
+
+    if pixels.len() != expected {
+        bail!(
+            "raw record says {width}x{height} and carries {} bytes, not {expected}",
+            pixels.len()
+        );
+    }
+
+    Ok((width, height, pixels.to_vec()))
+}
+
+fn load_png_rgba(png_bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
+    load_record_rgba(png_bytes)
 }
 
 fn descriptor_payload_len_from_prefix(prefix: &[u8]) -> Result<usize> {
@@ -208,23 +276,52 @@ fn record_descriptor_bytes_from_rgba(
     )?;
 
     let payload_len = descriptor_payload_len_from_prefix(&prefix_bytes)?;
+    let lead_in_capacity =
+        record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
+
+    // The lead-in holds 2 428 bytes on an LP and a toned record's descriptor
+    // weighs 282, so this is the path an ordinary record takes.
+    if payload_len <= lead_in_capacity {
+        return record_descriptor::metadata_bytes_from_grayscale_rgba(
+            rgba,
+            &lead_in_indices,
+            payload_len,
+            "record descriptor",
+        );
+    }
+
+    // The record that overran it. The rest is in the trailer, read with the
+    // clock the band was cut with. That clock is a segment in the lead-in,
+    // so the lead-in is read to the brim first.
+    let head = record_descriptor::metadata_bytes_from_grayscale_rgba(
+        rgba,
+        &lead_in_indices,
+        lead_in_capacity,
+        "record descriptor",
+    )?;
+    let clock = record_descriptor::trailer_clock_from_stream_head(&head).context(
+        "the descriptor runs past the lead-in and does not say how its trailer is toned",
+    )?;
+
     let cut_inner_radius = match u16::from_be_bytes([prefix_bytes[19], prefix_bytes[20]]) {
         0 => None,
         radius => Some(i32::from(radius)),
     };
-
-    let run_out_indices =
+    let trailer_indices =
         build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?;
 
-    let mut descriptor_indices = lead_in_indices;
-    descriptor_indices.extend_from_slice(&run_out_indices);
-
-    record_descriptor::metadata_bytes_from_grayscale_rgba(
+    let mut bytes = head;
+    bytes.extend_from_slice(&record_descriptor::band_bytes_from_toned_rgba(
         rgba,
-        &descriptor_indices,
-        payload_len,
-        "record descriptor",
-    )
+        width,
+        height,
+        &trailer_indices,
+        &clock,
+        payload_len - lead_in_capacity,
+        "record descriptor trailer",
+    )?);
+
+    Ok(bytes)
 }
 
 #[allow(clippy::too_many_arguments)]

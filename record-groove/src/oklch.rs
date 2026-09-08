@@ -142,10 +142,10 @@ pub fn oklch_lightness(base: [u8; 3]) -> f64 {
 /// flat fractional amount already reads clearly as a lighter gap.
 pub const ADAPTIVE_REFERENCE_BASE_LIGHTNESS: f64 = 0.5;
 
-/// A flat `gap_l = base_l + (1.0 - base_l) * amount` shrinks in *absolute*
-/// lightness as `base_l` approaches white — there's simply less "room to
-/// white" left — so a fixed amount that reads as clearly lighter on a
-/// mid/dark base tone can become perceptually invisible on a light one.
+/// A flat `gap_l = base_l + (1.0 - base_l) * amount` gives a smaller *absolute*
+/// lightness step as `base_l` approaches white, because the range above
+/// `base_l` narrows. A fixed amount that reads as lighter on a mid or dark base
+/// tone can therefore read as the base tone on a light one.
 ///
 /// This keeps `predominant_amount` (the configured `gapToneLightness`, e.g.
 /// the default `0.2`) for any base at or below

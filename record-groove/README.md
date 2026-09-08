@@ -6,8 +6,9 @@ and color. It does not process records, spirals, or geometry.
 
 ## Formats
 
-The crate offers three ways to pack a byte stream into pixels, trading size
-against how conspicuous the result is.
+The crate offers three ways to pack a byte stream into pixels. The three
+formats give three points on the trade between output size and visual
+appearance.
 
 | Format | Density | Pixels for N bytes | Looks like |
 |---|---|---|---|
@@ -33,8 +34,8 @@ let rgba = record_groove::bytes_to_grayscale_rgba(&bytes);
 let back = record_groove::grayscale_rgba_to_bytes(&rgba, Some(bytes.len()))?;
 ```
 
-One byte per pixel with `R = G = B`. Three times larger than RGB, but reads as
-a neutral gray field.
+Grayscale stores one byte per pixel, with `R = G = B`. Its output is three
+times larger than RGB output, and it appears as a neutral gray field.
 
 ### Toned
 
@@ -56,12 +57,12 @@ let png  = rgba_to_square_png(&rgba)?;
 let back = palette.rgba_to_bytes(&rgba, Some(bytes.len()))?;
 ```
 
-Everything is configurable through `TonedConfig`:
+`TonedConfig` sets these four fields:
 
 | Field | Meaning |
 |---|---|
 | `base` | the `[u8; 3]` base tone every pixel's brightness matches (or use `TonedConfig::from_hex`) |
-| `luma_tolerance` | allowed brightness drift in rounded Rec. 709 luma steps; `0` = perfectly flat |
+| `luma_tolerance` | allowed brightness drift in rounded Rec. 709 luma steps; `0` holds the luma constant |
 | `bits_per_pixel` | Data in each pixel, from 1 through 24 bits. The number of iso-luma colors sets the limit. |
 | `ordering` | which candidates make the palette: `BaseProximity` (nearest RGB distance) or `ChromaProximity` (nearest hue — see below) |
 
@@ -86,8 +87,8 @@ searches a tolerance ladder that minimizes
 
 ## Size vs. luma tolerance
 
-There is a hard trade-off between output size and brightness flatness. Capacity
-per pixel is `log2(number of colors sharing the base tone's luma)`. Measured
+Output size and brightness flatness trade against each other. Capacity per pixel
+is `log2(number of colors sharing the base tone's luma)`. Measured
 for a pink base (`#FFC0CB`, luma ≈ 206):
 
 | Luma tolerance | Iso-luma colors | Max bits/pixel | Size vs RGB |
@@ -112,9 +113,11 @@ Flat brightness and a recognizable tint require different settings.
 
 Practical operating points:
 
-- **±2 / 18 bits / 1.33×** — tightest genuinely flat-brightness setting.
-- **±16 / 21 bits / 1.14×** — brightness varies ≤6%, recovers most of the size gap.
-- **±64 / 22 bits / 1.09×** — near RGB size, but reads as pastel static.
+- **±2 / 18 bits / 1.33×** — the tightest setting that holds brightness flat.
+- **±16 / 21 bits / 1.14×** — brightness varies by 6% or less, and the size gap
+  narrows.
+- **±64 / 22 bits / 1.09×** — close to RGB size, and it appears as pastel
+  static.
 
 ## Color cast
 
@@ -154,10 +157,10 @@ size. The following results use a 255 KB payload and the pink base `#FFC0CB`:
 | **20** | **±48** | **1.20×** | (218, 182, 182) | 146 | **clean pink, calmest pixels** |
 | 20 | ±64 | 1.20× | (216, 168, 174) | 161 | stronger rose |
 
-Each additional bit per pixel decreases the image size by approximately 5%.
-However, it decreases tint accuracy or brightness uniformity. Payload entropy
-has a larger effect on the PNG byte length. Thus, size usually refers to canvas
-dimensions in this comparison.
+Each additional bit per pixel decreases the image size by approximately 5%. It
+also decreases tint accuracy or brightness uniformity. Payload entropy has a
+larger effect on the PNG byte length, so size in this comparison refers to the
+canvas dimensions.
 
 ### One preset for all base colors
 
@@ -188,6 +191,86 @@ Saturated primary colors are at the corners of the gamut. Few colors have the
 same chroma in these areas. Thus, red, yellow, and orange have some color cast
 at all settings. Pastels, muted tones, and medium-saturation colors give chroma
 error values from 3 through 18.
+
+## The tone clock
+
+A clock tones the groove by *the position of a pixel on the disc*. The payload
+band divides by radius into rings. Each ring divides into equal angular slots
+from its own rotation. The coordinates of a pixel therefore give its pocket. The
+house wheel is `[8, 16]`: eight pockets across the inside of the band, sixteen
+around the outside, and twenty-four in total.
+
+Each pocket carries its own base tone and its own luma tolerance. The record
+holds the map, which is the wheel itself, so a reader recovers the pockets from
+the disc alone.
+
+```rust,ignore
+let pocket = clock.cell_index(pixel_index, angle, radius);  // radius -> ring, angle -> slot
+let palette = clock.config(pocket, clock.is_gap(pixel_index));
+```
+
+The ring choice reads the radius alone. The slot choice reads the rotation of
+its own ring alone. The two rings therefore turn independently.
+
+### Unique editions
+
+Two controls make a re-press a different record, and each control has its own
+effect.
+
+**Rotation** — one turn per ring, carried as a `u16` in hundredths of a degree.
+Each pocket re-reads its colour from the art that it covers. A turn of exactly
+one pocket width therefore puts the boundaries back on themselves and reproduces
+the pressed record. The unique range is one pocket width per ring: 45° for the
+inner ring and 22.5° for the outer ring. A turn below about a quarter of a degree
+moves the boundary less than one pixel. A 45 therefore holds about 179 inner
+positions and 110 outer positions.
+
+**Base nudge** — a move of the base tone of one pocket by one 8-bit step. The
+palette holds the 2²⁰ iso-luma colours *ordered by chroma proximity to the
+base*, so a one-unit move re-sorts the whole ordering. Across four
+representative tones, **about 100% of the million palette entries change**.
+Every groove pixel therefore takes a different colour at the same brightness.
+The picture holds its appearance.
+
+In OKLab (×100), a one-step nudge measures:
+
+| base | nudge ΔE (r/g/b) | the pocket's palette already spreads to |
+|---|---|---|
+| `[150,96,120]` | 0.18 / 0.27 / 0.16 | ΔE 21.6 |
+| `[64,140,90]` | 0.08 / 0.31 / 0.14 | ΔE 17.4 |
+| `[200,180,60]` | 0.15 / 0.26 / 0.07 | ΔE 13.6 |
+| `[30,30,40]` | 0.19 / 0.36 / 0.20 | ΔE 28.0 |
+
+The nudge is below a just-noticeable difference. It is 60 to 170 times smaller
+than the spread that the colours of the pocket already cover.
+
+### Edition capacity
+
+The press draws each edition at random from the scheme, so two editions can
+coincide. For `N` distinct records, the chance of a collision reaches 50% at
+about `1.177 * sqrt(N)` pressings.
+
+| scheme | distinct records | 50% collision at |
+|---|---|---|
+| rotation pair only | ~19 700 | ~165 pressings |
+| + one nudge shared by every pocket (27 deltas) | ~532 000 | ~860 |
+| + a per-pocket ±1 nudge on one channel (3²⁴) | ~5.5 × 10¹⁵ | **~87 million** |
+
+Take the per-pocket nudge. The caller already chooses the twenty-four tones that
+it passes in, so the format, the carrier and the renderer stay as they are.
+
+### Nudge compatibility
+
+`bits_per_pixel` comes from the size budget alone, as
+`ceil(24 / max_size_factor)`. The ordering is always chroma proximity. Both
+values are independent of the base tone, so every pocket agrees on the bit count
+of a pixel under any nudge. The map carries the base and the tolerance of each
+pocket, and a reader rebuilds the palette from those written values. Every wheel
+that presses therefore reads.
+
+A nudge fails when `TonedConfig::balanced` refuses the tone, which happens near
+black, near white and at the gamut corners. In that case no tolerance yields the
+2²⁰ colours that the budget needs. This refusal occurs at press time.
 
 ## Square PNG output
 

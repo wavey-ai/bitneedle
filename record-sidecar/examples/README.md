@@ -1,63 +1,60 @@
 # record-sidecar examples
 
 Runnable spikes against the Sidecar crate. Build any of them with
-`cargo run --example <name> -- <args>`; each prints its usage line when
-run bare.
+`cargo run --example <name> -- <args>`. Each example prints its usage line when
+you run it with no arguments.
 
-## The inscription spikes (Aug 2026) — the signature that carries the image
+## Inscription spikes (August 2026)
 
-Three spikes exploring one idea, kept deliberately: **the fan's
-inscription — the signed and numbered handwriting on an edition's label —
-can itself be the Sidecar carrier.** Not ink next to data: ink that *is*
-data. This is a candidate treatment for future edition types; it is NOT
-what production editions ship today (see "what production uses" below).
+Three spikes examine one idea: **the inscription of a fan — the signed and
+numbered handwriting on the label of an edition — carries the Sidecar payload
+itself.** The written marks hold the data. This treatment is a candidate for
+future edition types. Production editions use the treatment in "Production
+treatment" below.
 
-The progression:
+The three spikes progress as follows:
 
-1. **`inscription_label_spike`** — the control case. A stamped record and
-   an AVIF pushed through the standard, long-standing library path:
-   `rewrite_record_png` with `carriers: ["label"]`. Verifies the BRS1
-   audio payload is untouched and the image round-trips. Proof that the
-   ordinary API already does "record + image in, authored record out"
-   with no custom work.
+1. **`inscription_label_spike`** — the control case. It pushes a stamped record
+   and an AVIF through the standard library path, `rewrite_record_png` with
+   `carriers: ["label"]`. It verifies that the BRS1 audio payload holds its
+   bytes and that the image round-trips. It shows that the ordinary API takes a
+   record and an image and returns an authored record.
 
-2. **`inscription_only_spike`** — restricts the carriers to the
-   inscription's own glyph pixels (supplied as a mask). The handwriting
-   alone holds the hidden image. Capacity is small (glyph pixels only),
-   and the report notes the catch: *a decoder can only rebuild this
-   carrier set if the inscription geometry ships in a future record
-   descriptor version.* That geometry-in-descriptor step is the price of
-   admission for this treatment.
+2. **`inscription_only_spike`** — it restricts the carriers to the glyph pixels
+   of the inscription, supplied as a mask. The handwriting alone holds the
+   hidden image. Capacity is small, because the glyph pixels are few. The report
+   states one condition: *a decoder rebuilds this carrier set when the
+   inscription geometry ships in a future record descriptor version.* This
+   treatment therefore needs that descriptor change.
 
-3. **`pairformed_inscription_spike`** — the full concept. Each carrier
-   pair's **common mode forms the visible pencil relief** while the
-   **pair differential carries the sign and magnitude bits**: the
-   signature's shading is literally sculpted by the same pixel writes
-   that store the payload. Ink and data are one operation. Same
-   descriptor-geometry requirement as (2).
+3. **`pairformed_inscription_spike`** — the full concept. The **common mode** of
+   each carrier pair forms the visible pencil relief. The **pair differential**
+   carries the sign bits and the magnitude bits. The same pixel writes therefore
+   shade the signature and store the payload. This spike needs the same
+   descriptor geometry as spike 2.
 
-### What production uses
+### Production treatment
 
-Shipping editions embed their secret image with the standard months-old
-API — sign and number the label visually, composite it into the record,
-then `rewrite_record_png(record, { sidecar: { carriers: ["label",
-"intergroove"], items: [image] } })` and verify with
-`decode_record_png_sidecar_bytes`. Both carriers, because the label
-alone holds about 8.5KB on a 576px single and the intergroove takes the
-same image to roughly 27KB. Decodable by every existing record decoder,
-zero bespoke geometry.
+A shipping edition embeds its secret image through the standard API. Sign and
+number the label visually, composite it into the record, then run
+`rewrite_record_png(record, { sidecar: { carriers: ["label", "intergroove"],
+items: [image] } })`. Verify the result with
+`decode_record_png_sidecar_bytes`. Both carriers are used: the label holds about
+8.5 KB on a 576 px single, and the intergroove takes the same image to about
+27 KB. Every existing record decoder reads this treatment, and it needs no
+bespoke geometry.
 
-Read it back with `decode_record_png_sidecar_bytes(png, profile)` and
-nothing else: the carrier set, seed and scheme come from the record's
-own BSC1 descriptor pointer, so one call reads label-only pressings and
-label+intergroove pressings alike. A hand-rolled annulus walk would
-miss half of a modern edition.
+Read the payload back with `decode_record_png_sidecar_bytes(png, profile)`. The
+carrier set, the seed and the scheme come from the BSC1 descriptor pointer of
+the record, so one call reads a label-only pressing and a label plus intergroove
+pressing. A hand-written annulus walk reads the label carrier alone, and it
+misses the intergroove half of a modern edition.
 
-When a future edition type wants the inscription-as-carrier treatment,
-start from spike (3), and budget for the descriptor version bump that
-records the inscription geometry.
+For a future edition type that uses the inscription as the carrier, start from
+spike 3, and plan for the descriptor version bump that records the inscription
+geometry.
 
 ## Other examples
 
-- **`patch_cache_encryption`** — migrates a record PNG's cache-encryption
-  secret in place (see `patch_record_png_cache_encryption_secret`).
+- **`patch_cache_encryption`** — migrates the cache-encryption secret of a
+  record PNG in place. See `patch_record_png_cache_encryption_secret`.

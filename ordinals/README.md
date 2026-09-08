@@ -73,7 +73,7 @@ Open `http://127.0.0.1:5177/`. The server:
 - proxies `/content/<inscription>` to `https://ordinals.com/content/<inscription>`
 - wires the rendered canvas to PNG download.
 
-Useful flags:
+Flags:
 
 ```sh
 npm run server -- --port 5188
@@ -116,7 +116,7 @@ Aliases:
   pitch from the payload pixel count
 - `bl`: original byte length, if known
 - `pc`: payload pixel count, if known
-- `cs`: crop source RGB image scanlines when a payload image actually includes non-payload top/bottom rows
+- `cs`: crop source RGB image scanlines when a payload image includes top rows or bottom rows outside the payload
 - `lr`: label radius override
 - `ao`: record artwork opacity
 - `lao`: label artwork opacity
@@ -179,8 +179,8 @@ correctness gate for payload placement and decode order.
 
 ## Press JSON integration
 
-The runtime also examines `press`, `pressJson`, `ordinalPaths`, `paths`, and
-`assets`. Thus, a Press API payload can contain Ordinals content paths. The
+The runtime also reads `press`, `pressJson`, `ordinalPaths`, `paths` and
+`assets`. A Press API payload can therefore carry Ordinals content paths. The
 runtime converts these paths to the same internal renderer model.
 
 Expected Press-side direction:

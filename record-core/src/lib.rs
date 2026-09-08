@@ -1,8 +1,9 @@
 //! Public Bitneedle record wire-format, geometry, decoding, and verification primitives.
 //!
 //! This crate is the authoritative implementation of the public BRD1/BRS1 wire
-//! contract. It intentionally contains no application workflow identifiers,
-//! record-creation policy, placeholder signing, JSON stream metadata, legacy JSON support, or presentation masking.
+//! contract. It holds the wire contract alone. Application workflow
+//! identifiers, record-creation policy, placeholder signing, JSON stream
+//! metadata and presentation masking live outside this crate.
 
 pub mod chunk;
 pub mod commitment;
@@ -29,112 +30,108 @@ pub const PAYLOAD_CODE_FORMAT_RGB: &str = "rgb";
 pub const PAYLOAD_ENCODING_RGB: &str = "rgb";
 pub const LEAD_IN_TURNS: f64 = 2.0;
 
-/// The turns a profile's label clearance is required to have room for.
+/// The turns that the label clearance of a profile must have room for.
 ///
-/// Not the turns a run-out has. That is derived per record — one to four
-/// rings, whichever fits above the cut, by [`lead_out_geometry`] — and the
-/// count is a property of how much of its side a record used, not of the
-/// profile.
+/// [`lead_out_geometry`] derives the turn count of a run-out per record, as
+/// one to four rings, whichever count fits above the cut. That count follows
+/// from the part of the side that the record used.
 ///
-/// This is the floor the clearance is checked against, and two is what a
-/// pressed record needs: a matrix and stamper marks are stamped into the
-/// smooth annulus inside the last groove, and a clearance too narrow to hold
-/// two resolvable turns is a clearance that reads as groove all the way to
-/// the paper. See [`MIN_LABEL_CLEARANCE_PX`], which is its only real use.
+/// This constant is the floor that the clearance is checked against. A pressed
+/// record needs two turns. The press stamps the matrix marks and the stamper
+/// marks into the smooth annulus inside the last groove. A clearance that holds
+/// fewer than two resolvable turns therefore reads as groove up to the paper.
+/// [`MIN_LABEL_CLEARANCE_PX`] is the one use of this constant.
 pub const RUN_OUT_TURNS: f64 = 2.0;
 
-/// How much of the payload band a cut is allowed to use, measured
-/// outward-in from `payload_outer_radius`. A lathe does not pack a side to
-/// the label: it cuts at a set pitch from the rim and stops where the
-/// programme stops, and everything it did not reach stays deadwax. `1.0`
-/// restores the historical fit-to-fill cut, whose spiral always terminated
-/// on `payload_inner_radius` no matter how little it carried.
+/// How much of the payload band a cut may use, measured inward from
+/// `payload_outer_radius`. A lathe cuts at a set pitch from the rim and stops
+/// at the end of the programme. The band below that point stays deadwax. `1.0`
+/// restores the historical fit-to-fill cut, whose spiral terminated on
+/// `payload_inner_radius` at every payload size.
 pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
 
-/// The tightest adjacent turns of a cut may sit in the rendered PNG, centre
-/// to centre, in pixels. Below this the turns stop resolving as separate and
-/// the band collapses into flat noise, taking the artwork under it with it.
-/// This is the density ceiling. [`MIN_B_VALUE`] is only a divide-by-zero
-/// guard and says nothing about whether a cut is legible.
+/// The closest that adjacent turns of a cut may sit in the rendered PNG,
+/// centre to centre, in pixels. Below this separation the turns merge, and the
+/// band becomes flat noise over the artwork. This constant is the density
+/// ceiling. [`MIN_B_VALUE`] is a divide-by-zero guard, and it carries no
+/// legibility limit.
 ///
-/// Two pixels is the raster's limit, not a preference, and asking for less
-/// does not get it. `trace_record_spiral_with_family` rounds every point to
-/// an integer pixel and skips one already taken, so turns closer than the
-/// grid can separate land on the same pixels and merge. Measured on the ten
-/// at 576, asking for 1.75 draws at 2.33, 1.50 draws at 3.00 and 1.30 draws
-/// at 4.25 — wider than asked, and irregular, because the merging beats
-/// against the grid. At 2.00 and above the tracer draws what it is given.
-/// A finer cut needs a bigger canvas, not a smaller number here.
+/// Two pixels is the limit of the raster. `trace_record_spiral_with_family`
+/// rounds every point to an integer pixel and skips a pixel that is already
+/// taken. Turns closer than the grid resolves therefore land on the same pixels
+/// and merge. Measured on the ten at 576: a request for 1.75 draws at 2.33, a
+/// request for 1.50 draws at 3.00, and a request for 1.30 draws at 4.25. Each
+/// result is wider than the request, and the spacing is irregular, because the
+/// merge beats against the grid. At 2.00 and above, the tracer draws the
+/// requested separation. A finer cut needs a larger canvas.
 pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 
 /// The narrowest label clearance that still cuts a readable run-out, in
 /// pixels: [`RUN_OUT_TURNS`] turns at [`MIN_TURN_SEPARATION_PX`] apart.
 ///
-/// The run-out is the band between the label and the payload inner radius,
-/// and its pitch is the clearance divided by a fixed turn count — so a
-/// narrower clearance does not draw a smaller run-out, it draws the same four
-/// turns on top of each other. That band carries the second half of the BRD1
-/// stream, so the merge is not cosmetic: the descriptor stops reading back.
+/// The run-out is the band between the label and the payload inner radius. Its
+/// pitch is the clearance divided by a fixed turn count, so a narrower
+/// clearance draws the same four turns closer together. That band carries the
+/// second half of the BRD1 stream, so a merge stops the descriptor reading
+/// back.
 ///
-/// No profile is near this. Each derives its clearance from the minimum
-/// inside diameter of recording, which yields 26 px on `single45`, 24 on
-/// `ten` and 20 on `lp` — comfortably clear at two turns, and the room left
-/// over is the smooth band the presser marks are stamped into. The floor is
-/// for the caller-supplied override in `resolve_record_geometry`, which is
-/// otherwise taken on trust.
+/// Every profile clears this floor. Each profile derives its clearance from the
+/// minimum inside diameter of recording, which gives 26 px on `single45`, 24 px
+/// on `ten` and 20 px on `lp`. Each figure clears two turns, and the remaining
+/// space is the smooth band that the presser marks are stamped into. This floor
+/// checks the caller-supplied override in `resolve_record_geometry`.
 pub const MIN_LABEL_CLEARANCE_PX: i32 = (RUN_OUT_TURNS * MIN_TURN_SEPARATION_PX) as i32;
 
 
 /// The pitch a cutting lathe feeds the head at through the deadwax, in
 /// millimetres per turn.
 ///
-/// This is the spiral lever's own feed rate, and it is a *rate*, not a turn
-/// count: the head does not know how far it has to travel, so a programme
-/// that ends early simply yields more turns at the same spacing. Music sits
-/// at roughly 0.1–0.2 mm per turn and the spiral feed around 1 mm, so a
-/// deadwax reads five to ten times coarser than the programme it follows.
+/// This value is the feed *rate* of the spiral lever. The travel distance is
+/// unknown to the head, so a programme that ends early gives more turns at the
+/// same spacing. Music sits at about 0.1 mm to 0.2 mm per turn, and the spiral
+/// feed sits at about 1 mm. A deadwax is therefore five to ten times coarser
+/// than the programme above it.
 ///
-/// The turn counts that fall out of it are the ones a real disc has. A 12"
-/// LP whose programme ends near 127 mm diameter, with its lock groove at
-/// 107 mm, has 10 mm of travel left — about ten turns. A dubplate carrying
-/// one four-minute track ends near 239 mm and has 66 mm left — about sixty
-/// turns, which is the broad ladder of concentric lines on any clip of one
-/// spinning.
+/// The turn counts that follow match a physical disc. A 12" LP whose programme
+/// ends near 127 mm diameter, with its lock groove at 107 mm, has 10 mm of
+/// travel left, which is about ten turns. A dubplate that carries one
+/// four-minute track ends near 239 mm and has 66 mm left, which is about sixty
+/// turns. Sixty turns is the broad ladder of concentric lines that a spinning
+/// dubplate shows.
 pub const DEADWAX_PITCH_MM: f64 = 1.0;
 /// The width of the perforated ring that holds a 45's knockout centre in
 /// place, in millimetres, measured radially.
 ///
-/// A dinked single does not have one hole, it has three features: the 38.1 mm
-/// dink the jukebox spindle needs, the 7.5 mm spindle hole for a normal deck,
-/// and between them the disc of vinyl that is still attached until someone
-/// pops it out. The perforation is the ring joining that disc to the record,
-/// and it is what the plant actually specifies — a caliper laid across the
-/// knockout is a caliper across a moulded edge, which is why measurements of
-/// it come back at 35 rather than the 35.1 the gap gives.
+/// A dinked single carries three features: the 38.1 mm dink for a jukebox
+/// spindle, the 7.5 mm spindle hole for a normal deck, and between them a disc
+/// of vinyl that stays attached until someone removes it. The perforation is
+/// the ring that joins that disc to the record, and the plant specifies it. A
+/// caliper laid across the knockout reads a molded edge, so a measurement of it
+/// gives 35 mm against the 35.1 mm that the gap gives.
 pub const DINK_PERFORATION_MM: f64 = 1.5;
 
 /// The label edge to the locked groove, in millimetres.
 ///
 /// A 12" LP carries its label at 100 mm and its lock groove at 107 mm, so the
-/// band between them is 3.5 mm. That band is not slack: it is where a pressed
-/// record's matrix and stamper marks go, and the reason the last groove does
-/// not run to the paper.
+/// band between them is 3.5 mm. That band holds the matrix marks and the
+/// stamper marks of a pressed record, and it keeps the last groove clear of the
+/// paper.
 pub const LOCK_GROOVE_CLEARANCE_MM: f64 = 3.5;
 
 /// Centre to centre between run-out turns, in millimetres.
 ///
-/// Five, not the one millimetre a lathe's spiral lever actually feeds at
-/// ([`DEADWAX_PITCH_MM`]). A real deadwax is a dense ladder because the head
-/// keeps cutting the whole way in; a picture record has artwork under that
-/// band and every turn crossing it is a line drawn over the picture. Five
-/// millimetres draws the handful of coarse rings a short single actually
-/// shows and leaves the rest of the annulus uninterrupted.
+/// This value is five millimetres, against the one millimetre that the spiral
+/// lever of a lathe feeds at ([`DEADWAX_PITCH_MM`]). A physical deadwax is a
+/// dense ladder, because the head cuts the whole way in. A picture record
+/// carries artwork under that band, and every turn across it draws a line over
+/// the picture. Five millimetres draws the few coarse rings that a short single
+/// shows, and it leaves the rest of the annulus clear.
 pub const RUN_OUT_TURN_SEPARATION_MM: f64 = 5.0;
 
 /// How much wider each run-out turn sits than the one inside it.
 ///
-/// One is a constant feed: every turn the same distance from the last, the
-/// way a lathe actually cuts. Above one each ring stands wider than the one
+/// One gives a constant feed: every turn sits the same distance from the last
+/// turn, as a lathe cuts. Above one, each ring stands wider than the ring
 /// inside it, so the band opens outward.
 ///
 /// One and a half, not two. The run-out is the last few wide rings before the
@@ -146,109 +143,99 @@ pub const RUN_OUT_TURN_SEPARATION_MM: f64 = 5.0;
 /// spans 26 mm rather than 48, the rings still open out visibly, and the
 /// deadwax keeps the room it is supposed to have.
 ///
-/// This is a picture record, and that is the point of it. A wide outer turn
-/// is the difference between a lead-out that reads as a few deliberate rings
-/// and one that reads as a ladder drawn across the artwork — and the taper
-/// buys it without moving the lock groove or spending another millimetre of
-/// the side.
+/// This format is a picture record. A wide outer turn draws a lead-out of a few
+/// separate rings. A constant feed draws a ladder across the artwork. The taper
+/// gives the wide outer turn, and it holds the lock groove at its radius and
+/// spends no further travel on the side.
 ///
-/// The taper is between turns, never within one. Each revolution falls at its
-/// own constant pitch, so the groove is still descending at full rate when it
-/// reaches the lock radius, and the lock groove is the only thing that draws
-/// the lock ring. An eased arrival instead flattens onto that radius part way
-/// through its last revolution and draws the ring itself — and the real lock
-/// groove, landing on pixels already taken, disappears. A lathe does not ease
-/// into a lock groove either: it cuts at pitch and the feed is switched off.
+/// The taper applies between turns. Each revolution falls at its own constant
+/// pitch, so the groove descends at full rate when it reaches the lock radius,
+/// and the lock groove alone draws the lock ring. An eased arrival flattens onto
+/// that radius part way through its last revolution and draws the ring itself.
+/// The lock groove then lands on taken pixels and disappears. A lathe also cuts
+/// at pitch up to the lock groove, and then it switches the feed off.
 pub const RUN_OUT_TAPER: f64 = 1.5;
 
-/// The most turns the run-out takes, however far out the programme stopped.
-pub const RUN_OUT_MAX_TURNS: f64 = 2.0;
+/// The most turns of fine deadwax a cut leaves behind it.
+///
+/// [`DEADWAX_PITCH_MM`] is a feed rate, so the turn count follows from the
+/// remaining travel. A side that carries one short track left forty turns at one
+/// millimetre apart across the artwork. The run-out takes the rest of the travel
+/// at [`RUN_OUT_TURN_SEPARATION_MM`].
+///
+/// This constant is a turn count. Six turns is 6 mm on every profile.
+pub const DEADWAX_MAX_TURNS: f64 = 6.0;
 
 /// The gap between the innermost run-out turn and the lock groove, in
 /// millimetres.
 ///
-/// Millimetres, not pixels. The three profiles render to one canvas at three
-/// scales — 3.29 px/mm on a 7", 1.90 on a 12" — so a gap fixed in pixels is a
-/// different distance on every record: six pixels is 1.8 mm on a single and
-/// 3.2 mm on an album, and the 7"'s lead-out comes out visibly tighter than
-/// the 12"'s for no reason anyone cut a record would recognise. A groove
-/// spacing is a physical measurement and the format states it as one.
+/// The unit is millimetres. The three profiles render to one canvas at three
+/// scales, at 3.29 px/mm on a 7" and 1.90 px/mm on a 12". A gap fixed in pixels
+/// is therefore a different distance on each record: six pixels is 1.8 mm on a
+/// single and 3.2 mm on an album, which draws the lead-out of the 7" tighter
+/// than the lead-out of the 12". A groove spacing is a physical measurement, and
+/// the format states it as one.
 ///
-/// The value is the six pixels the coarsest profile needs, converted: three
-/// times [`MIN_TURN_SEPARATION_PX`] at `lp` scale. Below the floor two turns
-/// stop resolving apart on the grid, and this is the tightest the band ever
-/// gets, so it is the number legibility depends on.
+/// The value converts the six pixels that the coarsest profile needs, which is
+/// three times [`MIN_TURN_SEPARATION_PX`] at `lp` scale. Below that floor, two
+/// turns merge on the grid. This gap is the tightest gap in the band, so it sets
+/// the legibility of the band.
 ///
-/// Holding it still is what makes a wider extent wider. The band used to
-/// divide a fixed descent among however many turns it had, so every turn
-/// added squeezed the ones below it — four turns closed the last gap to 1.3
-/// mm, and the extents were trading legibility for ring count rather than
-/// claiming vinyl. Now the innermost gap never moves and each turn outside it
-/// is [`RUN_OUT_TAPER`] times wider than the one within, so a wider extent
-/// grows outward into room the programme is not using. That is the whole
-/// point of them.
+/// A fixed inner gap makes a wider extent wider. The band divided a fixed
+/// descent among its turns, so each added turn narrowed the turns below it. Four
+/// turns closed the last gap to 1.3 mm, and the extents traded legibility for
+/// ring count. The innermost gap now holds its value, and each turn outside it
+/// is [`RUN_OUT_TAPER`] times wider than the turn within it. A wider extent
+/// therefore grows outward into the space that the programme leaves.
 pub const RUN_OUT_INNER_GAP_MM: f64 = 3.2;
-
-/// The furthest from the label edge the run-out may begin, in millimetres.
-///
-/// A 1950s RCA single's lead-out starts about 20 mm out, and that was this
-/// number until the widest band needed a fourth turn: at 20 the fourth turn
-/// clips on every profile and the band comes out identical to a three-turn
-/// one. Twenty-five is what four turns at the nominal separation actually
-/// need, measured from the lock groove rather than guessed.
-///
-/// It is a guard rather than a target. Nothing reaches it unless the extent
-/// asks for turns the cut left room for, and the ordinary bands sit well
-/// inside it — a 20 mm lead-out is still what a record with an ordinary
-/// programme gets. It only binds on a side carrying one short track, which is
-/// the case the wide bands exist for.
-pub const RUN_OUT_MAX_EXTENT_MM: f64 = 25.0;
 
 /// What the lead-out carries, in bytes, on every record ever pressed.
 ///
-/// The band is one groove of fixed geometry, but a groove's pixel count is
-/// its circumference, and the four profiles put their labels at four
-/// different radii — 1493 pixels of lead-out on an LP against 2512 on a
-/// vintage single. A carrier whose capacity depended on that would be four
-/// carriers wearing one name, and nothing could be written into it without
-/// first asking which record it was.
+/// The lead-in fills first, and the trailer takes the remainder. A header that
+/// exceeds the lead-in gets at least this much space below it on every profile.
 ///
-/// So the capacity is declared rather than measured: 512 bytes, which every
-/// profile clears with room to spare (the tightest, `lp`, holds 746). What a
-/// profile has beyond this is cut and left unaddressed, the way a lathe cuts
-/// a wider deadwax than the programme needs. A writer that can count on 512
-/// bytes can count on them everywhere, which is the entire point of a fixed
-/// carrier.
+/// The band is one groove of fixed geometry. The pixel count of a groove is its
+/// circumference, and the four profiles put their labels at four radii. An LP
+/// holds 1493 lead-out pixels, and a vintage single holds 2512. A capacity that
+/// followed those counts would give four capacities under one name, and a writer
+/// would need the profile before it wrote a byte.
 ///
-/// The margin is deliberate. Pixel counts fall out of rounding a spiral onto
-/// an integer grid, so they move by a percent or two when any radius is
-/// retuned; a capacity set at the measured floor would be invalidated by a
-/// change that moved no band at all.
+/// The format therefore declares the capacity as 512 bytes. Every profile clears
+/// that figure, and the tightest profile, `lp`, holds 746 bytes. Each profile
+/// cuts the space beyond 512 bytes and leaves it unaddressed, as a lathe cuts a
+/// wider deadwax than the programme needs. A writer can therefore use 512 bytes
+/// on every profile.
+///
+/// The margin is deliberate. Pixel counts follow from rounding a spiral onto an
+/// integer grid, so they move by one or two percent when a radius is retuned. A
+/// capacity set at the measured floor would fail after a change that moved no
+/// band.
 pub const LEAD_OUT_BYTE_CAPACITY: u32 = 512;
 
 pub const LEAD_IN_OUTER_EDGE_INSET: i32 = 1;
 /// Mirrors `record_descriptor::METADATA_GRAYSCALE_BITS_PER_PIXEL`, which owns
-/// the encoding; this crate sits below that one and cannot import it. The two
-/// must agree — the capacity helpers here and the painting there are the same
-/// arithmetic read from opposite ends.
+/// the encoding. This crate sits below that crate, so it declares its own copy.
+/// The two values must agree. The capacity helpers here and the painting there
+/// are the same arithmetic from opposite ends.
 pub const METADATA_GRAYSCALE_BITS_PER_PIXEL: u32 = 6;
 pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "single45vintage", "ten", "lp"];
 
 pub const RECORD_STREAM_MAGIC: &[u8; 4] = b"BRS1";
 pub const RECORD_STREAM_HEADER_LENGTH: usize = 8;
-// The optional typed PayloadDescriptor fields (codec, sample rate, channels,
-// decoded-block output geometry) and the length-prefixed `codec_metadata` blob
-// are signalled through previously-reserved per-descriptor flag bits, which are
-// now promoted to DESCRIPTOR_KNOWN_FLAGS. Descriptors that set no new flags
-// encode and decode identically to before, so the metadata version is unchanged.
+// Previously-reserved per-descriptor flag bits signal the optional typed
+// PayloadDescriptor fields: codec, sample rate, channels, decoded-block output
+// geometry, and the length-prefixed `codec_metadata` blob. DESCRIPTOR_KNOWN_FLAGS
+// now holds those bits. A descriptor that leaves the new bits clear encodes and
+// decodes as it did before, so the metadata version holds its value.
 pub const RECORD_STREAM_METADATA_VERSION: u8 = 2;
 
 pub const METADATA_FLAG_ENCRYPTED: u8 = 0x01;
 pub const METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES: u8 = 0x02;
 pub const METADATA_FLAG_TRACK_ENTRY_MAPPINGS: u8 = 0x04;
-/// Presence of the explicit track-gap section (count + per-gap
-/// first_revolution_index/revolution_count/after_track_index), written after
-/// the track section. Absent on older streams, which have no track gaps.
+/// Presence of the explicit track-gap section, which holds a count and, per gap,
+/// `first_revolution_index`, `revolution_count` and `after_track_index`. The
+/// writer puts this section after the track section. Older streams carry track
+/// gaps in another form and leave this flag clear.
 pub const METADATA_FLAG_TRACK_GAPS: u8 = 0x08;
 pub const METADATA_KNOWN_FLAGS: u8 = METADATA_FLAG_ENCRYPTED
     | METADATA_FLAG_ENTRY_DESCRIPTOR_INDEXES
@@ -300,8 +287,8 @@ pub const PAYLOAD_CONTAINER_MOSS_NANO: &str = "MOSSNANO";
 /// byte length, and deterministic filler seed; the descriptor supplies only the
 /// sample rate and channel count.
 ///
-/// GAP entries occupy timeline positions but are not musical tracks and must
-/// not be covered by `TrackDescriptor` ranges.
+/// GAP entries occupy timeline positions. Keep them outside every
+/// `TrackDescriptor` range, because a GAP entry is silence rather than a track.
 pub const PAYLOAD_CONTAINER_GAP: &str = "GAP";
 pub const PAYLOAD_CODEC_GAP: &str = "GAP";
 
@@ -1085,10 +1072,9 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
             diameter,
         )
     });
-    // The knockout is measured from the dink inward, not declared on its own.
-    // A caliper across the cutout is a caliper across a moulded edge; the
-    // perforation either side of it is the thing that is actually specified,
-    // so the format states the gap and derives the disc.
+    // The knockout is measured from the dink inward. A caliper across the
+    // cutout reads a molded edge. The plant specifies the perforation on each
+    // side of it, so the format states the gap and derives the disc.
     let dink_cutout_radius = physical
         .dink_diameter_mm
         .zip(physical.dink_perforation_mm)
@@ -1309,12 +1295,11 @@ pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {
 
 /// The radius a cut of `span_fraction` is laid out to stop on.
 ///
-/// This bounds the band the spiral's *pitch* is fitted against — not the
-/// groove trace itself, which still runs from `payload_outer_radius` on the
-/// same `b`. A decoder rebuilding the full-band mask from the descriptor's
-/// `b_value` therefore reads an identical prefix, and a cut whose payload
-/// overruns its nominal simply runs on inward the way a long side eats into
-/// the run-out.
+/// This radius bounds the band that the *pitch* of the spiral is fitted
+/// against. The groove trace runs from `payload_outer_radius` on the same `b`.
+/// A decoder that rebuilds the full-band mask from the `b_value` of the
+/// descriptor therefore reads an identical prefix. A cut whose payload exceeds
+/// its nominal span runs on inward, as a long side runs into the run-out.
 pub fn cut_inner_radius_from_geometry(
     g: &RecordProfileGeometry,
     span_fraction: f64,
@@ -1612,7 +1597,7 @@ pub fn build_run_out_spiral_indices(
         height,
         record_profile,
         cut_inner_radius,
-        LeadOutExtent::ExtraWide,
+        LeadOutExtent::Fill,
     )?;
 
     Ok(indices)
@@ -1648,18 +1633,62 @@ impl LeadOutGeometry {
     pub fn gaps(&self) -> Vec<f64> {
         let count = self.turns.max(0.0) as usize;
         (0..count)
-            .map(|turn| self.inner_gap * RUN_OUT_TAPER.max(1.0).powi((count - 1 - turn) as i32))
+            .map(|turn| lead_out_gap(count - 1 - turn, self.inner_gap, self.turn_separation))
             .collect()
     }
 }
 
-/// How far a band of `turns` turns descends, at the fixed inner gap.
-fn lead_out_descent(turns: f64, inner_gap: f64) -> f64 {
-    let ratio = RUN_OUT_TAPER.max(1.0);
+/// The gap above run-out turn `turn`, counting outward from the lock.
+///
+/// Each turn is [`RUN_OUT_TAPER`] times the one inside it up to
+/// [`RUN_OUT_TURN_SEPARATION_MM`], and every turn above that sits at the
+/// feed. The taper is exponential: unclamped, a sixth turn is 24 mm.
+fn lead_out_gap(turn: usize, inner_gap: f64, coarse_gap: f64) -> f64 {
+    (inner_gap * RUN_OUT_TAPER.max(1.0).powi(turn as i32)).min(coarse_gap.max(inner_gap))
+}
+
+/// How many turns to lay across the room the cut left, and where the band
+/// begins.
+///
+/// The band begins at the ceiling, and the count is the ladder nearest the
+/// room rather than the largest that fits under it. Anything the run-out does
+/// not reach is deadwax at the fine feed, which costs five turns of ladder
+/// per gap; the tracer spreads an overshoot across every gap instead.
+///
+/// A count that closes the tightest gap below [`MIN_TURN_SEPARATION_PX`] is
+/// not taken: those turns do not resolve apart on the grid.
+fn fill_run_out(lock_radius: f64, ceiling: f64, inner_gap: f64, coarse_gap: f64) -> (f64, f64) {
+    let room = (ceiling - lock_radius).max(0.0);
+    let mut turns = 1.0_f64;
+    let mut nearest = f64::INFINITY;
+    let mut candidate = 1.0_f64;
+
+    loop {
+        let reach = lead_out_descent(candidate, inner_gap, coarse_gap);
+        let tightest = inner_gap * (room / reach.max(1e-9)).min(1.0);
+        let distance = (reach - room).abs();
+
+        if tightest >= MIN_TURN_SEPARATION_PX && distance < nearest {
+            nearest = distance;
+            turns = candidate;
+        }
+
+        if reach >= room {
+            break;
+        }
+
+        candidate += 1.0;
+    }
+
+    (turns, ceiling.max(lock_radius))
+}
+
+/// How far a band of `turns` turns descends, from the lock outward.
+fn lead_out_descent(turns: f64, inner_gap: f64, coarse_gap: f64) -> f64 {
     let count = turns.max(0.0) as usize;
 
     (0..count)
-        .map(|turn| inner_gap * ratio.powi(turn as i32))
+        .map(|turn| lead_out_gap(turn, inner_gap, coarse_gap))
         .sum()
 }
 
@@ -1682,35 +1711,47 @@ pub enum LeadOutExtent {
     /// one track, which is the case it is for; anywhere else it runs into the
     /// cut and resolves back to whatever did fit.
     Wide,
-    /// Three turns wider: the widest band the format cuts.
+    /// Three turns wider.
     ///
     /// A side carrying one short track stops less than halfway down and
     /// leaves the rest of the vinyl doing nothing. This spends that room on
     /// four widely spaced rings rather than leaving a bare annulus, and takes
-    /// the byte capacity that comes with them. It reaches the extent guard on
-    /// every profile, so it is the band that guard was raised for.
+    /// the byte capacity that comes with them.
     ExtraWide,
+    /// Every turn the cut left room for: the band a record is cut with.
+    ///
+    /// The deadwax takes [`DEADWAX_MAX_TURNS`] and the run-out takes the rest
+    /// at the coarse feed. A 12" cut a third of the way down has 60 mm
+    /// between the programme and the label: twelve rings across it, against
+    /// the four rings and forty turns of fine ladder the fixed rungs gave.
+    ///
+    /// A function of `cut_inner_radius` alone, so a decoder that has read the
+    /// prefix reproduces it.
+    Fill,
 }
 
 impl LeadOutExtent {
-    /// Turns claimed above the compact band.
+    /// Turns claimed above the compact band. [`LeadOutExtent::Fill`] does not
+    /// name a count: it takes what the cut left, which is resolved against the
+    /// record rather than declared here.
     pub fn bonus_turns(self) -> f64 {
         match self {
             LeadOutExtent::Compact => 0.0,
             LeadOutExtent::Extended => 1.0,
             LeadOutExtent::Wide => 2.0,
             LeadOutExtent::ExtraWide => 3.0,
+            LeadOutExtent::Fill => f64::INFINITY,
         }
     }
 }
 
 /// Resolve a profile's lead-out.
 ///
-/// `cut_inner_radius` is where the programme's groove stopped. The run-out
-/// begins there or at its own cap, whichever is lower — a cut that ran deep
-/// leaves less room and gets a shorter run-out, which is the whole of what
-/// makes the band dynamic. `None` asks for the cap, which is what every cut
-/// that stops in the ordinary place gets.
+/// `cut_inner_radius` is the radius at which the groove of the programme
+/// stopped. The run-out begins at that radius or at its own cap, whichever is
+/// lower. A deep cut therefore leaves less space and gets a shorter run-out.
+/// `None` selects the cap, which every cut that stops at the ordinary radius
+/// gets.
 pub fn lead_out_geometry(
     record_profile: &str,
     cut_inner_radius: Option<i32>,
@@ -1720,11 +1761,11 @@ pub fn lead_out_geometry(
 
 /// The same, at a named extent.
 ///
-/// [`LeadOutExtent::Extended`] adds one turn's radial room above the compact
-/// entry, bounded by the extent cap and by where the programme actually
-/// stopped. It is a function of `cut_inner_radius` alone, so a decoder that
-/// has read the prefix out of the lead-in can reproduce it without being told
-/// which variant was cut.
+/// [`LeadOutExtent::Extended`] adds the radial room of one turn above the
+/// compact entry. The extent cap and the stop radius of the programme bound
+/// that addition. The result is a function of `cut_inner_radius` alone, so a
+/// decoder that has read the prefix out of the lead-in reproduces the geometry
+/// from that radius.
 pub fn lead_out_geometry_with_extent(
     record_profile: &str,
     cut_inner_radius: Option<i32>,
@@ -1736,34 +1777,34 @@ pub fn lead_out_geometry_with_extent(
 
     let lock_radius = label_radius + LOCK_GROOVE_CLEARANCE_MM * scale;
     let turn_separation = RUN_OUT_TURN_SEPARATION_MM * scale;
-    let extent_radius = label_radius + RUN_OUT_MAX_EXTENT_MM * scale;
 
-    // Three caps, and whichever bites first wins. The turn count bounds how
-    // much groove the carrier holds; the extent bounds how far up the disc it
-    // may draw over the artwork; and the programme's own band bounds it
-    // absolutely, because two grooves cannot share pixels and the cut was
-    // there first. On a 7" the third is the one that bites: a 45's recorded
-    // band is 31 mm wide and its label clearance under 8, so a lead-out
-    // asking for 13.5 mm would take a sixth of the programme.
+    // The run-out stops a deadwax header short of the cut rather than at a
+    // fixed distance from the label. See [`DEADWAX_MAX_TURNS`].
+    let deadwax_header = DEADWAX_MAX_TURNS * DEADWAX_PITCH_MM * scale;
+
+    // Two caps apply, and the tighter cap holds. The turn count bounds the
+    // groove that the carrier holds. The band of the programme bounds it
+    // absolutely, because two grooves cannot share pixels and the cut takes
+    // the pixels first. On a 7" the second cap holds: the recorded band of a
+    // 45 is 31 mm wide and its label clearance is under 8 mm, so a lead-out
+    // that asked for 13.5 mm would take a sixth of the programme.
     //
-    // The programme's edge is cleared by [`MIN_TURN_SEPARATION_PX`] rather
-    // than met exactly. Each band rounds its own spiral onto the grid and
-    // dedups only against itself, so two bands sharing a radius round onto
-    // shared pixels — the payload's last bytes come back as the lead-out's
-    // tone. A pixel of daylight is not enough; the separation floor is the
-    // distance at which two turns are known to resolve apart.
+    // The band clears the edge of the programme by [`MIN_TURN_SEPARATION_PX`].
+    // Each band rounds its own spiral onto the grid and dedups against itself
+    // alone, so two bands at one radius round onto shared pixels, and the last
+    // bytes of the payload return in the tone of the lead-out. The separation
+    // floor is the distance at which two turns resolve apart.
     let compact_ceiling = payload_inner_radius(&g) as f64 - MIN_TURN_SEPARATION_PX;
 
-    // How far out the band may reach. The compact one stops at the
-    // programme's edge whatever the cut did; the wider ones stop at the cut
-    // itself, which is the only thing that can actually be in their way. That
-    // is the point of them — a side carrying one short track has vinyl doing
-    // nothing above the label, and a wider extent claims it.
+    // How far out the band may reach. The compact extent stops at the edge of
+    // the programme at every cut radius. A wider extent stops at the cut, which
+    // is the one band above it. A side that carries one short track leaves
+    // vinyl above the label, and a wider extent uses that space.
     //
-    // The cut bounds every extent, and it is folded in here rather than
-    // clamped on afterwards: the turn count is chosen against the ceiling, so
-    // a band that would not fit drops a rung instead of keeping its turns and
-    // squeezing them into less room.
+    // The cut bounds every extent, and this code folds it into the ceiling
+    // here rather than clamping afterwards. The turn count is chosen against
+    // the ceiling, so a band that exceeds the ceiling drops a rung and keeps
+    // its gaps.
     let cut_ceiling = cut_inner_radius
         .filter(|radius| *radius > 0)
         .map(|radius| radius as f64 - MIN_TURN_SEPARATION_PX);
@@ -1774,31 +1815,50 @@ pub fn lead_out_geometry_with_extent(
         cut_ceiling.map_or(compact_ceiling, |cut| compact_ceiling.min(cut))
     };
 
-    // Turns are counted, not measured. The innermost gap is fixed and each
-    // turn outside it is `RUN_OUT_TAPER` times wider, so asking for another
-    // turn asks for room outward rather than for a share of what the band
-    // already had. A turn that will not fit under the ceiling is not taken:
-    // the band drops back a rung instead of squeezing its gaps.
-    let requested = 1.0 + extent.bonus_turns();
-    let mut turns = 1.0_f64;
     let inner_gap = RUN_OUT_INNER_GAP_MM * scale;
-    let mut descent = lead_out_descent(1.0, inner_gap);
 
-    let mut candidate = 2.0;
-    while candidate <= requested {
-        let reach = lead_out_descent(candidate, inner_gap);
-        if lock_radius + reach > ceiling {
-            break;
+    // The rungs stop at the cut. The filled band stops one header short of it.
+    // A record that declares no cut ran its programme to the label, and it
+    // leaves the deadwax with no room.
+    //
+    // The header leaves the first turn of the band in place. A side that ran to
+    // the label has 3.5 mm between its last groove and the lock. A six-turn
+    // header taken out of that distance puts the run-out on the lock groove.
+    let ceiling = match (extent, cut_ceiling) {
+        (LeadOutExtent::Fill, Some(cut)) => {
+            let single_turn = lock_radius + lead_out_descent(1.0, inner_gap, turn_separation);
+            (cut - deadwax_header).max(single_turn.min(cut))
         }
-        turns = candidate;
-        descent = reach;
-        candidate += 1.0;
-    }
+        _ => ceiling,
+    };
 
-    // A single-turn band still has to fit, and on a 7" the label clearance is
-    // tight enough that it may not. There is no rung to drop back to, so it
-    // takes what room there is.
-    let entry_radius = (lock_radius + descent).min(ceiling).max(lock_radius);
+    let (turns, entry_radius) = if extent == LeadOutExtent::Fill {
+        fill_run_out(lock_radius, ceiling, inner_gap, turn_separation)
+    } else {
+        // The innermost gap is fixed and each turn outside it is wider, so
+        // another turn asks for room outward rather than a share of what the
+        // band has. A turn that will not fit under the ceiling drops the band
+        // back a rung rather than squeezing its gaps.
+        let requested = 1.0 + extent.bonus_turns();
+        let mut turns = 1.0_f64;
+        let mut descent = lead_out_descent(1.0, inner_gap, turn_separation);
+
+        let mut candidate = 2.0;
+        while candidate <= requested {
+            let reach = lead_out_descent(candidate, inner_gap, turn_separation);
+            if lock_radius + reach > ceiling {
+                break;
+            }
+            turns = candidate;
+            descent = reach;
+            candidate += 1.0;
+        }
+
+        // A single-turn band still has to fit, and on a 7" the label
+        // clearance is tight enough that it may not. There is no rung to drop
+        // back to, so it takes what room there is.
+        (turns, (lock_radius + descent).min(ceiling).max(lock_radius))
+    };
 
     Ok(LeadOutGeometry {
         lock_radius,
@@ -1809,11 +1869,12 @@ pub fn lead_out_geometry_with_extent(
     })
 }
 
-/// What a profile's lead-out actually holds, in bytes, before the declared
-/// capacity is applied.
+/// The traced capacity of the lead-out of a profile, in bytes, before the
+/// declared capacity is applied.
 ///
-/// The difference between this and [`LEAD_OUT_BYTE_CAPACITY`] is the band's
-/// surplus: groove that is cut, addressable, and deliberately not promised.
+/// The difference between this value and [`LEAD_OUT_BYTE_CAPACITY`] is the
+/// surplus of the band: groove that is cut and addressable, and that the format
+/// leaves unpromised.
 pub fn lead_out_traced_byte_capacity(
     width: usize,
     height: usize,
@@ -1827,14 +1888,15 @@ pub fn lead_out_traced_byte_capacity(
 /// The lead-out as one ordered pixel sequence, and the index the lock starts
 /// at.
 ///
-/// It is one groove. The head feeds in at [`RUN_OUT_TURN_SEPARATION_MM`] once
-/// the programme is over, and part-way through the last revolution the feed is
-/// switched off: the groove stops descending, becomes a circle, and arrives
-/// back at the point the feed died.
+/// The band is one groove. The head feeds in at
+/// [`RUN_OUT_TURN_SEPARATION_MM`] after the programme ends. Part way through
+/// the last revolution the feed switches off, the groove stops descending,
+/// becomes a circle, and returns to the point at which the feed stopped.
 ///
-/// The returned index is where the run-out gives way to the lock, and it is
-/// also where the sequence wraps. Walking off the end lands there rather than
-/// at zero — the run-out is walked once, the lock forever.
+/// The returned index is the boundary between the run-out and the lock, and the
+/// sequence wraps at that index. A reader that passes the end of the sequence
+/// returns to that index. A reader therefore passes the run-out once and
+/// repeats the lock.
 pub fn build_lead_out_indices(
     width: usize,
     height: usize,
@@ -1892,15 +1954,14 @@ pub fn build_lead_out_indices_with_extent(
     let turn_count = (geometry.turns.max(1.0)) as usize;
     let total_sweep = turn_count as f64 * 2.0 * PI;
 
-    // The gaps the geometry resolved, outermost first, scaled to whatever
-    // descent actually survived the ceiling. Each turn falls at its own
-    // constant pitch — the taper is between turns, never within one — so the
-    // groove is still descending at full rate when it reaches the lock, and
-    // the lock groove is the only thing that draws the lock ring. An eased
-    // arrival flattens onto that radius part way through its last revolution
-    // and draws the ring itself, and the real lock groove, landing on pixels
-    // already taken, disappears. A lathe does not ease into a lock groove
-    // either: it cuts at pitch and the feed is switched off.
+    // The gaps that the geometry resolved, outermost first, scaled to the
+    // descent that the ceiling left. Each turn falls at its own constant pitch,
+    // because the taper applies between turns. The groove therefore descends at
+    // full rate when it reaches the lock, and the lock groove alone draws the
+    // lock ring. An eased arrival flattens onto that radius part way through
+    // its last revolution and draws the ring itself. The lock groove then lands
+    // on taken pixels and disappears. A lathe also cuts at pitch up to the lock
+    // groove, and then it switches the feed off.
     let gaps = geometry.gaps();
     let gap_total: f64 = gaps.iter().sum::<f64>().max(1e-9);
 
@@ -2898,9 +2959,9 @@ pub fn inspect_record_stream(document: &RecordStream) -> Result<RecordStreamInsp
     })
 }
 
-/// AAD for chunk encryption (final compact format): just a domain separator
-/// over the exact BRS1 metadata bytes. There is no per-chunk index, count,
-/// or descriptor index to bind, since none of those are stored on the wire.
+/// AAD for chunk encryption, in the final compact format: a domain separator
+/// over the exact BRS1 metadata bytes. The wire holds no per-chunk index, count
+/// or descriptor index, so the AAD binds the metadata bytes alone.
 pub fn chunk_encryption_aad(metadata_bytes: &[u8]) -> Result<Vec<u8>> {
     let metadata_len = u32::try_from(metadata_bytes.len()).context("metadata exceeds u32")?;
 
@@ -3138,7 +3199,7 @@ pub fn chunk_stream_payload_bytes(document: &ChunkStream) -> Vec<u8> {
     record_stream_payload_bytes(document)
 }
 
-/// Kind of an ordered programme region in the pre-decode programme map.
+/// The type of an ordered programme region in the pre-decode programme map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProgrammeRegionKind {
@@ -3152,15 +3213,17 @@ pub enum ProgrammeRegionKind {
 /// One ordered region of the programme with exact PCM sample boundaries,
 /// recoverable without neural/PCM decoding.
 ///
-/// `radial_start_normalized`/`radial_end_normalized` are the actual radial
-/// positions of the region's payload pixels along the rendered Archimedean
-/// spiral: `0.0` is the outer edge of the programme playback groove and `1.0`
-/// the inner edge. They are derived from the equal-area spiral that the renderer
-/// fills (each carrier pixel is one unit of annulus area, traversed outer→inner),
-/// so they are true radial progress — not the encoded-byte fraction.
+/// `radial_start_normalized` and `radial_end_normalized` give the radial
+/// positions of the payload pixels of the region along the rendered Archimedean
+/// spiral. `0.0` is the outer edge of the programme playback groove, and `1.0`
+/// is the inner edge. Both values come from the equal-area spiral that the
+/// renderer fills, in which each carrier pixel is one unit of annulus area,
+/// traversed from the outer edge inward. Both values are therefore radial
+/// progress.
 ///
-/// `byte_fraction_start`/`byte_fraction_end` are the raw carrier-byte fractions,
-/// retained only as a diagnostic; they must not be used as a radial coordinate.
+/// `byte_fraction_start` and `byte_fraction_end` give the raw carrier-byte
+/// fractions, as a diagnostic. Use the radial fields above for a radial
+/// coordinate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgrammeRegion {
@@ -3335,9 +3398,10 @@ pub fn build_programme_map(
         .find_map(|d| d.channels)
         .context("record stream has no channel count")?;
 
-    // Byte fraction == carrier-pixel fraction (3 bytes/pixel). The true radial
-    // position comes from the equal-area spiral the renderer fills; without a
-    // known profile we degrade to the linear pixel fraction.
+    // The byte fraction equals the carrier-pixel fraction, at 3 bytes per
+    // pixel. The radial position comes from the equal-area spiral that the
+    // renderer fills. For an unknown profile, this code falls back to the
+    // linear pixel fraction.
     let total_payload_bytes = payload_bytes.len().max(1) as f64;
     let byte_fraction_of =
         |byte_offset: usize| (byte_offset as f64 / total_payload_bytes).clamp(0.0, 1.0);
@@ -3912,9 +3976,9 @@ mod tests {
 
     #[test]
     fn musical_tracks_may_be_separated_by_an_explicit_track_gap() {
-        // The track-gap entry is an ordinary ECDC payload entry, just like
-        // the track entries: classification comes entirely from explicit
-        // track_gaps metadata, never from inspecting the payload container.
+        // The track-gap entry is an ordinary ECDC payload entry, as the track
+        // entries are. The explicit track_gaps metadata gives the
+        // classification. The payload container carries no such marker.
         let metadata = RecordStreamMetadata {
             version: RECORD_STREAM_METADATA_VERSION,
             encrypted: false,
@@ -4381,12 +4445,12 @@ mod tests {
         let base = with(VariPitchPlacement::Even, 0.0);
         let inner = with(VariPitchPlacement::Inner, 0.40);
         let outer = with(VariPitchPlacement::Outer, 0.40);
-        // At the rim (theta 0) the inner fire is silent; at the label the
-        // outer fire is.
+        // At the rim, which is theta 0, the inner fire holds the base pitch.
+        // At the label, the outer fire holds the base pitch.
         assert!((inner.pitch_factor(0.0) - base.pitch_factor(0.0)).abs() < 1e-9);
         assert!((outer.pitch_factor(sweep) - base.pitch_factor(sweep)).abs() < 1e-9);
-        // And inside its band the fire actually burns: the swing away from
-        // 1.0 exceeds what the base alone can reach.
+        // Inside its band the fire adds swing: the departure from 1.0 exceeds
+        // the departure that the base reaches.
         let deep_inner = (0..200)
             .map(|i| (inner.pitch_factor(sweep * (0.85 + 0.15 * i as f64 / 200.0)) - 1.0).abs())
             .fold(0.0_f64, f64::max);
@@ -4403,8 +4467,9 @@ mod tests {
         let base = vari_pitch_params(&vari(0.3, 0xAAAA_BBBB_0000_0000, 0.5), sweep).unwrap();
         let nudged = vari_pitch_params(&vari(0.3, 0xAAAA_BBBB_FFFF_FFFF, 0.5), sweep).unwrap();
 
-        // Same high bits: the character holds — periods within the ±2%
-        // micro jitter of each other, phases within the small drift.
+        // The high bits match, so the character holds. The periods stay within
+        // the ±2% micro jitter of each other, and the phases stay within the
+        // small drift.
         assert!((base.period_1 / nudged.period_1 - 1.0).abs() < 0.05);
         assert!((base.period_2 / nudged.period_2 - 1.0).abs() < 0.05);
         assert!((base.phase_1 - nudged.phase_1).abs() < 0.15);
@@ -4847,9 +4912,9 @@ mod lead_out_tests {
                     .round()
                     .max(1.0);
 
-                // The innermost gap is the tightest the band has. The
-                // geometry declares it, but a ceiling can scale the whole
-                // ladder down, so check what actually gets drawn.
+                // The innermost gap is the tightest gap in the band. The
+                // geometry declares it, and a ceiling can scale the whole
+                // ladder down, so check the drawn result.
                 let gaps = lead_out.gaps();
                 let declared: f64 = gaps.iter().sum::<f64>().max(1e-9);
                 let tightest =
@@ -4864,8 +4929,98 @@ mod lead_out_tests {
         }
     }
 
-    /// A cut that ran deeper than the cap gets a shorter run-out, which is
-    /// the whole of what makes the band dynamic.
+    /// The fine ladder is a header. At every cut radius, the ladder above the
+    /// run-out holds at most [`DEADWAX_MAX_TURNS`] turns at the feed of the
+    /// lathe. The run-out takes the remaining space.
+    #[test]
+    fn the_deadwax_never_runs_past_its_header() {
+        for profile in known_record_profile_names() {
+            let geometry = describe_record_profile(profile).expect("profile resolves");
+            let band =
+                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let separation = deadwax_turn_separation_px(profile).expect("profile has a feed");
+
+            for fraction in [1.0_f64, 0.67, 0.5, 0.33, 0.25, 0.15] {
+                let cut = geometry.payload_outer_radius - (band * fraction) as i32;
+                let lead_out = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
+                    .expect("the band resolves");
+                // The band the renderer cuts: from the cut down to the
+                // run-out's outermost turn, cleared by the separation floor.
+                let turns = ((cut as f64 - lead_out.entry_radius - MIN_TURN_SEPARATION_PX)
+                    .max(0.0))
+                    / separation;
+
+                assert!(
+                    turns <= DEADWAX_MAX_TURNS + 0.001,
+                    "{profile} at {fraction} leaves {turns:.1} turns of deadwax, past the \
+                     {DEADWAX_MAX_TURNS} turn header"
+                );
+            }
+        }
+    }
+
+    /// And the room the header does not take is the run-out's: the band
+    /// reaches the ceiling rather than stopping a gap short of it and leaving
+    /// the difference to the fine feed.
+    #[test]
+    fn the_filled_band_takes_the_room_the_cut_left() {
+        for profile in known_record_profile_names() {
+            let geometry = describe_record_profile(profile).expect("profile resolves");
+            let band =
+                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let cut = geometry.payload_outer_radius - (band * 0.33) as i32;
+
+            let filled = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
+                .expect("the band resolves");
+            let widest = lead_out_geometry_with_extent(
+                profile,
+                Some(cut),
+                LeadOutExtent::ExtraWide,
+            )
+            .expect("the band resolves");
+
+            assert!(
+                filled.entry_radius >= widest.entry_radius,
+                "{profile} filled to {:.1}, inside the four-ring band at {:.1}",
+                filled.entry_radius,
+                widest.entry_radius
+            );
+            assert!(
+                filled.entry_radius <= cut as f64 - MIN_TURN_SEPARATION_PX,
+                "{profile} filled into the programme's own groove"
+            );
+            assert_eq!(
+                filled.lock_radius, widest.lock_radius,
+                "{profile} moved its lock groove to fill"
+            );
+        }
+    }
+
+    /// The taper opens the band out of the lock and the lathe's feed closes
+    /// the argument. Unclamped it is exponential, and a band long enough to
+    /// cross a short side would be four rings and a bare disc above them.
+    #[test]
+    fn no_run_out_gap_is_wider_than_the_lathes_feed() {
+        for profile in known_record_profile_names() {
+            let geometry = describe_record_profile(profile).expect("profile resolves");
+            let band =
+                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let cut = geometry.payload_outer_radius - (band * 0.33) as i32;
+            let lead_out = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
+                .expect("the band resolves");
+
+            for gap in lead_out.gaps() {
+                assert!(
+                    gap <= lead_out.turn_separation + 0.001,
+                    "{profile} opens a {gap:.2} px gap, past the {:.2} px feed",
+                    lead_out.turn_separation
+                );
+            }
+        }
+    }
+
+    /// A cut that ran deeper than the cap gets a shorter run-out. This
+    /// relation makes the band follow the cut.
     #[test]
     fn a_deep_cut_shortens_the_run_out() {
         let capped = lead_out_geometry("lp", None).expect("lp has a lead-out");

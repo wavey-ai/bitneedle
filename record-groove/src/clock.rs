@@ -5,25 +5,24 @@
 
 //! Clockface tones.
 //!
-//! A **clock** divides the disc into equal angular slots, each cut in its
-//! own tone, the way a roulette wheel is divided into pockets. Which slot a
-//! pixel belongs to is a function of where it sits on the disc — its angle
-//! about the centre, in the record's own frame — and of its index in the
-//! groove. Both are things a decoder has once it has walked the spiral, so
-//! nothing about the assignment is written down beyond the wheel itself:
-//! the slot tones, where slot zero starts, and whether neighbours blend.
+//! A **clock** divides the disc into equal angular slots. Each slot is a
+//! pocket, and each pocket is cut in its own tone. The slot of a pixel follows
+//! from two values: its angle about the centre, in the frame of the record, and
+//! its index in the groove. A decoder holds both values once it has walked the
+//! spiral. The record therefore carries the wheel alone: the slot tones, the
+//! start angle of slot zero, and the blend flag.
 //!
-//! Capacity is untouched. Every slot's palette carries the same bits per
-//! pixel and the bit stream runs continuously across slots, so the groove is
-//! exactly as long as a single-tone cut; only the colour each pixel is
-//! looked up in changes.
+//! A clock holds the capacity of a single-tone cut. Every slot palette carries
+//! the same bits per pixel, and the bit stream runs continuously across the
+//! slots, so the groove has the length of a single-tone cut. The palette that
+//! each pixel is looked up in changes with the pocket.
 //!
-//! **Blending** never makes a new palette. A pixel between two slot centres
-//! takes one neighbour's tone or the other, chosen by a hash of its groove
-//! index against how far toward the boundary it sits. Every toned pixel is
-//! noise anyway — the eye reads the palette's mean — so mixing two palettes
-//! pixel by pixel reads as a continuum from one slot's tone to the next,
-//! and the decoder recomputes the same choice from the same index.
+//! **Blending** selects between two existing palettes. A pixel between two slot
+//! centres takes the tone of one neighbour or the other. A hash of its groove
+//! index, against its distance toward the boundary, makes that choice. Every
+//! toned pixel is noise, and the eye reads the mean of a palette, so a pixel by
+//! pixel mix of two palettes gives a continuous surface from one slot tone to
+//! the next. The decoder recomputes the same choice from the same index.
 
 use crate::{ToneOrdering, TonedConfig, TonedPalette};
 use anyhow::{bail, Context, Result};
@@ -37,10 +36,10 @@ pub const TONE_CLOCK_MAX_RINGS: usize = 8;
 /// Rotation is carried in hundredths of a degree so both sides derive the
 /// same radians from the same integer.
 pub const TONE_CLOCK_ROTATION_UNITS_PER_TURN: u32 = 36_000;
-/// The band the rings divide is carried in ten-thousandths of the half-side,
-/// for the same reason the rotation is an integer: both sides have to derive
-/// the same boundary from the same number, and a float written down twice is
-/// two numbers.
+/// The band that the rings divide is carried in ten-thousandths of the
+/// half-side, for the reason that the rotation is an integer: both sides derive
+/// the same boundary from the same number. A float written twice can give two
+/// values.
 pub const TONE_CLOCK_SPAN_UNITS: u32 = 10_000;
 
 /// One pocket of the wheel: the tone the track is cut in there, and the
@@ -55,34 +54,33 @@ pub struct ClockSlot {
 
 /// The wheel: everything a decoder needs to put each pixel in its pocket.
 ///
-/// A wheel divides the groove band twice. **Rings** cut it across, into
-/// equal bands of radius; **slots** cut each ring around, into equal wedges.
-/// A ring near the rim has twice the circumference of one near the label and
-/// can hold twice the detail before its pockets are narrower than the art in
-/// them, so each ring carries its own slot count — the house wheel is eight
+/// A wheel divides the groove band twice. **Rings** divide it by radius, into
+/// equal bands. **Slots** divide each ring by angle, into equal wedges. A ring
+/// near the rim has twice the circumference of a ring near the label, so it
+/// holds twice the detail before its pockets are narrower than the art in them.
+/// Each ring therefore carries its own slot count, and the house wheel is eight
 /// inside and sixteen outside.
 ///
-/// A wheel of one ring is a wheel of wedges running the whole depth of the
-/// band, which is every clock cut before rings existed, and it is decided
-/// pixel for pixel exactly as it was.
+/// A wheel of one ring is a wheel of wedges over the whole depth of the band.
+/// Every clock cut before rings existed has that form, and this code decides
+/// each of its pixels as the earlier code did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToneClock {
     /// Where each ring's slot zero begins, clockwise from twelve o'clock, in
     /// hundredths of a degree, innermost first.
     ///
-    /// One per ring rather than one for the wheel, because the rings are
-    /// turned at different rates: a reflection is not a rigid stencil laid
-    /// over a record, and two rings locked together read as one stamped
-    /// shape however far it is spun. Turning the inner ring slower means the
-    /// alignment between the rings changes with every degree of spin, which
-    /// is what makes one pressing's sheen unlike another's.
+    /// The wheel carries one rotation per ring, because the rings turn at
+    /// different rates. Two rings locked together read as one stamped shape at
+    /// every rotation. A slower inner ring changes the alignment between the
+    /// rings at every degree of spin, which gives each pressing its own sheen.
     ///
-    /// Shorter than `rings` is allowed and means the rest take the last
-    /// given, so a wheel that wants one rotation can say so once.
+    /// A list shorter than `rings` is valid. The remaining rings take the last
+    /// value given, so a wheel with one rotation states that value once.
     pub rotation_centidegrees: Vec<u16>,
-    /// Whether a pixel near a boundary may take the neighbouring pocket's
-    /// tone, in proportion to how near it is. Off, pockets are hard-edged.
-    /// Both boundaries: around, and across.
+    /// Whether a pixel near a boundary may take the tone of the adjacent
+    /// pocket, in proportion to its distance from that boundary. With the flag
+    /// clear, each pocket has a hard edge. The flag covers both boundaries: the
+    /// angular boundary and the radial boundary.
     pub blend: bool,
     /// Shared by every pocket: the bit stream is one stream.
     pub bits_per_pixel: u32,
@@ -90,9 +88,9 @@ pub struct ToneClock {
     /// The slots in each ring, innermost first. `[8, 16]` is eight pockets
     /// across the inside of the band and sixteen around the outside.
     pub rings: Vec<u32>,
-    /// The band the rings divide, in ten-thousandths of the half-side:
-    /// where the groove starts and where it ends. Outside it a pixel takes
-    /// the nearest ring, which is what the ends of a spiral want anyway.
+    /// The band that the rings divide, in ten-thousandths of the half-side. It
+    /// holds the start radius and the end radius of the groove. A pixel outside
+    /// that band takes the nearest ring.
     pub span: (u16, u16),
     /// Every pocket's tones: innermost ring first, and clockwise from
     /// twelve within each ring. `rings` says where each ring's run begins.
@@ -195,11 +193,10 @@ impl ToneClock {
     /// The ring the pixel at groove index `pixel_index`, sitting `away` from
     /// the centre (see [`pixel_radius`]), is cut in.
     ///
-    /// The rings divide the band by radius, in equal widths: a ring is a
-    /// band of the record, and the colour it is cut in was read off a band
-    /// of the picture the same width. Outside the band a pixel takes the
-    /// nearest ring — a spiral overruns its nominal ends by a hair, and a
-    /// hair is not a reason to have no pocket.
+    /// The rings divide the band by radius, in equal widths. A ring is a band
+    /// of the record, and its colour was read off a band of the picture of the
+    /// same width. A pixel outside the band takes the nearest ring, because a
+    /// spiral runs a short distance past its nominal ends.
     pub fn ring_index(&self, pixel_index: usize, away: f64) -> usize {
         let count = self.rings.len();
         if count == 1 {
@@ -210,8 +207,9 @@ impl ToneClock {
         let position = ((away - inner) / across).clamp(0.0, 1.0) * count as f64;
         let mut ring = (position.floor() as usize).min(count - 1);
         if self.blend {
-            // As around, so across — but the ends do not wrap: there is no
-            // ring outside the outermost, and the innermost is the label.
+            // The radial blend follows the angular blend. The ends stay
+            // unwrapped: the outermost ring has no ring outside it, and the
+            // label sits inside the innermost ring.
             let toward_edge = position - ring as f64 - 0.5;
             if blend_unit_across(pixel_index) < toward_edge.abs() {
                 if toward_edge > 0.0 && ring + 1 < count {
@@ -232,9 +230,10 @@ impl ToneClock {
         let position = (angle - self.rotation(ring)).rem_euclid(TAU) / width;
         let mut slot = (position.floor() as usize).min(count - 1);
         if self.blend {
-            // Zero at the slot's centre, ±½ at its edges; the chance of
-            // taking the neighbour on that side grows linearly to even odds
-            // at the boundary, so the two sides of a boundary agree.
+            // The value is zero at the centre of the slot and ±½ at its
+            // edges. The chance of taking the neighbour on that side rises
+            // linearly to even odds at the boundary, so both sides of a
+            // boundary agree.
             let toward_edge = position - slot as f64 - 0.5;
             if blend_unit(pixel_index) < toward_edge.abs() {
                 slot = if toward_edge > 0.0 {
@@ -311,16 +310,16 @@ pub fn pixel_angle(x: f64, y: f64, center_x: f64, center_y: f64) -> f64 {
 /// A pixel's distance from the disc's centre, as a fraction of the
 /// half-side — the same frame [`ToneClock::span`] is written in.
 ///
-/// The same two numbers [`pixel_angle`] is derived from, read the other way,
-/// which is why rings cost the encoder and the decoder nothing to find: both
-/// already had the pixel's place on the raster in hand.
+/// This value comes from the two numbers that [`pixel_angle`] uses. The encoder
+/// and the decoder each hold the raster position of the pixel already, so a
+/// ring lookup adds no further work.
 pub fn pixel_radius(x: f64, y: f64, center_x: f64, center_y: f64) -> f64 {
     (x - center_x).hypot(center_y - y) / center_x.min(center_y).max(f64::EPSILON)
 }
 
-/// A unit in `[0, 1)` from a groove index. splitmix64's finaliser, frozen:
-/// this decides which side of a blend a pixel lands on, so it can never
-/// change without every blended record already cut becoming unreadable.
+/// A unit in `[0, 1)` from a groove index, through the splitmix64 finalizer.
+/// This function is frozen. It decides the side of a blend that a pixel lands
+/// on, and a change to it makes every blended record already cut unreadable.
 fn blend_unit(pixel_index: usize) -> f64 {
     let mut z = (pixel_index as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -331,12 +330,11 @@ fn blend_unit(pixel_index: usize) -> f64 {
 
 /// The same, for the ring a pixel lands in, and independent of it.
 ///
-/// A second stream rather than the same one: if one draw decided both axes,
-/// a pixel that took its neighbour around would take its neighbour across as
-/// well, and the two boundaries would blend along the diagonal instead of
-/// each in its own direction. Frozen for the same reason as the first — it
-/// decides which pocket a pixel is in, and a record already cut cannot be
-/// asked to change its mind.
+/// This function is a second stream. One draw for both axes would make a pixel
+/// that took its angular neighbour take its radial neighbour also, and the two
+/// boundaries would then blend along the diagonal. This function is frozen for
+/// the reason that the first one is: it decides the pocket of a pixel, and a
+/// record already cut holds its pixels.
 fn blend_unit_across(pixel_index: usize) -> f64 {
     let mut z = (pixel_index as u64).wrapping_add(0xD1B5_4A32_D192_ED03);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -367,30 +365,29 @@ fn pack_words(bytes: &[u8], bits_per_pixel: u32) -> Vec<u32> {
     words
 }
 
-/// What a long job asks before it does the next expensive thing.
+/// The callback that a long job calls before each expensive step.
 ///
-/// A wheel's cost is one palette per pocket, and a palette is a fold over
-/// the whole sRGB cube — so a pocket is the natural place to ask whether
-/// anybody still wants this. Returning `true` stops the encode with
-/// [`CANCELLED`], which callers can tell apart from a real failure.
+/// A wheel costs one palette per pocket, and a palette is a fold over the whole
+/// sRGB cube. The encoder therefore calls this callback once per pocket. A
+/// return of `true` stops the encode with [`CANCELLED`], which a caller
+/// distinguishes from a failure.
 pub type Stop<'a> = &'a (dyn Fn() -> bool + 'a);
 
-/// What a stopped render says. A cancellation is not a fault: a caller that
-/// asked for a cut and then asked for a different one wants this and should
-/// not log it as an error.
+/// The error that a stopped render returns. A caller that asked for a cut and
+/// then asked for a different cut receives this error, and it reports the stop
+/// rather than a failure.
 pub const CANCELLED: &str = "render cancelled";
 
-/// A [`Stop`] that never stops.
+/// A [`Stop`] that always returns `false`.
 pub fn never() -> impl Fn() -> bool {
     || false
 }
 
 /// Encodes `bytes` as clock-toned pixels. `angles[i]` is the angle at which
-/// pixel `i` will sit (see [`pixel_angle`]); a caller that has placed fewer
-/// pixels than the payload needs — an overflowing cut — passes only those,
-/// and gets only those back. Palettes are built one at a time, each over
-/// all the pixels that use it, so a wheel of many pockets never has more
-/// than one palette live.
+/// pixel `i` sits. See [`pixel_angle`]. A caller with fewer placed pixels than
+/// the payload needs, which is an overflowing cut, passes those pixels and
+/// receives those pixels. This function builds one palette at a time, over all
+/// the pixels that use it, so one palette is resident at any moment.
 pub fn encode_toned_clock(
     bytes: &[u8],
     clock: &ToneClock,
@@ -402,9 +399,9 @@ pub fn encode_toned_clock(
 
 /// The same, stopping when `stop` says to.
 ///
-/// Asked once per pocket, before its palette is built. A wheel of
-/// twenty-four pockets is twenty-four chances to give up, which on a hand
-/// that has moved on is twenty-three palettes not built.
+/// This function calls `stop` once per pocket, before it builds that palette.
+/// A wheel of twenty-four pockets therefore gives twenty-four stop points, and
+/// a stop at the first point saves twenty-three palette builds.
 pub fn encode_toned_clock_until(
     bytes: &[u8],
     clock: &ToneClock,
@@ -454,10 +451,9 @@ pub fn encode_toned_clock_until(
     Ok(rgba)
 }
 
-/// Recovers the bytes from clock-toned pixels. `angles[i]` is where pixel
-/// `i` of `rgba` sits; fully transparent pixels are not expected here — the
-/// caller has already lifted exactly the groove's pixels. `byte_length`
-/// truncates the padded tail.
+/// Recovers the bytes from clock-toned pixels. `angles[i]` is the position of
+/// pixel `i` of `rgba`. The caller lifts the groove pixels alone, so every
+/// pixel here is opaque. `byte_length` truncates the padded tail.
 pub fn decode_toned_clock(
     rgba: &[u8],
     clock: &ToneClock,
@@ -537,8 +533,8 @@ pub fn decode_toned_clock(
 }
 
 /// Which palette each of the first `angles.len()` pixels uses, as
-/// `cell * 2 + gap`. Kept for the tests: the loops below group by key
-/// instead of scanning per key (see `pixels_by_key`).
+/// `cell * 2 + gap`. The tests use this function. The loops below group by key
+/// instead of scanning per key. See `pixels_by_key`.
 #[cfg(test)]
 fn distinct_keys(keys: &[u16]) -> Vec<u16> {
     let mut seen = [false; 2 * TONE_CLOCK_MAX_CELLS];
@@ -550,11 +546,10 @@ fn distinct_keys(keys: &[u16]) -> Vec<u16> {
 
 /// Pixel indices grouped by palette key, in ascending key order.
 ///
-/// The encode and decode loops below used to find each key's pixels by
-/// scanning the whole key list once per key — thirty full walks for a
-/// thirty-pocket wheel. One counting sort walks it once and hands each key
-/// its own slice instead. What lands in each pixel is unchanged; only the
-/// order the pixels are visited in is.
+/// The encode and decode loops below found the pixels of each key by scanning
+/// the whole key list once per key, which is thirty walks for a thirty-pocket
+/// wheel. One counting sort walks the list once and gives each key its own
+/// slice. Each pixel keeps its value, and the visit order changes.
 fn pixels_by_key(keys: &[u16]) -> (Vec<usize>, Vec<(u16, usize, usize)>) {
     const SLOTS: usize = 2 * TONE_CLOCK_MAX_CELLS;
     let mut counts = [0usize; SLOTS];
@@ -589,8 +584,8 @@ mod tests {
     use super::*;
 
     fn wheel(slots: usize, blend: bool) -> ToneClock {
-        // Small palettes so the tests stay quick: a luma window wide enough
-        // for 2^12 colours around each hue.
+        // Small palettes keep the tests quick. The luma window holds 2^12
+        // colours around each hue.
         let hues: Vec<[u8; 3]> = (0..slots)
             .map(|k| {
                 let t = k as f64 / slots as f64;
@@ -621,23 +616,35 @@ mod tests {
         }
     }
 
-    fn payload(len: usize) -> Vec<u8> {
-        let mut state = 0xfeed_face_cafe_beefu64;
-        (0..len)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                (state >> 56) as u8
-            })
-            .collect()
+    /// `len` bytes of real codec output, from the golden record's ECDC.
+    ///
+    /// A wheel carries the content of the record, which is EnCodec output.
+    /// Those bytes are high-entropy, and their colours cover the palette. A
+    /// counter or a fill clusters its bytes, and it would leave a pocket that
+    /// confuses two adjacent colours untested. The sweeps therefore use real
+    /// codec output.
+    ///
+    /// The sample starts inside the file rather than at its head, because the
+    /// first bytes of an ECDC are its header and the groove carries the data of
+    /// the codec.
+    fn codec_bytes(len: usize) -> Vec<u8> {
+        let ecdc = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.ecdc"
+        ))
+        .expect("the golden ECDC is checked in at the root of the repo");
+        assert!(ecdc.len() > 64 + len, "the golden ECDC is shorter than the slice asked for");
+        ecdc[64..64 + len].to_vec()
     }
 
     fn angles(count: usize) -> Vec<f64> {
-        // A spiral's worth of angles: many turns, so every slot is visited.
+        // Angles for a whole spiral, over many turns, so the sweep visits
+        // every slot.
         (0..count).map(|i| (i as f64 * 0.37).rem_euclid(TAU)).collect()
     }
 
-    /// A spiral's worth of radii: from the rim inward, as a cut runs, so a
-    /// wheel with rings has every one of them visited.
+    /// Radii for a whole spiral, from the rim inward, as a cut runs, so the
+    /// sweep visits every ring of a wheel.
     fn radii(count: usize, clock: &ToneClock) -> Vec<f64> {
         let (inner, outer) = clock.band();
         (0..count)
@@ -657,7 +664,7 @@ mod tests {
     fn round_trips_with_gaps_and_blend() {
         for blend in [false, true] {
             let clock = wheel(8, blend);
-            let bytes = payload(2_003);
+            let bytes = codec_bytes(2_003);
             let angles = angles(clock.pixel_count(bytes.len()));
             let radii = radii(angles.len(), &clock);
             let rgba = encode_toned_clock(&bytes, &clock, &angles, &radii).unwrap();
@@ -668,13 +675,13 @@ mod tests {
         }
     }
 
-    /// The house wheel: eight pockets across the inside of the band and
-    /// sixteen around the outside, and the payload comes back out of it.
+    /// The house wheel holds eight pockets across the inside of the band and
+    /// sixteen around the outside. The payload round-trips through it.
     #[test]
     fn a_ringed_wheel_round_trips() {
         for blend in [false, true] {
             let clock = ringed(vec![8, 16], blend);
-            let bytes = payload(3_001);
+            let bytes = codec_bytes(3_001);
             let angles = angles(clock.pixel_count(bytes.len()));
             let radii = radii(angles.len(), &clock);
             let rgba = encode_toned_clock(&bytes, &clock, &angles, &radii).unwrap();
@@ -694,19 +701,19 @@ mod tests {
         let just_outside = outer - (outer - inner) * 0.01;
         assert_eq!(clock.ring_index(0, just_inside), 0);
         assert_eq!(clock.ring_index(0, just_outside), 1);
-        // Ring zero's pockets are the first eight; ring one's the next
+        // Ring zero holds the first eight pockets. Ring one holds the next
         // sixteen, and its slot zero is pocket eight.
         assert_eq!(clock.ring_offset(0), 0);
         assert_eq!(clock.ring_offset(1), 8);
         assert_eq!(clock.cell_index(0, clock.rotation(1) + 0.01, just_outside), 8);
-        // A spiral runs past its nominal ends by a hair; the hair still has
-        // a pocket, and it is the nearest one.
+        // A spiral runs a short distance past its nominal ends. Those pixels
+        // take the nearest pocket.
         assert_eq!(clock.ring_index(0, 0.0), 0);
         assert_eq!(clock.ring_index(0, 1.0), 1);
     }
 
-    /// A wheel of one ring decides every pixel exactly as it did before
-    /// rings existed — the record already cut cannot change its mind.
+    /// A wheel of one ring decides every pixel as the code decided it before
+    /// rings existed, so a record already cut keeps its pixels.
     #[test]
     fn one_ring_is_the_old_wheel_pixel_for_pixel() {
         let clock = wheel(8, true);
@@ -719,8 +726,8 @@ mod tests {
         }
     }
 
-    /// The two blends are independent: a pixel that takes its neighbour
-    /// around does not thereby take its neighbour across.
+    /// The two blends are independent. A pixel that takes its angular
+    /// neighbour draws its radial neighbour separately.
     #[test]
     fn the_two_blends_do_not_move_together() {
         let together = (0..10_000)
@@ -729,7 +736,8 @@ mod tests {
         assert!((4_700..5_300).contains(&together), "{together} of 10000 agreed");
     }
 
-    /// Across, as around: even odds at the boundary between two rings.
+    /// The radial blend matches the angular blend: even odds at the boundary
+    /// between two rings.
     #[test]
     fn the_ring_blend_is_even_at_the_boundary() {
         let clock = ringed(vec![8, 16], true);
@@ -737,13 +745,13 @@ mod tests {
         let middle = (inner + outer) / 2.0;
         let crossed = (0..2_000).filter(|&i| clock.ring_index(i, middle) == 1).count();
         assert!((800..1_200).contains(&crossed), "{crossed} of 2000 crossed");
-        // And nothing crosses at a ring's own centre.
+        // At the centre of a ring, every pixel keeps that ring.
         let heart = inner + (outer - inner) * 0.25;
         assert!((0..2_000).all(|i| clock.ring_index(i, heart) == 0));
     }
 
-    /// Nothing blends off the outside of the wheel: there is no ring past
-    /// the rim to take a pixel, and none inside the label either.
+    /// The blend stays inside the wheel. The rim has no ring outside it, and
+    /// the label has no ring inside it.
     #[test]
     fn the_ends_of_the_band_do_not_wrap() {
         let clock = ringed(vec![4, 4, 4], true);
@@ -769,10 +777,11 @@ mod tests {
     fn hard_edges_follow_rotation() {
         let mut clock = wheel(4, false);
         clock.rotation_centidegrees = vec![0];
-        // Just past twelve is slot 0; just past three is slot 1.
+        // An angle above twelve o'clock is slot 0. An angle above three
+        // o'clock is slot 1.
         assert_eq!(clock.slot_index(0, 0.01, 0), 0);
         assert_eq!(clock.slot_index(0, FRAC_PI_2 + 0.01, 0), 1);
-        // Spin the wheel a quarter turn: what was slot 1 is now slot 0.
+        // A quarter turn of the wheel moves slot 1 to slot 0.
         clock.rotation_centidegrees = vec![9_000];
         assert_eq!(clock.slot_index(0, FRAC_PI_2 + 0.01, 0), 0);
         assert_eq!(clock.slot_index(0, 0.01, 0), 3);

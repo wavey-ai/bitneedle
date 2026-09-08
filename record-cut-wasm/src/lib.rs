@@ -1091,9 +1091,9 @@ pub fn render_payload_entries_with_descriptor_to_png_native_with_progress(
 #[serde(rename_all = "camelCase")]
 struct ProgrammeTrackInputJson {
     title: String,
-    /// Contiguous, ascending ECDC payload-entry indexes (into the supplied
-    /// entry array) that this musical track covers. Inter-track gaps are
-    /// separate ECDC entries that are simply *not* referenced by any track.
+    /// Contiguous, ascending ECDC payload-entry indexes, into the supplied
+    /// entry array, that this musical track covers. An inter-track gap is a
+    /// separate ECDC entry, and no track references it.
     payload_indexes: Vec<usize>,
 }
 
@@ -3145,9 +3145,9 @@ mod lab_check {
         }
     }
 
-    /// Where the time in a cut actually goes, by difference: a single-tone
-    /// cut is everything but the wheel, and each wheel above it adds only
-    /// its own palettes.
+    /// The time distribution of a cut, measured by difference. A single-tone
+    /// cut covers every step except the wheel, and each wheel above it adds its
+    /// own palettes.
     #[test]
     #[ignore]
     fn where_the_cost_is() {

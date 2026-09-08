@@ -1,6 +1,7 @@
 # Bitneedle Picture Record Format
 
-A compact visual guide to the canonical **BRD1 + BRS1 + optional BSC1** format.
+This document is a visual guide to the canonical format, which is **BRD1 plus
+BRS1 plus an optional BSC1**.
 
 BPK1 transports these exact components before PNG rendering.
 
@@ -93,9 +94,14 @@ radius 0                                                              radius 287
                         └──── the trailer carrier ────┘
 ```
 
-The lock groove and the run-out rings above it are one carrier, and the second
-half of BRD1 is written across it. How many rings the run-out has follows from
-where the programme stopped, so it is computed rather than declared.
+The lock groove and the run-out rings above it form one carrier. The part of
+BRD1 that exceeds the capacity of the lead-in is written across that carrier. It
+uses the same 64-symbol ladder, in iso-luma colours around the matte tone that
+the band is cut in. The ring count follows from the radius at which the
+programme stopped, so a reader computes it. The rings fill the space between the
+lock and the deadwax header, and that header is at most six turns of fine groove
+under the programme. Segment 35 gives the revision of that geometry and the tone
+that the band was cut in.
 
 ## BRD1 structure
 
@@ -159,17 +165,15 @@ is the pitch of the deadwax band, never its turn count.
 | 32 | Tone clock map | versioned binary clockface | variable | with toned-v2 |
 | 33 | Deadwax extent | radii, capacity, encoding, optional claim | 13/21 | no |
 | 34 | Groove handedness | `0` anticlockwise, `1` clockwise | 1 | no |
-| 35 | Lead-out geometry | revision the run-out was drawn by | 1 | yes |
+| 35 | Lead-out geometry | revision the run-out was drawn by, and its tone | 1/4 | yes |
 
 Types 3, 12, 15, 17–20 and 36 upward are unallocated.
 
-Segment 35 is the one a reader may not skip. The run-out is computed from the
-prefix rather than described on the wire, so the constants that draw it are
-part of the format; a reader handed a revision it does not know traces a
-different band and recovers bytes that look like bytes. It refuses the record
-instead. A text segment written
-with an empty payload is indistinguishable from an absent one: the encoder
-omits both.
+A reader must read segment 35. The run-out is computed from the prefix rather
+than described on the wire, so the constants that draw it are part of the
+format. A reader that receives an unknown revision traces a different band and
+recovers plausible bytes, so it refuses the record instead. An empty text
+segment carries the same meaning as an absent one, and the encoder omits both.
 
 ### Unknown segments
 
@@ -215,11 +219,12 @@ SHA-256( "BITNEEDLE-REVOLUTION-V1" || release_id
          || revolution_index: u32be || SHA-256(ECDC entry bytes) )
 ```
 
-So the signature binds five things and nothing else: the release ID, the
-record profile, the payload encoding kind, the whole BRS1 stream, and every
-revolution's audio in order. Every other segment — title, artist, catalogue,
-label, credit, URL, dates, the BSC1 pointer, the toned carrier map, even
-`b_value` — may be re-authored after pressing without invalidating it.
+The signature therefore binds five items: the release ID, the record profile,
+the payload encoding kind, the whole BRS1 stream, and the audio of every
+revolution in order. A writer may re-author every other segment after pressing,
+and the signature stays valid. Those segments are the title, the artist, the
+catalogue number, the label, the credit, the URL, the dates, the BSC1 pointer,
+the toned carrier map and `b_value`.
 
 | What BRD1 knows | What an external signing profile defines |
 |---|---|
@@ -227,13 +232,13 @@ label, credit, URL, dates, the BSC1 pointer, the toned carrier map, even
 | Opaque key ID | Key resolution and revocation |
 | Raw signature | Trust policy |
 
-## What a signature covers
+## Signature coverage
 
-A pressed record is immutable. Everything it says about itself — its title,
-its artist, its label and catalogue number, the copyright line, the credit,
-the URL, the date, the palette and the geometry it was cut at — is inside the
-release commitment. Change any of it and the commitment changes, which is
-what pressing another record means.
+A pressed record is immutable. The release commitment covers every statement
+that a record makes about itself: the title, the artist, the label, the
+catalogue number, the copyright line, the credit, the URL, the date, the palette
+and the geometry it was cut at. A change to any of these values changes the
+commitment, which makes the result a different record.
 
 ```text
 release commitment (v2)
@@ -249,16 +254,16 @@ revolution commitment
            || revolution_index: u32be || SHA-256(ECDC entry bytes) )
 ```
 
-Version 1 of the release commitment omitted the descriptor digest, so a
-signed record could be re-titled and re-attributed by anyone and still
-verify. It remains defined for records already pressed under it.
+Version 1 of the release commitment omitted the descriptor digest. A signed
+record under version 1 therefore verifies after a change of title or
+attribution. Version 1 stays defined for the records already pressed under it.
 
-### The deferred group
+### Deferred group
 
-Three fields cannot exist when the record is cut: a chain anchor needs a
-commitment to anchor, and ISRCs and barcodes are issued by registrars on
-their own schedule. They sit outside the release commitment for that reason
-and no other — and they are never simply left open.
+Three fields arrive after the cut. A chain anchor needs a commitment to anchor.
+Registrars issue ISRCs and barcodes on their own schedule. These three fields
+therefore sit outside the release commitment, and each one carries its own
+signature.
 
 ```text
 deferred commitment
@@ -267,38 +272,37 @@ deferred commitment
            || chain anchor || ISRCs || barcode )
 ```
 
-Segment 29 signs that digest. Writing a chain anchor, an ISRC or a barcode
-**requires** it, and an attestation with nothing deferred to sign is equally
-malformed — a deferred field is null or signed, and a reader refuses anything
-between. Binding to the descriptor identity, rather than to the press
-signature, is what stops a signed barcode being lifted off one record and
-dropped onto another, and lets a record that was never signed at press still
-carry a signed one.
+Segment 29 signs that digest. A writer that writes a chain anchor, an ISRC or a
+barcode **must** write segment 29. An attestation that signs no deferred field
+is malformed. A deferred field is therefore null or signed, and a reader refuses
+every other state. The digest binds to the descriptor identity rather than to
+the press signature. This binding keeps a signed barcode on the one record that
+it was signed for, and it lets an unsigned press carry a signed deferred
+group.
 
 ### More than one signer
 
-A release may be attested by the artist, by the platform, or by both. They
-are signatures over the same commitment — one digest, signed independently —
-so segment 31 is a list, not a role table. Who a signature belongs to is a
-question for whoever resolves its key ID; the wire format does not decide it,
-and order carries no meaning.
+The artist, the platform, or both may attest a release. Each party signs the
+same digest independently, so segment 31 is a list of signatures. The party that
+resolves a key ID also decides the owner of that signature. The order of the
+list carries no meaning.
 
-A reader checks that every signature covers the same commitment and that no
-key signs twice. Additional signatures without a primary are malformed. A
-key held on the signer's behalf — an artist signing through an account rather
-than from a device — produces an identical envelope; the difference lives
-entirely in what the verifier decides that key means.
+A reader checks that every signature covers the same commitment, and that each
+key signs once. A record that carries segment 31 must also carry a primary
+signature. A key held for a signer, such as an artist who signs through an
+account, produces the same envelope as a key on a device. The verifier decides
+the meaning of that key.
 
-### The sidecar signs itself
+### Sidecar attestation
 
-The descriptor is immutable, so it cannot hold a signature for something that
-changes. The sidecar does change: editions are issued and labels are
-re-authored, and the party doing that is often not the artist, whose key may
-be nowhere near the machine.
+The descriptor is immutable, so it holds signatures for immutable content alone.
+The sidecar changes: editions are issued, and labels are re-authored. The party
+that makes those changes is often a party other than the artist, and the artist
+key is often on another machine.
 
-So the sidecar carries its own attestation, as a reserved item named
-`attestation`, replaced along with everything else each time the sidecar is
-written. Whoever writes it signs what they wrote.
+The sidecar therefore carries its own attestation, as a reserved item named
+`attestation`. Each write of the sidecar replaces that item with the rest of the
+content. The party that writes the sidecar signs the content that it wrote.
 
 ```text
 sidecar commitment
@@ -310,14 +314,14 @@ sidecar commitment
                 SHA-256(stored bytes as base64 text) )
 ```
 
-The attestation excludes itself, because it cannot contain its own
-signature. Editing any other item invalidates it, which is the point.
+The attestation excludes itself from its own preimage. An edit to any other
+item invalidates the attestation.
 
-This is what the edition number rides in: it is issued by the platform, at a
-moment when no artist key need be present, so it belongs where a signature
-can be made by whoever is actually there.
+The sidecar carries the edition number. The platform issues that number at a
+moment when the artist key is often absent, so the number belongs in the layer
+that the present party can sign.
 
-### Three tiers, one record
+### Signature tiers
 
 | Signed | By | When | Covers |
 |---|---|---|---|
@@ -325,13 +329,14 @@ can be made by whoever is actually there.
 | Deferred attestation (29) | whoever holds a key then | when codes arrive | chain anchor, ISRCs, barcode |
 | Sidecar attestation (item) | the party rewriting it | every sidecar write | press metadata, edition, images |
 
-Verification of any of them is a matter of resolving a key ID and checking
-an Ed25519 signature, which BRD1 leaves to `record-verify` and its caller.
-The format states what is covered; it does not state whom to believe.
+Verification of each tier resolves a key ID and checks an Ed25519 signature.
+BRD1 leaves both steps to `record-verify` and its caller. The format states the
+coverage of each signature, and the caller sets the trust policy.
 
 ## Toned carrier map
 
-Present only with the `toned-v1` payload encoding, and required by it.
+The `toned-v1` payload encoding requires this map. Every other encoding forbids
+it.
 
 ```text
 ┌─────────┬─────────────┬──────────────────────────────────────────────┐
@@ -355,13 +360,12 @@ derived by accumulation, and the spans must cover the BRS1 length exactly.
 └─────────┴───────────┴────────────────┴────────────┴──────────────────┘
 ```
 
-Algorithm `1` is XChaCha20-Poly1305; key derivation `1` is HKDF-SHA256. The
-secret is bound to the record by `cache_encryption_record_binding_hash`,
-which hashes a far wider preimage than the signature does — it covers the
-display metadata, the BSC1 pointer, the toned map, `b_value` and the stream
-length, excluding only the signed-release reference and this segment. Editing
-a field that the signature ignores will therefore still break an existing
-cache binding.
+Algorithm `1` is XChaCha20-Poly1305. Key derivation `1` is HKDF-SHA256.
+`cache_encryption_record_binding_hash` binds the secret to the record. That hash
+covers a wider preimage than the signature covers: the display metadata, the
+BSC1 pointer, the toned map, `b_value` and the stream length. It omits the
+signed-release reference and this segment. An edit to a field that the signature
+omits therefore breaks an existing cache binding.
 
 ## BRS1 top-level layout
 
@@ -504,7 +508,7 @@ signature != 64 zero bytes  → signed; verify under selected profile
 
 CRC success does not prove authorization.
 
-## Single-track is not a special format
+## Single-track records
 
 ```text
 Single track
@@ -531,9 +535,9 @@ BRS1 payload bytes
 └─────────────────────┴──────────────────────┴───────────────────┘
 ```
 
-## BSC1 remains pair-sign encoded
+## BSC1 carrier
 
-BSC1 is not groove patternisation. It is an independent auxiliary carrier.
+BSC1 is an independent auxiliary carrier, and it uses pair-sign encoding.
 
 ```text
 BRD1 segment 21
@@ -636,9 +640,8 @@ JSON here is content inside an item, not structural BSC1 metadata.
 
 ## Human-readable inspection
 
-Binary wire formats should still be easy to inspect.
-
-`test-spin` decodes typed structures and may render them as pretty JSON:
+`test-spin` decodes the typed structures and renders them as text or as
+indented JSON:
 
 ```text
 BRD1/BRS1 binary bytes
@@ -651,4 +654,5 @@ typed Rust structures
         └── raw hexadecimal prefix
 ```
 
-The diagnostic JSON is not canonical wire data.
+The canonical wire data is the binary form. The diagnostic JSON is a view of
+it.

@@ -19,13 +19,14 @@ fn synthetic(byte_count: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Which extent a resolved geometry actually came out as.
+/// The extent that a resolved geometry came out as.
 fn extent_of(profile: &str, cut: Option<i32>, turns: f64) -> &'static str {
     for (name, extent) in [
         ("Compact", LeadOutExtent::Compact),
         ("Extended", LeadOutExtent::Extended),
         ("Wide", LeadOutExtent::Wide),
         ("ExtraWide", LeadOutExtent::ExtraWide),
+        ("Fill", LeadOutExtent::Fill),
     ] {
         if let Ok(geometry) = record_core::lead_out_geometry_with_extent(profile, cut, extent) {
             if (geometry.turns - turns).abs() < 0.01 {
@@ -76,10 +77,11 @@ fn main() -> Result<()> {
             0 => None,
             radius => Some(radius),
         };
+        // The band that the record was cut with.
         let lead_out = record_core::lead_out_geometry_with_extent(
             &profile,
             cut,
-            LeadOutExtent::ExtraWide,
+            LeadOutExtent::Fill,
         )?;
         let name = extent_of(&profile, cut, lead_out.turns);
 

@@ -18,6 +18,7 @@ wasm/
 # Local scratch (screenshots, debug scripts)
 /tmp/
 
-# Written by `cargo test -p test-spin -- --ignored write_a_fixture_record`:
-# a real pressed record, for driving the apps by hand.
-fixture-record.png
+# Output that the examples and the fixture test write to the repository root.
+# `cargo test -p test-spin -- --ignored write_a_fixture_record` writes
+# fixture-record.png, a real pressed record, for driving the apps by hand.
+/*.png

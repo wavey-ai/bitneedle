@@ -5,10 +5,13 @@
 
 //! Canonical BRD1 metadata raster encoding helpers.
 
+use anyhow::Result;
 use record_descriptor::{
-    grayscale_value_for_level, metadata_byte_capacity_for_pixel_count,
-    metadata_pixel_count_for_byte_length, METADATA_GRAYSCALE_BITS_PER_PIXEL,
+    band_byte_capacity, band_geometry, grayscale_value_for_level,
+    metadata_byte_capacity_for_pixel_count, metadata_pixel_count_for_byte_length,
+    METADATA_GRAYSCALE_BITS_PER_PIXEL,
 };
+use record_groove::ToneClock;
 
 pub const UNUSED_METADATA_GROOVE_RGB_MIN: u8 = 112;
 pub const UNUSED_METADATA_GROOVE_RGB_SPAN: u8 = 32;
@@ -24,6 +27,40 @@ pub fn metadata_fade_pixel_count(pixel_count: usize, turns: f64) -> usize {
     (pixels_per_turn * UNUSED_METADATA_GROOVE_FADE_TURNS)
         .round()
         .max(1.0) as usize
+}
+
+/// Paints `bytes` along `indices` through the clock the band is cut with.
+///
+/// The encoding the programme carries: each pixel takes the palette of the
+/// pocket it sits in, and the bit stream runs across the pockets. A band cut
+/// in one tone is a clock of one tone, so both take this path.
+///
+/// Returns the number of pixels written.
+pub fn paint_band_bytes_as_toned(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    indices: &[usize],
+    bytes: &[u8],
+    clock: &ToneClock,
+) -> Result<usize> {
+    let byte_count = bytes.len().min(band_byte_capacity(indices.len(), clock));
+    let pixel_count = clock.pixel_count(byte_count).min(indices.len());
+    let taken = &indices[..pixel_count];
+    let (angles, radii) = band_geometry(width, height, taken);
+    let painted = record_groove::encode_toned_clock(&bytes[..byte_count], clock, &angles, &radii)?;
+
+    for (&pixel_index, pixel) in taken.iter().zip(painted.chunks_exact(4)) {
+        let Some(rgba_index) = pixel_index.checked_mul(4) else {
+            continue;
+        };
+        if rgba_index + 3 >= data.len() {
+            continue;
+        }
+        data[rgba_index..rgba_index + 4].copy_from_slice(pixel);
+    }
+
+    Ok(pixel_count)
 }
 
 /// Paints `bytes` along `indices` as greys from the metadata ladder, packing

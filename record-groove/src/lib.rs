@@ -80,12 +80,13 @@ fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// wheel like 12 + 18 holds sixty live keys, and thirty-two would evict half
 /// of every such cut as it built it.
 ///
-/// Not free: a palette is `2^bits_per_pixel` colours, three bytes each, so a
-/// twenty-bit one is three megabytes. This is a ceiling on a cache that only
-/// fills with what a cut actually used, and a cut that used them needed them.
+/// A palette holds `2^bits_per_pixel` colours at three bytes each, so a
+/// twenty-bit palette takes three megabytes. This constant is a ceiling on a
+/// cache that holds the palettes of the current cut, and that cut uses each of
+/// them.
 const PALETTE_CACHE_CAPACITY: usize = 64;
-/// Balanced configurations are a few dozen bytes each, so this can be
-/// generous — it exists to stop unbounded growth, not to save space.
+/// A balanced configuration takes a few dozen bytes, so this capacity is
+/// large. It bounds the growth of the cache.
 const BALANCED_CACHE_CAPACITY: usize = 256;
 
 /// Number of RGB pixels needed to carry `byte_length` bytes at 3 bytes per pixel.
@@ -336,9 +337,10 @@ impl TonedConfig {
         let bits_per_pixel = ((24.0 / max_size_factor).ceil() as u32).clamp(1, 24);
         let needed = 1usize << bits_per_pixel;
 
-        // Enumerate once at the widest tolerance we are willing to consider:
-        // the first ladder rung with ~8x the needed colours (3 extra bits of
-        // selection headroom), beyond which extra tolerance buys little tint.
+        // Enumerate once at the widest tolerance under consideration, which
+        // is the first ladder rung with about 8 times the needed colours, or 3
+        // extra bits of selection headroom. A wider tolerance gives little
+        // further tint accuracy.
         const LADDER: [u8; 12] = [0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 255];
         let max_tolerance = LADDER
             .into_iter()

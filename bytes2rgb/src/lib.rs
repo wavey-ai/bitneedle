@@ -67,9 +67,9 @@ fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// own palettes as it built them and the next one rebuilt all of them.
 /// Sized to a wheel now.
 ///
-/// Not free: a palette is `2^bits_per_pixel` colours, so a twenty-bit one is
-/// megabytes. This is a ceiling on a cache that only fills with what a cut
-/// actually used, and a cut that used them needed them.
+/// A palette holds `2^bits_per_pixel` colours, so a twenty-bit palette takes
+/// megabytes. This constant is a ceiling on a cache that holds the palettes of
+/// the current cut, and that cut uses each of them.
 const PALETTE_CACHE_CAPACITY: usize = 64;
 
 /// Number of RGB pixels needed to carry `byte_length` bytes at 3 bytes per pixel.

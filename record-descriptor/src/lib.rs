@@ -2,18 +2,20 @@
 //!
 //! This crate is the authoritative BRD1 carrier-descriptor wire contract. It
 //! describes how the record stream is located and encoded in the PNG carrier.
-//! It does not define BRS1 payload-entry semantics, programme-time revolution
-//! duration, track timing, GAP timing, or the relationship between payload
-//! entries and programme revolutions.
+//! `record-core` defines BRS1 payload-entry semantics, programme-time
+//! revolution duration, track timing, GAP timing, and the relation between
+//! payload entries and programme revolutions.
 //!
-//! It contains no JSON descriptor segments, no Brotli compatibility envelopes,
-//! no base64/hex wire representations, and no record-creation policy.
+//! Every segment here is binary. JSON descriptor segments, Brotli
+//! compatibility envelopes, base64 and hex wire representations, and
+//! record-creation policy live outside this crate.
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use record_core::{SpiralFamily, SPIRAL_FAMILY_VARI_PITCH_CODE};
+use record_groove::{ClockSlot, ToneClock, TonedPalette};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
@@ -23,26 +25,25 @@ pub const RECORD_DESCRIPTOR_VERSION: u8 = 4;
 /// The private "house" descriptor version: identical to v2 except it may
 /// carry a [`SEGMENT_SPIRAL_GEOMETRY`] segment declaring the groove's
 /// [`SpiralFamily`]. A v3 record without that segment is strict Archimedean.
-/// Not pushed publicly; v2 remains the wire version every Archimedean record
-/// is written with.
+/// This version is local. v2 is the wire version of every Archimedean record.
 pub const RECORD_DESCRIPTOR_VERSION_HOUSE: u8 = 5;
-/// Magic, version, the three lengths, the payload spiral's `b`, and the cut
-/// geometry: where the programme's groove stops and what feed the deadwax
-/// is cut at. The last two are what let a reader that holds nothing but the
-/// PNG traverse the whole groove, deadwax included — it rides the header
-/// spiral at the rim, so it is known before anything else is read.
+/// The prefix holds the magic, the version, the three lengths, the `b` of the
+/// payload spiral, and the cut geometry. The cut geometry gives the radius at
+/// which the groove of the programme stops, and the feed that the deadwax is
+/// cut at. Those two values let a reader with the PNG alone traverse the whole
+/// groove, including the deadwax. The prefix is painted in the header spiral at
+/// the rim, so a reader gets it first.
 pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 
 /// How many bits of the metadata stream each grey pixel carries.
 ///
-/// The lead-in and run-out are the bands that must be readable before
-/// anything about the record is known, so they cannot be toned and cannot be
-/// palette-coded. They are plain grey, and the only question is which greys.
+/// A reader reads the lead-in and the run-out before it knows anything about
+/// the record, so both bands are painted in plain grey. A toned band or a
+/// palette-coded band would need a palette that the reader lacks at that point.
 ///
-/// Six bits is what the carrier needs. The run-out went from four turns to
-/// two, and six bits per pixel is what makes that back: the lead-in and a
-/// two-turn run-out together hold more descriptor at six bits than the old
-/// four-turn band held at four.
+/// The carrier needs six bits per pixel. The run-out went from four turns to
+/// two turns. At six bits per pixel, the lead-in and a two-turn run-out
+/// together hold more descriptor than the four-turn band held at four bits.
 pub const METADATA_GRAYSCALE_BITS_PER_PIXEL: u32 = 6;
 
 /// The number of distinct greys, `2^METADATA_GRAYSCALE_BITS_PER_PIXEL`.
@@ -50,25 +51,23 @@ pub const METADATA_GRAYSCALE_LEVELS: u32 = 1 << METADATA_GRAYSCALE_BITS_PER_PIXE
 
 /// The gap between adjacent levels.
 ///
-/// One. A record is decoded from the PNG it was cut as, losslessly and at its
-/// own raster — there is no resample, no recompression, and no print-and-scan
-/// in the path, so a pixel arrives at the reader carrying exactly the value
-/// the cutter wrote. A ladder that spreads its rungs apart is buying tolerance
-/// against drift that cannot happen, and paying for it in the only currency
-/// that shows: how far the band has to reach toward black and white.
+/// The step is one. A record decodes from the PNG that it was cut as,
+/// losslessly and at its own raster. The path holds no resample, no
+/// recompression and no print-and-scan step, so each pixel reaches the reader
+/// with the value that the cutter wrote. A wider step would give tolerance
+/// against drift that this path excludes, and it would spread the band toward
+/// black and white.
 ///
-/// Adjacent rungs mean the sixty-four levels occupy sixty-four values, which
-/// is what lets the whole band sit in the middle of the range.
+/// Adjacent rungs put the sixty-four levels in sixty-four values, so the whole
+/// band sits in the middle of the range.
 pub const METADATA_GRAYSCALE_STEP: u8 = 1;
 
 /// The darkest grey on the ladder.
 ///
-/// Centred, so the band is mid-grey rather than a spread from black to white:
-/// sixty-four rungs one apart span sixty-four values, and putting that window
-/// in the middle of 0..=255 puts it at 96..=159. Nothing the lead-in paints is
-/// darker than 96 or lighter than 159, which is the point — the descriptor
-/// bands read as one flat grey ring at the rim and at the label, not as a
-/// barcode of black and white pixels.
+/// The window is centred, so the band holds mid-grey values. Sixty-four rungs
+/// one apart span sixty-four values, and that window in the middle of 0..=255
+/// sits at 96..=159. The lead-in paints inside 96..=159, so the descriptor
+/// bands read as one flat grey ring at the rim and at the label.
 pub const METADATA_GRAYSCALE_BASE: u8 =
     ((255 - (METADATA_GRAYSCALE_LEVELS - 1) * METADATA_GRAYSCALE_STEP as u32) / 2) as u8;
 
@@ -84,11 +83,10 @@ pub fn grayscale_value_for_level(level: u32) -> u8 {
 
 /// The level a grey reads back as.
 ///
-/// An exact match, not a nearest rung. The band is lossless end to end, so a
-/// value that is not on the ladder did not come off a Bitneedle cutter, and
-/// guessing which rung it meant would turn a corrupted record into a plausible
-/// one. Off the ladder is refused, and the CRC never has to be the first thing
-/// that notices.
+/// The match is exact. The band is lossless end to end, so a value off the
+/// ladder came from a source other than a Bitneedle cutter. A nearest-rung
+/// match would give a corrupted record a plausible reading. This function
+/// therefore refuses a value off the ladder, ahead of the CRC check.
 pub fn level_for_grayscale_value(value: u8) -> Option<u32> {
     let offset = value.checked_sub(METADATA_GRAYSCALE_BASE)? as u32;
     let step = METADATA_GRAYSCALE_STEP as u32;
@@ -99,8 +97,8 @@ pub fn level_for_grayscale_value(value: u8) -> Option<u32> {
     (level < METADATA_GRAYSCALE_LEVELS).then_some(level)
 }
 
-/// Fixed by the BRD1 v2 format: release commitments are always SHA-256,
-/// signatures are always Ed25519. No per-reference algorithm selector.
+/// Fixed by the BRD1 v2 format: a release commitment is always SHA-256, and a
+/// signature is always Ed25519. The reference carries no algorithm selector.
 pub const SIGNED_RELEASE_REFERENCE_VERSION: u8 = 2;
 pub const SIGNED_RELEASE_REFERENCE_HASH_LENGTH: usize = 32;
 pub const SIGNED_RELEASE_REFERENCE_SIGNATURE_LENGTH: usize = 64;
@@ -155,13 +153,13 @@ pub const SEGMENT_COPYRIGHT_YEAR: u8 = 24;
 pub const SEGMENT_COPYRIGHT_HOLDER: u8 = 25;
 /// The deferred group: the only fields a pressed record may gain later.
 ///
-/// A pressed record is immutable — everything it says about itself is inside
-/// the release commitment. These three are the exception, and only because
-/// none of them can exist at press time: a chain anchor needs a commitment
-/// to anchor, and ISRCs and barcodes are issued by registrars on their own
-/// schedule. They are never merely absent-or-present, though: writing any of
-/// them requires [`SEGMENT_DEFERRED_ATTESTATION`], so a deferred field is
-/// null or signed and nothing in between.
+/// A pressed record is immutable, and the release commitment covers every
+/// statement that it makes about itself. These three fields are the exception,
+/// because each one arrives after the press. A chain anchor needs a commitment
+/// to anchor, and registrars issue ISRCs and barcodes on their own schedule.
+/// Each of these fields carries a signature. A writer that writes one of them
+/// must write [`SEGMENT_DEFERRED_ATTESTATION`], so a deferred field is null or
+/// signed.
 pub const SEGMENT_CHAIN_ANCHOR: u8 = 26;
 /// ISRCs, one per recording rather than per record: a count, then
 /// `(track index u16be, 12 ASCII characters)` pairs in ascending index
@@ -183,16 +181,14 @@ pub const SEGMENT_SPIRAL_GEOMETRY: u8 = 30;
 /// Signatures beyond the first, so a release can be attested by more than
 /// one party.
 ///
-/// A pressing may be signed by the artist, by yl.vin, or by both. They are
-/// all signatures over the same release commitment — the same digest, signed
-/// independently — so this is a list rather than a role table: who a
-/// signature belongs to is a question for whoever resolves its key ID, not
-/// something the wire format decides. Order carries no meaning.
+/// The artist, yl.vin, or both may sign a pressing. Each party signs the same
+/// release commitment independently, so this segment is a list of signatures.
+/// The party that resolves a key ID decides the owner of that signature. The
+/// order of the list carries no meaning.
 ///
-/// Kept separate from [`SEGMENT_SIGNED_RELEASE_REFERENCE`] rather than
-/// letting that segment repeat, because a repeated segment reads as a
-/// duplicate to every reader already in the field, whereas an unknown one is
-/// skipped.
+/// This segment is separate from [`SEGMENT_SIGNED_RELEASE_REFERENCE`], because
+/// a repeat of that segment reads as a duplicate to a reader already in the
+/// field. A reader skips this unknown segment instead.
 pub const SEGMENT_ADDITIONAL_SIGNATURES: u8 = 31;
 
 /// toned-v2 only: the clockface the groove is toned by. The disc is divided
@@ -204,15 +200,14 @@ pub const SEGMENT_TONE_CLOCK_MAP: u8 = 32;
 /// The deadwax: the groove between where the programme stopped and the
 /// descriptor's inner band, and what may be written into it.
 ///
-/// The band itself is not new and its geometry is already known — the prefix
-/// carries `cut_inner_radius` and the deadwax's feed, which is all a reader
-/// needs to walk it. What was missing was a claim: whether anything is in
-/// there, who put it there, and how much room a writer has if it is empty.
+/// The prefix already carries `cut_inner_radius` and the feed of the deadwax,
+/// which is what a reader needs to walk the band. This segment adds the claim:
+/// whether the band holds bytes, the owner of those bytes, and the room that a
+/// writer has in an empty band.
 ///
-/// It is a declaration, not a container. The bytes live in the groove; this
-/// says where they are and who owns them, the way a partition table is not
-/// the partition. A record whose programme runs to the label has no deadwax
-/// and writes no segment at all.
+/// This segment is a declaration. The bytes live in the groove, and this
+/// segment gives their location and their owner. A record whose programme runs
+/// to the label has no deadwax, and it writes no segment.
 ///
 /// Payload: `outer(u16be) || inner(u16be) || pixel_capacity(u32be) ||
 /// encoding(u8) || byte_capacity(u32be)`, 13 bytes, and a claimed band adds
@@ -223,37 +218,46 @@ pub const SEGMENT_DEADWAX_EXTENT: u8 = 33;
 
 /// Which way round the programme's groove is cut.
 ///
-/// A lathe's cutter does not move: the record turns under it, and the
-/// spiral that leaves the head therefore winds against the turn. Every
-/// record written before this segment existed was traced clockwise from
-/// twelve o'clock, which is the mirror of a disc cut on a lathe turning
-/// clockwise — self-consistent, since the same tracer reads it back, but
-/// the wrong hand for anything that has to sit under a real cutter or be
-/// drawn as one.
+/// The cutter of a lathe holds its position, the record turns under it, and
+/// the spiral that leaves the head therefore winds against the turn. Every
+/// record written before this segment was traced clockwise from twelve o'clock,
+/// which mirrors a disc cut on a lathe that turns clockwise. That tracing is
+/// self-consistent, because the same tracer reads it back. It gives the
+/// opposite hand to a disc cut under a physical cutter.
 ///
-/// Payload: one byte, `0` counter-clockwise, `1` clockwise. Absent means
-/// clockwise, so every record already pressed decodes exactly as it did and
-/// its bytes do not move — the segment is written only when a cut departs
-/// from that.
+/// Payload: one byte, `0` for counter-clockwise and `1` for clockwise. An
+/// absent segment means clockwise, so every pressed record decodes as it did
+/// and keeps its bytes in place. A writer writes this segment for a cut in the
+/// other hand.
 pub const SEGMENT_GROOVE_HANDEDNESS: u8 = 34;
 
 /// Which revision of the lead-out geometry the record was cut under.
 ///
-/// The run-out and its lock groove are not described on the wire. Their
-/// geometry follows from the profile and from `cut_inner_radius`, which the
-/// prefix already carries, so a decoder derives the band rather than being
-/// told it — no flag, and no way for the two sides to disagree about a record
-/// they both computed.
+/// The geometry of the run-out and its lock groove follows from the profile and
+/// from `cut_inner_radius`, which the prefix carries. A decoder therefore
+/// derives the band. The wire holds no flag for it, and both sides compute one
+/// answer.
 ///
-/// The cost of deriving is that the constants become part of the format. The
-/// gap ladder, the taper, the clearance the lock groove sits at: change any
-/// of them and every record already cut stops reading back, silently, because
-/// nothing in the record says which numbers drew it. This segment is what
-/// says so. One byte, and a decoder that does not know the revision refuses
-/// the record instead of tracing the wrong band through it and returning
-/// plausible rubbish.
+/// Derivation makes the constants part of the format. Those constants are the
+/// gap ladder, the taper, and the clearance that the lock groove sits at. A
+/// change to any of them stops every record already cut from reading back, and
+/// the record itself names no constants. This segment names the revision. It is
+/// one byte, and a decoder that meets an unknown revision refuses the record
+/// rather than tracing the wrong band and returning plausible bytes.
 ///
-/// Payload: one byte, the revision. Absent means
+/// This segment also names the tone that the band is cut in. The trailer
+/// carries the tail of the stream in that tone rather than in the grey ladder,
+/// and no other segment carries that colour. The wheel gives the reading of the
+/// picture under the programme, and this tone gives the reading under the
+/// trailer.
+///
+/// It is written at the front of the body, before any field a writer chooses
+/// the length of, so a reader that has to walk the trailer finds it in the
+/// lead-in. See [`run_out_tone_from_partial_stream`].
+///
+/// Payload: `revision(u8)`, or `revision(u8) || tone(3)` where the trailer was
+/// cut in one of its own. Sized rather than versioned, as
+/// [`SEGMENT_DEADWAX_EXTENT`] is. Absent means
 /// [`LEAD_OUT_GEOMETRY_REVISION_DRAFT04`], so a record written before this
 /// existed decodes as what it is.
 pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
@@ -261,24 +265,47 @@ pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
 /// The draft-04 trailer: a single Archimedean spiral of two turns from the
 /// cut inner radius to the payload inner radius, and no locked groove.
 ///
-/// This build does not cut it and does not trace it. It is named because an
-/// absent segment means it, and a record that means it should be refused by
-/// name rather than by a CRC failure ten steps later. Nothing readable
-/// carries it in any case: draft-05 also changed the descriptor band's own
-/// pixel encoding, so a record of this vintage fails at the BRD1 magic
-/// before its segments are ever parsed.
+/// This build cuts and traces the later revisions. This constant exists because
+/// an absent segment means this revision, and a record that means it is refused
+/// by name rather than by a CRC failure further on. draft-05 also changed the
+/// pixel encoding of the descriptor band, so a record of this vintage fails at
+/// the BRD1 magic, ahead of segment parsing.
 pub const LEAD_OUT_GEOMETRY_REVISION_DRAFT04: u8 = 0;
 
 /// The first lead-out geometry: a fine deadwax at the lathe's feed, a run-out
 /// of one to four rings opening outward by [`record_core::RUN_OUT_TAPER`],
 /// and a lock groove closing on itself.
+///
+/// The deadwax took the space that the four rings left. On a side that carried
+/// one track, that space was most of the annulus: forty turns at a millimetre
+/// apart, drawn across the artwork. [`LEAD_OUT_GEOMETRY_REVISION_FILLED`] gives
+/// that space to the run-out instead.
 pub const LEAD_OUT_GEOMETRY_REVISION_ORIGINAL: u8 = 1;
 
-/// The revision this build cuts and can read.
-pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_ORIGINAL;
+/// The filled run-out: a deadwax header of at most
+/// [`record_core::DEADWAX_MAX_TURNS`] turns, and a run-out of as many rings as
+/// the room the cut left will hold.
+///
+/// This revision keeps the same three bands in the same order, and it keeps the
+/// lock groove at its radius. It moves the spare room from the deadwax to the
+/// run-out. The rings open out of the lock by [`record_core::RUN_OUT_TAPER`]
+/// until they reach the coarse feed of the lathe
+/// ([`record_core::RUN_OUT_TURN_SEPARATION_MM`]). Above that point they run
+/// parallel up to the header. A side that stops a third of the way down
+/// therefore carries a dozen widely spaced rings, against four before.
+///
+/// A record cut under [`LEAD_OUT_GEOMETRY_REVISION_ORIGINAL`] holds its run-out
+/// at other radii. Its descriptor reads back while the stream fits the lead-in,
+/// which is the ordinary case, and its groove and programme hold their bytes. A
+/// reader must treat the band that this build traces there as another band, and
+/// not as the run-out of that record.
+pub const LEAD_OUT_GEOMETRY_REVISION_FILLED: u8 = 2;
 
-/// The deadwax is a groove with nothing painted into it: whatever a writer
-/// puts there is between that writer and whoever reads it back.
+/// The revision this build cuts and can read.
+pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_FILLED;
+
+/// The deadwax is an empty groove. A writer and its reader agree on the content
+/// of that groove between them.
 pub const DEADWAX_ENCODING_UNPAINTED: u8 = 0;
 /// One nibble per pixel as a grey step, the way the descriptor's own bands
 /// are painted ([`METADATA_GRAYSCALE_BASE`]).
@@ -288,7 +315,7 @@ pub const DEADWAX_ENCODING_GRAYSCALE_NIBBLE: u8 = 1;
 /// colour and carries several times what the grey encoding does.
 pub const DEADWAX_ENCODING_TONED: u8 = 2;
 
-/// Nothing has claimed the band: it is free, and its whole capacity is.
+/// The band is free, and a writer may use its whole capacity.
 pub const DEADWAX_CLAIM_FREE: Option<[u8; 4]> = None;
 
 pub const ISRC_LENGTH: usize = 12;
@@ -306,11 +333,11 @@ pub const TONED_ORDERING_CHROMA_PROXIMITY: u8 = 1;
 pub const TONED_MIN_BITS_PER_PIXEL: u8 = 1;
 pub const TONED_MAX_BITS_PER_PIXEL: u8 = 24;
 pub const TONED_MAX_SPAN_COUNT: usize = u16::MAX as usize;
-/// Version 1 is a wheel of wedges: one ring, running the whole depth of the
-/// groove. Version 2 adds the rings — a slot count per ring and the band
-/// they divide. A v1 map still decodes, as the one-ring wheel it always was,
-/// and a one-ring wheel is still written as v1, so a record that does not
-/// need rings is byte for byte the record it was.
+/// Version 1 holds a wheel of wedges: one ring, over the whole depth of the
+/// groove. Version 2 adds the rings, as a slot count per ring and the band that
+/// the rings divide. A v1 map decodes as that one-ring wheel, and an encoder
+/// writes a one-ring wheel as v1. A record with one ring therefore keeps its
+/// bytes.
 pub const TONE_CLOCK_MAP_VERSION: u8 = 2;
 pub const TONE_CLOCK_MAP_VERSION_WEDGES: u8 = 1;
 pub const TONE_CLOCK_MIN_SLOTS: usize = 2;
@@ -696,8 +723,8 @@ pub fn decode_additional_signatures(payload: &[u8]) -> Result<Vec<SignedReleaseR
     Ok(references)
 }
 
-/// One key, one signature. Two signatures from the same key over the same
-/// commitment say nothing the first did not.
+/// One key signs once. A second signature from the same key over the same
+/// commitment adds no information, and this check refuses it.
 pub fn validate_signature_set(descriptor: &RecordDescriptor) -> Result<()> {
     if descriptor.additional_signatures.is_empty() {
         return Ok(());
@@ -888,15 +915,14 @@ pub fn validate_deferred_group(descriptor: &RecordDescriptor) -> Result<()> {
 /// The signed shape of a descriptor: everything a pressed record says about
 /// itself, in a fixed order, length-prefixed.
 ///
-/// A pressed record is immutable. Every field here is inside the release
-/// commitment, so changing any of them — a title, a catalogue number, the
-/// carrier geometry, the toned palette — makes a different release, which is
-/// what pressing a record again means.
+/// A pressed record is immutable. The release commitment covers every field
+/// here, so a change to a title, a catalogue number, the carrier geometry or
+/// the toned palette gives a different release.
 ///
-/// Two segments are outside, and only two. The signed-release reference
-/// cannot contain its own signature. The chain anchor cannot exist yet: it
-/// is written once the release has been pressed and anchored, which is the
-/// single thing about a pressed record that is allowed to change.
+/// Two segments sit outside the commitment. The signed-release reference
+/// excludes itself, because it holds its own signature. The chain anchor
+/// arrives after the press, because a writer writes it once the release is
+/// pressed and anchored.
 pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(b"bitneedle.record-descriptor.signed-identity.v1");
@@ -973,11 +999,12 @@ pub fn signed_descriptor_identity_bytes(descriptor: &RecordDescriptor) -> Result
     Ok(out)
 }
 
-/// Appends the tone clock to an identity preimage — but only when there is
-/// one. A record without a clock appends nothing, so every identity (and the
-/// signature or cache key derived from it) is byte-identical to what it was
-/// before clocks existed. The clock is inside the commitment for the same
-/// reason the toned palette is: a different wheel is a different pressing.
+/// Appends the tone clock to an identity preimage, for a record that carries a
+/// clock. A record with a single tone appends nothing, so its identity, and the
+/// signature or cache key derived from that identity, keeps the bytes that it
+/// had before clocks existed. The commitment covers the clock for the reason
+/// that it covers the toned palette: a different wheel gives a different
+/// pressing.
 fn push_tone_clock_identity(
     out: &mut Vec<u8>,
     tag: u8,
@@ -995,10 +1022,10 @@ fn push_tone_clock_identity(
     Ok(())
 }
 
-/// Appends the groove geometry family to an identity preimage — but only for
-/// a non-Archimedean cut. An Archimedean descriptor appends nothing, so every
-/// v2 identity (and the signature or cache key derived from it) is
-/// byte-identical to what it was before spiral families existed.
+/// Appends the groove geometry family to an identity preimage, for a cut
+/// outside the Archimedean family. An Archimedean descriptor appends nothing,
+/// so every v2 identity, and the signature or cache key derived from it, keeps
+/// the bytes that it had before spiral families existed.
 fn push_spiral_family_identity(out: &mut Vec<u8>, tag: u8, family: &SpiralFamily) {
     if let SpiralFamily::VariPitch {
         depth,
@@ -1076,14 +1103,13 @@ pub fn derive_cache_nonce_key(descriptor: &RecordDescriptor) -> Result<[u8; 32]>
 /// Deterministic nonce: a PRF over the plaintext (hashed) and enough of the
 /// cache context to disambiguate entries, keyed by a subkey derived from the
 /// record's own cache-encryption secret. The same (record, plaintext, context)
-/// always produces the same nonce, so the same triple always produces
-/// byte-identical ciphertext — this is what makes the resulting BCE1 envelope
-/// safe to use as a content-addressed cache key, and what two independent
-/// writers (e.g. press after issuance, then a player's own first decode)
-/// converge on. Nonce reuse under a fixed key only ever happens for identical
-/// plaintext, which is the intended convergent-encryption property here, not a
-/// confidentiality regression: the plaintext (decoded audio) is already fully
-/// recoverable by anyone holding the record image.
+/// always produces the same nonce, so the same triple produces byte-identical
+/// ciphertext. The resulting BCE1 envelope therefore serves as a
+/// content-addressed cache key, and two independent writers converge on it. Two
+/// such writers are the press after issuance and the first decode by a player.
+/// Nonce reuse under a fixed key occurs for identical plaintext alone, which is
+/// the convergent-encryption property that this scheme intends. The plaintext
+/// is decoded audio, and a holder of the record image recovers it already.
 fn derive_cache_nonce(
     nonce_key: &[u8; 32],
     context: &CacheEncryptionContext,
@@ -1335,19 +1361,20 @@ pub struct ToneClockSlotDescriptor {
 pub struct ToneClockDescriptor {
     /// Where each ring's slot zero begins, in hundredths of a degree
     /// clockwise from twelve, innermost first; the rest of a ring's slots
-    /// follow clockwise. One entry is a wheel turned as one piece, which is
-    /// what a version 1 map carries.
+    /// follow clockwise. One entry turns the wheel as one piece, which is the
+    /// form that a version 1 map carries.
     pub rotation_centidegrees: Vec<u16>,
-    /// Whether pixels near a slot boundary may take the neighbouring slot's
-    /// tone in proportion to their nearness (a deterministic per-pixel
-    /// choice), so tones run into each other rather than stepping.
+    /// Whether a pixel near a slot boundary may take the tone of the adjacent
+    /// slot, in proportion to its distance from that boundary. The choice is
+    /// deterministic per pixel, and it gives a continuous surface across the
+    /// boundary.
     pub blend: bool,
     pub bits_per_pixel: u8,
     pub ordering: ToneOrdering,
     /// The slots in each ring, innermost first. `[8, 16]` is eight pockets
     /// across the inside of the groove band and sixteen around the outside.
-    /// One entry is a wheel of wedges, which is what every clock was before
-    /// rings, and is written as a version 1 map.
+    /// One entry gives a wheel of wedges, which is the form of every clock
+    /// before rings, and an encoder writes it as a version 1 map.
     #[serde(default = "one_ring")]
     pub rings: Vec<u32>,
     /// The band the rings divide, in ten-thousandths of the half-side:
@@ -1367,8 +1394,8 @@ fn one_ring() -> Vec<u32> {
     Vec::new()
 }
 
-/// What a map with no band written in it means: the whole record, which is
-/// the only band a wheel of wedges could have been describing.
+/// The band that a map with no band written in it describes: the whole record,
+/// which is the band that a wheel of wedges covers.
 fn whole_disc() -> (u16, u16) {
     (0, TONE_CLOCK_SPAN_UNITS as u16)
 }
@@ -1390,10 +1417,10 @@ impl ToneClockDescriptor {
     }
 }
 
-/// One blanket signed-release reference covering the release commitment
-/// (see `record_core::commitment::release_commitment`). SHA-256 and Ed25519
-/// are fixed by `SIGNED_RELEASE_REFERENCE_VERSION`; there is no per-reference
-/// algorithm selector.
+/// One signed-release reference over the release commitment. See
+/// `record_core::commitment::release_commitment`.
+/// `SIGNED_RELEASE_REFERENCE_VERSION` fixes SHA-256 and Ed25519, so the
+/// reference carries no algorithm selector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedReleaseReference {
@@ -1462,22 +1489,22 @@ pub fn decode_cache_encryption_descriptor(bytes: &[u8]) -> Result<CacheEncryptio
     Ok(descriptor)
 }
 
-/// What the deadwax holds, or that it holds nothing.
+/// The content of the deadwax, and its capacity.
 ///
-/// Radii are in rendered pixels, from the centre, and bound the band the
-/// same way the cut does: `outer` is where the programme's groove stopped,
-/// `inner` is where the descriptor's own band begins. `pixel_capacity` is
-/// how many pixels the spiral lays down between them, which is a property of
-/// the lathe's feed and not of anything written there.
+/// The radii are in rendered pixels from the centre, and they bound the band as
+/// the cut does. `outer` is the radius at which the groove of the programme
+/// stopped, and `inner` is the radius at which the band of the descriptor
+/// begins. `pixel_capacity` is the pixel count that the spiral lays down
+/// between them, which follows from the feed of the lathe.
 ///
-/// `byte_capacity` is what those pixels hold under `encoding`. It is stored
-/// rather than derived so a reader that does not implement an encoding can
-/// still say how much room a band has, and so a later encoding does not
-/// silently change the meaning of an old record's number.
+/// `byte_capacity` is the capacity of those pixels under `encoding`. The
+/// segment stores this value rather than deriving it, so a reader that
+/// implements another encoding still reports the room in a band, and so a later
+/// encoding leaves the number of an older record unchanged.
 ///
-/// `claim` is a four-byte tag naming whoever wrote the band — a sidecar's
-/// own, by its own convention. `None` means free. A claim without bytes is
-/// still a claim: it reserves the band.
+/// `claim` is a four-byte tag that names the writer of the band. A sidecar
+/// chooses its own tag by its own convention. `None` marks a free band. A claim
+/// with zero bytes reserves the band.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeadwaxExtent {
@@ -1489,7 +1516,7 @@ pub struct DeadwaxExtent {
     /// Four bytes naming the owner, or `None` while the band is free.
     #[serde(default)]
     pub claim: Option<[u8; 4]>,
-    /// How much of `byte_capacity` the claim has actually used.
+    /// The part of `byte_capacity` that the claim uses.
     #[serde(default)]
     pub claimed_byte_length: u32,
 }
@@ -1509,9 +1536,10 @@ impl DeadwaxExtent {
 
 /// One deadwax extent segment, as written.
 ///
-/// Two shapes: 13 bytes for a free band, 21 for a claimed one. A longer
-/// payload is a later writer's and its tail is ignored, which is the same
-/// bargain every other sized segment strikes.
+/// Two shapes: 13 bytes for a free band, and 21 bytes for a claimed band. A
+/// longer payload comes from a later writer, and this decoder reads the
+/// leading bytes and ignores the tail, as it does for every other sized
+/// segment.
 pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
     const FREE_LENGTH: usize = 13;
     const CLAIMED_LENGTH: usize = 21;
@@ -1536,8 +1564,8 @@ pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
         if used > byte_capacity {
             bail!("deadwax claim is longer than the band it claims");
         }
-        // All-zero is not a tag. A writer that wants the band without naming
-        // itself has to say so by writing the free shape.
+        // An all-zero value is outside the tag space. A writer that takes the
+        // band and names no owner writes the free shape.
         if tag == [0, 0, 0, 0] {
             bail!("deadwax claim tag is empty");
         }
@@ -1588,21 +1616,21 @@ pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
 
 /// Decoded BRD1 carrier descriptor.
 ///
-/// `record_profile` identifies the canonical Bitneedle carrier profile used to
-/// decode the raster geometry. BRD1 does not use this field to assign logical
-/// sample counts to BRS1 payload entries; programme timing belongs to BRS1 and
-/// codec-specific validation.
+/// `record_profile` identifies the canonical Bitneedle carrier profile that
+/// decodes the raster geometry. BRS1 and the codec-specific validation assign
+/// the logical sample counts of the payload entries and hold the programme
+/// timing.
 fn clockwise_by_default() -> bool {
     true
 }
 
-/// Absence is not an assertion of the geometry this revision introduced.
+/// An absent segment 35 selects the geometry that came before revision 1.
 ///
-/// A record with no segment 35 was written before segment 35 existed, which
-/// is to say before revision 1 existed, so the only honest reading of its
-/// silence is the trailer that came before. Defaulting the other way was
-/// backwards: it made every record ever cut claim bands it was never cut
-/// with, which is the one thing the segment was added to prevent.
+/// A record with no segment 35 was written before segment 35 existed, which is
+/// to say before revision 1 existed. The absent segment therefore reads as the
+/// earlier trailer. The opposite default made every record already cut claim
+/// bands that it was cut without, which is the fault that this segment
+/// prevents.
 fn original_lead_out_geometry() -> u8 {
     LEAD_OUT_GEOMETRY_REVISION_DRAFT04
 }
@@ -1619,21 +1647,22 @@ pub struct RecordDescriptor {
     pub cut_inner_radius: u16,
     /// The deadwax's spiral `b` — the feed, never the turn count.
     ///
-    /// Serialized as `leadOutBValueBits` before the band was named
-    /// correctly. The alias keeps descriptor JSON written under the old
-    /// vocabulary readable; the wire bytes never moved, so this is the same
-    /// prefix octets 21..29 it always was.
+    /// Serialized as `leadOutBValueBits` under the earlier name for the band.
+    /// The alias keeps descriptor JSON written under that vocabulary readable.
+    /// The wire bytes hold their positions, so this field remains prefix octets
+    /// 21..29.
     #[serde(default, alias = "leadOutBValueBits")]
     pub deadwax_b_value_bits: u64,
-    /// The groove geometry family. Always [`SpiralFamily::Archimedean`] for
-    /// v2 records; v3 records may carry vari-pitch. Defaults keep every
-    /// existing serialized form valid.
+    /// The groove geometry family. A v2 record always carries
+    /// [`SpiralFamily::Archimedean`]. A v3 record may carry vari-pitch. The
+    /// defaults keep every existing serialized form valid.
     #[serde(default)]
     pub spiral_family: SpiralFamily,
-    /// Whether the programme's groove winds clockwise from its start angle.
-    /// True for every record written before [`SEGMENT_GROOVE_HANDEDNESS`]
-    /// existed, and the default here, so an absent segment reads as the cut
-    /// it always was. See that segment for why the other hand exists.
+    /// Whether the groove of the programme winds clockwise from its start
+    /// angle. Every record written before [`SEGMENT_GROOVE_HANDEDNESS`] existed
+    /// winds clockwise, and that is the default here, so an absent segment
+    /// reads as the original cut. [`SEGMENT_GROOVE_HANDEDNESS`] gives the
+    /// reason for the other hand.
     #[serde(default = "clockwise_by_default")]
     pub spiral_clockwise: bool,
     pub record_profile: String,
@@ -1659,8 +1688,8 @@ pub struct RecordDescriptor {
     #[serde(default)]
     pub tone_clock: Option<ToneClockDescriptor>,
     pub cache_encryption: Option<CacheEncryptionDescriptor>,
-    /// The on-chain anchor, written after pressing. Opaque here: what a
-    /// chain reference means is a matter for the chain, not for BRD1.
+    /// The on-chain anchor, written after pressing. BRD1 treats it as opaque
+    /// bytes, and the chain defines the meaning of a chain reference.
     pub chain_anchor: Option<Vec<u8>>,
     /// Every other signature over the same release commitment.
     pub additional_signatures: Vec<SignedReleaseReference>,
@@ -1668,16 +1697,22 @@ pub struct RecordDescriptor {
     pub isrcs: Vec<TrackIsrc>,
     /// The release barcode, as issued.
     pub upc: Option<String>,
-    /// The signature covering everything above that was added after the
-    /// press. Required whenever any of them is present.
+    /// The signature over the fields above that arrive after the press. A
+    /// record that carries any of those fields must carry this signature.
     pub deferred_attestation: Option<SignedReleaseReference>,
     /// Which revision of the lead-out geometry drew this record's run-out.
     /// See [`SEGMENT_LEAD_OUT_GEOMETRY`].
     #[serde(default = "original_lead_out_geometry")]
     pub lead_out_geometry_revision: u8,
-    /// The deadwax, if the cut left any: how much groove is standing between
-    /// the programme and the descriptor's inner band, and whether anything
-    /// has claimed it. Absent on a record whose programme ran to the label.
+    /// The one tone that the trailer is cut in, for a trailer with its own
+    /// tone. An absent value means that the band follows the wheel of the
+    /// record, or that the record carries no tone. See
+    /// [`SEGMENT_LEAD_OUT_GEOMETRY`].
+    #[serde(default)]
+    pub run_out_tone: Option<[u8; 3]>,
+    /// The deadwax that the cut left: the groove between the programme and the
+    /// inner band of the descriptor, and the owner of any claim on it. Absent
+    /// on a record whose programme ran to the label.
     #[serde(default)]
     pub deadwax: Option<DeadwaxExtent>,
 }
@@ -1714,13 +1749,13 @@ pub struct DescriptorPrefix {
     pub segment_count: usize,
     pub segment_stream_len: usize,
     pub b_value_bits: u64,
-    /// The radius, in rendered pixels, at which the programme's groove stops
-    /// and the deadwax takes over. Zero means the cut ran to the label and
-    /// there is no deadwax.
+    /// The radius, in rendered pixels, at which the groove of the programme
+    /// stops and the deadwax begins. Zero means that the cut ran to the label
+    /// and left no deadwax.
     pub cut_inner_radius: u16,
-    /// The deadwax's own spiral `b`. Declared rather than assumed, because
-    /// the turn count is never stored: a reader derives it the way a lathe
-    /// produces it, from the travel left over and this feed.
+    /// The spiral `b` of the deadwax. The descriptor declares this feed,
+    /// because the wire holds no turn count. A reader derives the turn count as
+    /// a lathe produces it, from the remaining travel and this feed.
     pub deadwax_b_value_bits: u64,
 }
 
@@ -1732,6 +1767,243 @@ pub fn metadata_pixel_count_for_byte_length(byte_length: usize) -> usize {
 
 pub fn metadata_byte_capacity_for_pixel_count(pixel_count: usize) -> usize {
     pixel_count.saturating_mul(METADATA_GRAYSCALE_BITS_PER_PIXEL as usize) / 8
+}
+
+/// The luma windows a one-tone band's palette is tried at, tightest first.
+///
+/// A tone near black or near white has few colours at its own luma, and it
+/// needs a wider window than a tone in the middle of the range. A window wider
+/// than the palette needs moves the pixels of the band away from the tone that
+/// it is cut in.
+pub const TRAILER_LUMA_TOLERANCES: [u8; 6] = [2, 4, 6, 10, 16, 24];
+
+/// The bits that a pixel of a one-tone band carries. This rate matches the
+/// grey ladder, so the band keeps the capacity that it had in grey.
+pub const TRAILER_BITS_PER_PIXEL: u32 = METADATA_GRAYSCALE_BITS_PER_PIXEL;
+
+/// A clock for a band cut in one tone: two pockets, both that tone.
+///
+/// The count is two, because [`record_groove::TONE_CLOCK_MIN_SLOTS`] is two.
+/// Both pockets carry the same colour, so every pixel of the band takes that
+/// tone.
+///
+/// The clock derives from the tone alone, so the wire carries the colour
+/// alone.
+pub fn trailer_clock(tone: [u8; 3]) -> Result<ToneClock> {
+    let luma_tolerance = TRAILER_LUMA_TOLERANCES
+        .into_iter()
+        .find(|&tolerance| TonedPalette::new(tone, tolerance, TRAILER_BITS_PER_PIXEL).is_ok())
+        .with_context(|| {
+            format!(
+                "no iso-luma palette of {} colours exists around #{:02X}{:02X}{:02X}",
+                1 << TRAILER_BITS_PER_PIXEL,
+                tone[0],
+                tone[1],
+                tone[2]
+            )
+        })?;
+    let pocket = ClockSlot {
+        base: tone,
+        luma_tolerance,
+        gap_base: tone,
+        gap_luma_tolerance: luma_tolerance,
+    };
+
+    Ok(ToneClock {
+        rotation_centidegrees: vec![0],
+        blend: false,
+        bits_per_pixel: TRAILER_BITS_PER_PIXEL,
+        ordering: record_groove::ToneOrdering::default(),
+        rings: vec![2],
+        span: (0, record_groove::TONE_CLOCK_SPAN_UNITS as u16),
+        slots: vec![pocket; 2],
+        gap_switch_offsets: Vec::new(),
+    })
+}
+
+/// The clock a trailer was cut with, from as much of the stream as the
+/// lead-in holds.
+///
+/// The tone takes precedence. A record that names a tone for its trailer was
+/// cut matte there, at every programme tone. A record that names no tone gives
+/// the band the wheel of the record.
+pub fn trailer_clock_from_stream_head(head: &[u8]) -> Result<ToneClock> {
+    if let Some(tone) = run_out_tone_from_partial_stream(head) {
+        return trailer_clock(tone);
+    }
+
+    let map = tone_clock_map_from_partial_stream(head)
+        .context("the lead-in carries neither a trailer tone nor a wheel")?;
+
+    Ok(band_clock(&tone_clock_from_map(&map)))
+}
+
+/// A wheel in the form that the groove encoder takes. A version 1 map arrives
+/// with its one ring written out, so a caller reads both versions the same
+/// way.
+pub fn tone_clock_from_map(map: &ToneClockDescriptor) -> ToneClock {
+    ToneClock {
+        rings: map.ring_slots(),
+        span: map.span,
+        rotation_centidegrees: map.rotation_centidegrees.clone(),
+        blend: map.blend,
+        bits_per_pixel: u32::from(map.bits_per_pixel),
+        ordering: match map.ordering {
+            ToneOrdering::BaseProximity => record_groove::ToneOrdering::BaseProximity,
+            ToneOrdering::ChromaProximity => record_groove::ToneOrdering::ChromaProximity,
+        },
+        slots: map
+            .slots
+            .iter()
+            .map(|slot| ClockSlot {
+                base: slot.base,
+                luma_tolerance: slot.luma_tolerance,
+                gap_base: slot.gap_base,
+                gap_luma_tolerance: slot.gap_luma_tolerance,
+            })
+            .collect(),
+        gap_switch_offsets: map.gap_switch_offsets.clone(),
+    }
+}
+
+/// The record's wheel, for a band that has no track structure.
+///
+/// The gap switches are byte offsets into the programme. A band that carries
+/// its own stream holds an empty switch list, so every pixel takes the track
+/// tone of its pocket.
+pub fn band_clock(clock: &ToneClock) -> ToneClock {
+    ToneClock {
+        gap_switch_offsets: Vec::new(),
+        ..clock.clone()
+    }
+}
+
+/// Bytes a band of `pixel_count` pixels holds at this clock's rate.
+pub fn band_byte_capacity(pixel_count: usize, clock: &ToneClock) -> usize {
+    pixel_count * clock.bits_per_pixel as usize / 8
+}
+
+/// Where the pixels of a band sit, in the frame a clock reads: angle about
+/// the centre, and distance from it as a fraction of the half-side.
+pub fn band_geometry(width: usize, height: usize, indices: &[usize]) -> (Vec<f64>, Vec<f64>) {
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let angles = indices
+        .iter()
+        .map(|&index| {
+            record_groove::pixel_angle(
+                (index % width) as f64,
+                (index / width) as f64,
+                center_x,
+                center_y,
+            )
+        })
+        .collect();
+    let radii = indices
+        .iter()
+        .map(|&index| {
+            record_groove::pixel_radius(
+                (index % width) as f64,
+                (index / width) as f64,
+                center_x,
+                center_y,
+            )
+        })
+        .collect();
+
+    (angles, radii)
+}
+
+/// A band's bytes, read back through the clock it was cut with.
+///
+/// The band uses the encoding that the programme uses. The pocket of a pixel
+/// gives its palette, and the bit stream runs across the pockets.
+pub fn band_bytes_from_toned_rgba(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    indices: &[usize],
+    clock: &ToneClock,
+    byte_length: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let pixel_count = clock.pixel_count(byte_length);
+    if indices.len() < pixel_count {
+        bail!("{label} spiral capacity is too small");
+    }
+
+    let taken = &indices[..pixel_count];
+    let mut pixels = Vec::with_capacity(pixel_count * 4);
+    for &pixel_index in taken {
+        let rgba_index = pixel_index
+            .checked_mul(4)
+            .context("band RGBA index overflow")?;
+        if rgba_index + 3 >= rgba.len() {
+            bail!("{label} spiral pixel index is outside RGBA buffer");
+        }
+        if rgba[rgba_index + 3] == 0 {
+            bail!("{label} spiral pixel is empty");
+        }
+        pixels.extend_from_slice(&rgba[rgba_index..rgba_index + 4]);
+    }
+
+    let (angles, radii) = band_geometry(width, height, taken);
+
+    record_groove::decode_toned_clock(&pixels, clock, &angles, &radii, Some(byte_length))
+        .with_context(|| format!("{label} is not written in the tone the band was cut in"))
+}
+
+/// The tone the trailer was cut in, read out of however much of the stream is
+/// in hand.
+///
+/// A reader needs this tone before it walks the trailer. The encoder writes it
+/// in the lead-in, which the grey ladder reads without prior knowledge. This
+/// scan is deliberately lenient: it checks no CRC, no segment count and no
+/// completeness.
+pub fn run_out_tone_from_partial_stream(bytes: &[u8]) -> Option<[u8; 3]> {
+    let payload = segment_from_partial_stream(bytes, SEGMENT_LEAD_OUT_GEOMETRY)?;
+    if payload.len() < 4 {
+        return None;
+    }
+
+    Some([payload[1], payload[2], payload[3]])
+}
+
+/// The record's wheel, read out of however much of the stream is in hand.
+///
+/// A trailer cut by the wheel is read with the wheel, which
+/// [`SEGMENT_TONE_CLOCK_MAP`] carries. This function uses the staging that the
+/// tone scan uses.
+pub fn tone_clock_map_from_partial_stream(bytes: &[u8]) -> Option<ToneClockDescriptor> {
+    let payload = segment_from_partial_stream(bytes, SEGMENT_TONE_CLOCK_MAP)?;
+
+    decode_tone_clock_map(payload, None).ok()
+}
+
+/// One segment's payload, from as much of the stream as is in hand.
+///
+/// This scan runs before a reader has the rest of the stream, on the bands that
+/// carry the front of it. It therefore checks no CRC, no segment count and no
+/// completeness.
+fn segment_from_partial_stream(bytes: &[u8], wanted: u8) -> Option<&[u8]> {
+    let body = bytes.get(RECORD_DESCRIPTOR_PREFIX_LENGTH..)?;
+    let mut offset = 0usize;
+
+    while offset + 3 <= body.len() {
+        let kind = body[offset];
+        let length = u16::from_be_bytes([body[offset + 1], body[offset + 2]]) as usize;
+        let start = offset + 3;
+        let end = start.checked_add(length)?;
+        if end > body.len() {
+            return None;
+        }
+        if kind == wanted {
+            return Some(&body[start..end]);
+        }
+        offset = end;
+    }
+
+    None
 }
 
 pub fn metadata_bytes_from_grayscale_rgba(
@@ -2156,9 +2428,8 @@ pub fn tone_clock_pixel_count(clock: &ToneClockDescriptor, byte_length: usize) -
 /// ring_count || ring_slots (u8)* || span_inner (u16be) || span_outer (u16be)
 /// || pockets (base[3] tol gap_base[3] gap_tol)* || …`
 ///
-/// A wheel of one ring is written as version 1, so a record that does not
-/// need rings is byte for byte the record it was and every player that could
-/// read it still can.
+/// An encoder writes a wheel of one ring as version 1, so a record with one
+/// ring keeps its bytes, and every player that reads version 1 reads it.
 pub fn encode_tone_clock_map(
     clock: &ToneClockDescriptor,
     expected_byte_length: Option<usize>,
@@ -2225,9 +2496,9 @@ pub fn decode_tone_clock_map(
         1 => true,
         other => bail!("tone clock blend flag {other} is not 0 or 1"),
     };
-    // A v1 map has one ring holding every slot, over the whole record, turned
-    // as one piece: that is what a wheel of wedges was, and reading it as
-    // anything else would move the pockets of every record already pressed.
+    // A v1 map holds one ring with every slot, over the whole record, turned
+    // as one piece. That form is the wheel of wedges. Another reading would
+    // move the pockets of every record already pressed.
     let (rings, rotation_centidegrees, span) = if version == TONE_CLOCK_MAP_VERSION {
         let ring_count = usize::from(cursor.read_u8("tone clock ring count")?);
         if ring_count == 0 || ring_count > TONE_CLOCK_MAX_RINGS {
@@ -2293,9 +2564,8 @@ pub fn decode_tone_clock_map(
         blend,
         bits_per_pixel,
         ordering,
-        // A v1 map comes back with its one ring written out rather than
-        // left implicit, so nothing downstream has to know which version it
-        // was read from.
+        // A v1 map comes back with its one ring written out, so a downstream
+        // caller reads both versions the same way.
         rings,
         span,
         slots,
@@ -2396,6 +2666,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut deferred_attestation = None;
     let mut deadwax = None;
     let mut lead_out_geometry = None;
+    let mut run_out_tone = None;
     let mut spiral_family = None;
     let mut spiral_clockwise = None;
 
@@ -2672,14 +2943,25 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 assign_once(&mut spiral_clockwise, payload[0] != 0, "groove handedness")?;
             }
             SEGMENT_LEAD_OUT_GEOMETRY => {
-                if payload.len() != 1 {
+                // Sized rather than versioned, as the deadwax extent is: one
+                // byte is the revision alone, four carries the tone the
+                // trailer was cut in, and a longer payload from a later
+                // writer decodes to what these mean.
+                if payload.len() != 1 && payload.len() < 4 {
                     bail!("lead-out geometry segment has invalid length");
                 }
-                // The one segment a decoder must not skip. Every other
-                // unknown is a feature it does without; this one says the
-                // band under its own trailer was drawn by numbers it does not
-                // have, and tracing it anyway returns bytes that look like
-                // bytes.
+                if payload.len() >= 4 {
+                    assign_once(
+                        &mut run_out_tone,
+                        [payload[1], payload[2], payload[3]],
+                        "run-out tone",
+                    )?;
+                }
+                // A decoder must read this segment. An unknown value in any
+                // other segment costs the decoder one feature. An unknown
+                // value here states that constants outside this build drew the
+                // band under the trailer, and a trace under the wrong
+                // constants returns plausible bytes.
                 if payload[0] > LEAD_OUT_GEOMETRY_REVISION {
                     bail!(
                         "record was cut under lead-out geometry revision {}, and this build \
@@ -2689,16 +2971,14 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 }
                 assign_once(&mut lead_out_geometry, payload[0], "lead-out geometry")?;
             }
-            // A segment type this build does not know is skipped, not
-            // refused.
+            // This build skips a segment type that it does not know.
             //
-            // Segments are type-length-value, so stepping over one is exact,
-            // and the descriptor CRC32 is computed across the whole payload
-            // — unknown bytes included — so corruption is still caught by
-            // the check below. Refusing outright meant that the first
-            // reader to add a field made every record it wrote unreadable
-            // by every reader already in the field, which is a flag day for
-            // something the framing was built to make additive.
+            // A segment is type-length-value, so a skip is exact. The
+            // descriptor CRC32 covers the whole payload, including the unknown
+            // bytes, so the check below still catches corruption. A refusal
+            // here would make every record from the first writer of a new
+            // field unreadable by every reader already in the field, and the
+            // framing is additive by design.
             _ => {}
         }
 
@@ -2797,9 +3077,10 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         deadwax,
         lead_out_geometry_revision: lead_out_geometry
             .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04),
+        run_out_tone,
     };
-    // Null or signed: a deferred field with no attestation over it is a
-    // malformed record, not merely an untrusted one.
+    // A deferred field is null or signed. A deferred field with no attestation
+    // over it makes the record malformed.
     validate_deferred_group(&descriptor)?;
     validate_signature_set(&descriptor)?;
     Ok(descriptor)
@@ -2984,7 +3265,8 @@ mod tests {
         full.extend_from_slice(&segments.to_be_bytes());
         full.extend_from_slice(&(body.len() as u16).to_be_bytes());
         full.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
-        // A cut that reached the label: no deadwax band, so no feed either.
+        // A cut that reached the label leaves no deadwax band, and therefore
+        // no feed.
         full.extend_from_slice(&0u16.to_be_bytes());
         full.extend_from_slice(&0f64.to_bits().to_be_bytes());
         full.extend_from_slice(&body);
@@ -3020,6 +3302,7 @@ mod tests {
 
     fn test_descriptor(secret: Vec<u8>) -> RecordDescriptor {
         RecordDescriptor {
+            run_out_tone: None,
             spiral_clockwise: true,
             version: RECORD_DESCRIPTOR_VERSION,
             checksum_protected: true,
@@ -3334,9 +3617,9 @@ mod tests {
             gap_switch_offsets: vec![1_000, 2_000, 70_000, 71_000],
         };
         let bytes = encode_tone_clock_map(&clock, Some(140_000)).unwrap();
-        // One ring is still a version 1 map: 7 header bytes, 8 per slot,
-        // 1 + (2 + 2 + 3 + 3) for the switches, and not a byte more than the
-        // records already pressed carry.
+        // One ring encodes as a version 1 map: 7 header bytes, 8 bytes per
+        // slot, and 1 + (2 + 2 + 3 + 3) bytes for the switches. That total
+        // matches the records already pressed.
         assert_eq!(bytes[0], TONE_CLOCK_MAP_VERSION_WEDGES);
         assert_eq!(bytes.len(), 7 + 16 * 8 + 11);
         assert_eq!(decode_tone_clock_map(&bytes, Some(140_000)).unwrap(), clock);
@@ -3351,8 +3634,8 @@ mod tests {
         assert!(encode_tone_clock_map(&spun_too_far, None).is_err());
     }
 
-    /// The house wheel — eight pockets inside, sixteen outside — goes into
-    /// the map and comes back the same wheel.
+    /// The house wheel, which is eight pockets inside and sixteen outside,
+    /// round-trips through the map unchanged.
     #[test]
     fn a_ringed_tone_clock_map_round_trips() {
         let clock = ToneClockDescriptor {
@@ -3380,18 +3663,18 @@ mod tests {
         assert_eq!(clock.rotation_centidegrees, vec![4_500, 9_000]);
         assert_eq!(decode_tone_clock_map(&bytes, Some(140_000)).unwrap(), clock);
 
-        // A wheel whose tones do not add up to its pockets is not a wheel.
+        // The tone count must equal the pocket count.
         let mut short = clock.clone();
         short.slots.truncate(23);
         assert!(encode_tone_clock_map(&short, None).is_err());
-        // Neither is one whose band is not a band.
+        // The band must have a positive width.
         let mut inside_out = clock.clone();
         inside_out.span = (9_700, 3_100);
         assert!(encode_tone_clock_map(&inside_out, None).is_err());
     }
 
-    /// A version 1 map — every clock-toned record pressed so far — still
-    /// reads, as the one-ring wheel over the whole disc that it is.
+    /// A version 1 map, which is the form of every clock-toned record pressed
+    /// so far, reads as a one-ring wheel over the whole disc.
     #[test]
     fn a_version_one_map_still_decodes_as_wedges() {
         let mut bytes = vec![
@@ -3639,11 +3922,11 @@ mod tests {
         }
     }
 
-    /// The band is mid-grey, and that is the whole point of it.
+    /// The band holds mid-grey values.
     ///
-    /// Nothing the descriptor paints may be black, near-black, white or
-    /// near-white: the lead-in and run-out are rings a person looks at, and a
-    /// ladder that reaches for the ends of the range draws them as a barcode.
+    /// The descriptor paints inside the mid-grey window, away from black and
+    /// white. The lead-in and the run-out are visible rings, and a ladder that
+    /// reaches the ends of the range draws them as a barcode.
     /// Sixty-four rungs one value apart occupy sixty-four values, and those
     /// sit in the middle with ninety-six values of headroom either side.
     #[test]
@@ -3660,13 +3943,15 @@ mod tests {
         assert_eq!(i32::from(darkest), 255 - i32::from(lightest));
     }
 
-    /// Off the ladder is refused rather than rounded to the nearest rung.
+    /// A value off the ladder is refused, and it is never rounded to the
+    /// nearest rung.
     ///
-    /// The band is lossless end to end — no resample, no recompression, no
-    /// print and scan — so a pixel arrives carrying exactly the value the
-    /// cutter wrote. A value that is not a rung did not come off a cutter, and
-    /// snapping it to the closest one would turn a corrupted record into a
-    /// plausible one and leave the CRC to be the first thing that noticed.
+    /// The band is lossless end to end. The path holds no resample, no
+    /// recompression and no print-and-scan step, so each pixel arrives with the
+    /// value that the cutter wrote. A value off the ladder came from another
+    /// source. A nearest-rung match would give a corrupted record a plausible
+    /// reading, and it would leave the CRC as the first check to report the
+    /// fault.
     #[test]
     fn a_grey_off_the_ladder_is_refused() {
         // Every value below the band and above it.
@@ -3739,10 +4024,9 @@ mod lead_out_geometry_tests {
         segment
     }
 
-    /// A record that says nothing about its lead-out geometry was cut before
-    /// the segment existed — so before revision 1 existed, and its silence
-    /// means the trailer that came before rather than the one that came
-    /// after.
+    /// A record with no lead-out geometry segment was cut before that segment
+    /// existed, and therefore before revision 1 existed. Its absent segment
+    /// selects the earlier trailer.
     #[test]
     fn an_absent_revision_is_the_draft04_trailer() {
         assert_eq!(
@@ -3756,10 +4040,10 @@ mod lead_out_geometry_tests {
         );
     }
 
-    /// The one segment a decoder must not skip. Everything else it does not
-    /// understand is a feature it goes without; this one says the band under
-    /// its own trailer was drawn by numbers it does not have, and tracing it
-    /// anyway returns bytes that look like bytes.
+    /// A decoder must read this segment. An unknown value in any other
+    /// segment costs the decoder one feature. An unknown value here states that
+    /// constants outside this build drew the band under the trailer, and a
+    /// trace under the wrong constants returns plausible bytes.
     #[test]
     fn a_future_revision_is_refused_rather_than_guessed_at() {
         let bytes = descriptor_carrying(&revision_segment(LEAD_OUT_GEOMETRY_REVISION + 1));

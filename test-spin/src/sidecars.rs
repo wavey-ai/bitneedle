@@ -10,24 +10,23 @@
 //! not restore the groove it claims to describe — which is to say, a record
 //! that does not open.
 //!
-//! Every item is checked, not only the ones with names we know:
+//! The inspection checks every item, including the items with unknown names:
 //!
 //! * the container's framing, version, flags and declared length;
 //! * the BRD1 pointer that declares it, and whether the stream's digest is
 //!   the one the pointer promised;
-//! * each item's type/codec pairing against the registry, its declared raw
-//!   length against what it actually decompresses to, and its payload
-//!   against its declared type (text is UTF-8, JSON parses, an image is
-//!   really AVIF);
-//! * the Patternize reverse map, run against this record's own groove
-//!   indices, so a map that will not restore is a failure here rather than a
-//!   surprise in a player;
+//! * the type and codec pairing of each item against the registry, its
+//!   declared raw length against its decompressed length, and its payload
+//!   against its declared type: text is UTF-8, JSON parses, and an image is
+//!   AVIF;
+//! * the Patternize reverse map, run against the groove indices of this
+//!   record, so a map that fails to restore reports a failure here rather than
+//!   in a player;
 //! * the package display header's magic, version, length and both CRCs;
 //! * the package metadata and cover;
-//! * the attestation, and whether it covers the items actually present;
-//! * arbitrary items, which are checked as thoroughly as the named ones —
-//!   the point of a typed container is that an unknown name is not an
-//!   unchecked one.
+//! * the attestation, and whether it covers the items that the sidecar holds;
+//! * arbitrary items, which get the same checks as the named items. A typed
+//!   container gives an unknown name the same checks as a known one.
 
 use anyhow::{Context, Result};
 use record_sidecar::{
@@ -254,9 +253,9 @@ fn collect_checks(
         ));
     }
 
-    // The Patternize reverse map, actually run. A map that parses but does
-    // not describe this record's groove is the one failure a player cannot
-    // recover from, and it is invisible to every other check here.
+    // The Patternize reverse map, run against this record. A map that parses
+    // and describes another groove is the one failure that a player cannot
+    // recover from, and every other check here passes it.
     match inspection.pattern_map() {
         Some(item) => {
             checks.push(SidecarCheck::from(
@@ -300,10 +299,10 @@ fn collect_checks(
         None => checks.push(SidecarCheck::pass("Album cover", "absent")),
     }
 
-    // The attestation. Structural only: this says the signed digest is over
-    // the items actually present and is bound to this record's descriptor.
-    // Whether the key is one to trust is a question for whoever holds the
-    // key list, and this tool does not pretend to answer it.
+    // The attestation, checked structurally. This check reports that the
+    // signed digest covers the items that the sidecar holds, and that it binds
+    // to the descriptor of this record. The holder of the key list decides the
+    // trust of the key.
     match (&inspection.attestation, inspection.attestation_covers) {
         (Some(attestation), Some(true)) => checks.push(SidecarCheck::pass(
             "Sidecar attestation",

@@ -1,16 +1,16 @@
-//! The lead-out drawn on its own: the run-out turns and the locked groove
-//! they descend into, around a label, with nothing else on the disc.
+//! The lead-out drawn on its own: the run-out turns, the locked groove that
+//! they descend into, and a label.
 //!
-//! It is one groove. The lathe feeds the head in at a coarse pitch once the
-//! programme is over, and part-way through the last revolution the feed is
-//! switched off — the groove stops descending, becomes a circle, and arrives
-//! back at the point the feed died. What the eye reads as three concentric
-//! lines is one continuous cut seen at three radii.
+//! The band is one groove. The lathe feeds the head in at a coarse pitch after
+//! the programme ends. Part way through the last revolution the feed switches
+//! off, the groove stops descending, becomes a circle, and returns to the point
+//! at which the feed stopped. The three concentric lines that the eye reads are
+//! one continuous cut at three radii.
 //!
-//! So it is also one carrier: a single ordered pixel sequence, entered at the
-//! outermost turn and cyclic at the innermost. Its capacity is a property of
-//! the geometry alone, and the geometry follows from the profile's scale
-//! rather than from anything the programme did.
+//! The band is therefore one carrier: one ordered pixel sequence, entered at
+//! the outermost turn and cyclic at the innermost turn. Its capacity follows
+//! from the geometry alone, and the geometry follows from the scale of the
+//! profile.
 //!
 //! cargo run -p record-render --example lead_out -- [profile] [cut_inner_radius] [out.png]
 

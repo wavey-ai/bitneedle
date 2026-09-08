@@ -692,8 +692,9 @@ mod tests {
 
     #[test]
     fn a_derived_code_does_not_open_with_the_ulid() {
-        // Hashed, not truncated: the first symbols must not simply be the
-        // release ID's own leading bits, which are its timestamp.
+        // The code is hashed rather than truncated, so the first symbols
+        // differ from the leading bits of the release ID, which hold its
+        // timestamp.
         let release = [
             0x01, 0x8f, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5,
             0xe6, 0xf7,

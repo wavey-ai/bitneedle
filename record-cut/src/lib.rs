@@ -122,9 +122,9 @@ pub struct TrackInput {
     pub revolution_count: Option<usize>,
 }
 
-/// An explicit inter-track programme gap: a consecutive range of payload
-/// entries (ordinary entries, ECDC in practice — never a special GAP
-/// container) that is intentionally not part of any track.
+/// An explicit inter-track programme gap. It is a consecutive range of
+/// ordinary payload entries, usually ECDC entries, and it sits outside every
+/// track.
 /// `after_track_index` is the 0-based index into `RecordStreamInput::tracks`
 /// this gap immediately follows. Every payload entry must belong to exactly
 /// one track or track gap; there is no implicit "uncovered means gap"
@@ -156,10 +156,10 @@ impl PayloadEntryInput {
         Self::new(payload_descriptor_index, bytes)
     }
 
-    /// Compatibility constructor for callers that already provide one logical
-    /// payload entry, preserved as one BRS1 chunk. Track and track-gap
-    /// entries alike are ordinary payload entries (ECDC in practice); there
-    /// is no special gap container or constructor.
+    /// Compatibility constructor for a caller that supplies one logical
+    /// payload entry, preserved as one BRS1 chunk. A track entry and a
+    /// track-gap entry are both ordinary payload entries, usually ECDC
+    /// entries.
     pub fn already_chunked(payload_descriptor_index: u8, bytes: Vec<u8>) -> Self {
         Self::new(payload_descriptor_index, bytes)
     }

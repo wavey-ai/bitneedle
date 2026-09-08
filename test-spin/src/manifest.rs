@@ -30,8 +30,8 @@ pub const MAX_VALUE_WIDTH: usize = 64;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestReport {
-    /// Whether every check in the report passed. A record that reads but
-    /// fails a check is still reported in full — the failure is the point.
+    /// Whether every check in the report passed. The report covers a record
+    /// that reads and fails a check in full, and it names the failed check.
     pub ok: bool,
     pub checks_passed: usize,
     pub checks_failed: usize,

@@ -148,8 +148,8 @@ mod tests {
     #[test]
     fn parser_rejects_trailing_bytes() {
         let mut bytes = encode_unencrypted_chunk(b"payload").unwrap();
-        // A trailing 0x01 looks like the start of a new chunk's varuint
-        // length, but there are no bytes left for its CRC-32 or payload.
+        // A trailing 0x01 has the form of the varuint length of a new chunk,
+        // and the remaining bytes hold no CRC-32 and no payload.
         bytes.push(0x01);
         let err = parse_chunk_section(&bytes, 0, false).unwrap_err();
         assert!(err.to_string().contains("truncated"));

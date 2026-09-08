@@ -17,6 +17,7 @@ use record_groove::{
     adaptive_gap_tone_lightness, lighten_base_oklch, oklch_lightness, square_side_for_pixel_count,
     ToneOrdering as CarrierToneOrdering, ToneSpan, TonedConfig, TonedPalette, TonedRender,
 };
+pub mod export;
 pub mod metadata_groove;
 
 use record_cut::descriptor::{paint_metadata_bytes_as_grayscale, RecordDescriptorInput};
@@ -44,7 +45,7 @@ const EMPTY_GROOVE_VISIBLE_TURNS: f64 = 64.0;
 // These are record-core's, not this crate's. A local copy of a turn count is a
 // second answer to a question the format already settles, and the two drift
 // silently: the trailer's pitch is computed here and its geometry there.
-use record_core::{LEAD_IN_TURNS, RUN_OUT_TURNS};
+use record_core::LEAD_IN_TURNS;
 
 const LEAD_IN_OUTER_EDGE_INSET: i32 = 1;
 
@@ -160,6 +161,16 @@ pub struct RenderOptions {
     /// skips its decode-and-compare when this is set, whatever `verify`
     /// says. Never kept, never pressed.
     pub groove_tone_preview: Option<bool>,
+    /// The tone the trailer is cut in: the coarse run-out rings and the lock
+    /// groove, as one CSS hex colour.
+    ///
+    /// Matte, whatever finish the programme was read with. Deciding the
+    /// colour means reading the artwork, which the caller does: this crate
+    /// takes tones, not pictures.
+    ///
+    /// Without it the trailer takes the wheel's own pockets. An untoned
+    /// record keeps the grey dither.
+    pub run_out_tone_color: Option<String>,
     #[serde(default)]
     pub guide_outlines: bool,
     /// How much of the payload band this cut lays its programme across,
@@ -172,12 +183,14 @@ pub struct RenderOptions {
     /// The pitch to cut at, centre to centre between turns, in rendered
     /// pixels. Clamped at [`record_core::MIN_TURN_SEPARATION_PX`].
     ///
-    /// The clamp is not a preference. `trace_record_spiral_with_family`
-    /// rounds every point to an integer pixel and skips one already taken,
-    /// so turns closer than the grid can separate merge: measured on the ten
-    /// at 576, asking 1.75 draws 2.33, 1.50 draws 3.00, 1.30 draws 4.25 —
-    /// wider than asked and irregular. At 2.0 and above asked and drawn
-    /// agree, so that is the only range this option can honestly serve.
+    /// The clamp follows from the raster. `trace_record_spiral_with_family`
+    /// rounds every point to an integer pixel and skips a pixel that is
+    /// already taken, so turns closer than the grid resolves merge. Measured
+    /// on the ten at 576: a request for 1.75 draws 2.33, a request for 1.50
+    /// draws 3.00, and a request for 1.30 draws 4.25. Each result is wider
+    /// than the request, and the spacing is irregular. At 2.0 and above, the
+    /// request and the drawn result agree, which is the range that this option
+    /// serves.
     pub turn_separation_px: Option<f64>,
     /// Which way the programme's groove winds from its start angle.
     /// Defaults to `true`, clockwise, which is what every record cut before
@@ -359,8 +372,8 @@ pub struct RenderPayload {
     /// Which way the programme's groove winds. See
     /// `RenderOptions::spiral_clockwise`.
     pub spiral_clockwise: bool,
-    /// The span the pitch was actually fitted against, after any widening
-    /// forced by the density floor.
+    /// The span that the pitch was fitted against, after any widening that the
+    /// density floor forced.
     pub groove_span_fraction: f64,
     /// The radius the nominal was laid out to stop on. A payload that comes
     /// in over its nominal runs past this, inward, toward
@@ -368,8 +381,8 @@ pub struct RenderPayload {
     pub cut_inner_radius: i32,
     /// Turns of deadwax the cut left behind, at the lathe's spiral feed.
     pub deadwax_turns: f64,
-    /// Addressable pixels in the deadwax carrier. Empty today; addressable
-    /// regardless, which is the point.
+    /// Addressable pixels in the deadwax carrier. The carrier holds no bytes
+    /// at present, and it stays addressable.
     pub deadwax_pixel_capacity: usize,
     pub source_width: usize,
     pub source_height: usize,
@@ -1178,19 +1191,18 @@ fn groove_angle_at_radius(
 /// Where the deadwax has to stop: the outermost turn of the lead-out, plus
 /// the daylight two bands need not to round onto each other's pixels.
 ///
-/// This is what the wide extents are for. The deadwax is cut at the lathe's
-/// own millimetre feed, so a side that stops early fills the whole way down
-/// with a turn every millimetre — seventeen of them on an album at a third of
-/// its band — and that ladder is drawn straight across the artwork. A lead-out
-/// that widens into the same room is cut instead of it, three or four
-/// deliberate rings where there were seventeen, and it carries bytes while it
-/// is there. The deadwax is not squeezed out on purpose; there is simply
-/// nothing left for it to cross.
+/// The wide extents use this space. The deadwax is cut at the millimetre feed
+/// of the lathe, so a side that stops early fills the whole descent with a turn
+/// every millimetre. An album cut to a third of its band draws seventeen such
+/// turns across the artwork. A lead-out that widens into the same space
+/// replaces that ladder with three or four separate rings, and those rings
+/// carry bytes. The lead-out takes the space that the deadwax would otherwise
+/// cross.
 fn deadwax_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
     let lead_out = record_core::lead_out_geometry_with_extent(
         record_profile,
         cut_inner_radius,
-        record_core::LeadOutExtent::ExtraWide,
+        record_core::LeadOutExtent::Fill,
     )?;
 
     Ok(lead_out.entry_radius + record_core::MIN_TURN_SEPARATION_PX)
@@ -1211,10 +1223,10 @@ fn build_deadwax_spiral_indices(
         return Ok(Vec::new());
     }
 
-    // Pick the groove up where the programme put it down. Without this the
-    // deadwax is a second spiral that happens to sit inside the first, and
-    // nothing can walk from the last programme pixel into the first deadwax
-    // one — which is the whole point of it being a carrier.
+    // Take the groove up at the point where the programme leaves it. This
+    // start angle joins the two bands into one groove, so a reader passes from
+    // the last programme pixel into the first deadwax pixel. A deadwax started
+    // at a fixed angle is a second spiral inside the first.
     let start_angle =
         groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
 
@@ -1296,11 +1308,10 @@ fn build_spiral_mask(
     })
 }
 
-// Exact-fit probes need only the number of addressable pixels. Building an
-// ordered `Vec<usize>` for every binary-search and sweep candidate needlessly
-// drives the WASM allocator to a large high-water mark. Count the same unique
-// traced pixels in place and reserve the ordered representation for the one
-// winning spiral that is actually rendered.
+// An exact-fit probe needs the count of addressable pixels alone. An ordered
+// `Vec<usize>` for every binary-search candidate and sweep candidate drives the
+// WASM allocator to a high water mark. Count the same unique traced pixels in
+// place, and build the ordered representation for the winning spiral alone.
 fn count_spiral_mask_pixels(
     width: usize,
     height: usize,
@@ -1945,6 +1956,74 @@ fn find_exact_fit_with_coverage(
     )
 }
 
+/// The trailer's tone, as the caller gave it.
+///
+/// [`record_groove::normalized_hex_color`] falls back to white, so an
+/// unparseable colour returns `None` rather than a white ring.
+fn run_out_tone(render_options: &RenderOptions) -> Option<[u8; 3]> {
+    let raw = render_options.run_out_tone_color.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let hex = record_groove::normalized_hex_color(Some(raw));
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+
+    Some([channel(1..3)?, channel(3..5)?, channel(5..7)?])
+}
+
+/// Paint a band in the record's own colour: each pixel in the tone of the
+/// pocket it passes through, off the same wheel the programme is cut with.
+///
+/// `tone` overrides the wheel with one colour for the whole band. Without a
+/// wheel and without a tone there is no colour to cut in, and the band keeps
+/// the grey dither.
+///
+/// Flat and opaque, as the programme's own pixels are.
+fn paint_toned_groove(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    indices: &[usize],
+    clock: Option<&record_groove::ToneClock>,
+    tone: Option<[u8; 3]>,
+    salt: usize,
+) {
+    if tone.is_none() && clock.is_none() {
+        paint_unused_metadata_groove(data, indices, 0, salt, 0);
+        return;
+    }
+
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+
+    for (sequence, &pixel_index) in indices.iter().enumerate() {
+        let Some(rgba_index) = pixel_index.checked_mul(4) else {
+            continue;
+        };
+        if rgba_index + 3 >= data.len() {
+            continue;
+        }
+
+        let base = match (tone, clock) {
+            (Some(tone), _) => tone,
+            (None, Some(clock)) => {
+                let x = (pixel_index % width) as f64;
+                let y = (pixel_index / width) as f64;
+                let angle = record_groove::pixel_angle(x, y, center_x, center_y);
+                // Both bands sit inside the wheel's span, where a radius
+                // takes the nearest ring.
+                let away = record_groove::pixel_radius(x, y, center_x, center_y);
+                clock.slots[clock.cell_index(sequence, angle, away)].base
+            }
+            // Unreachable: a band with neither took the grey dither above.
+            (None, None) => continue,
+        };
+
+        data[rgba_index..rgba_index + 3].copy_from_slice(&base);
+        data[rgba_index + 3] = 255;
+    }
+}
+
 fn paint_descriptor_spiral(
     data: &mut [u8],
     width: usize,
@@ -1952,53 +2031,58 @@ fn paint_descriptor_spiral(
     record_profile: &str,
     main_b_value: f64,
     descriptor: &RecordDescriptorInput,
+    trailer: Option<(&[usize], &record_groove::ToneClock)>,
 ) -> Result<RecordDescriptor> {
     let lead_in_indices = build_lead_in_spiral_indices(width, height, record_profile)?;
-    // The band widens into whatever room the programme left, so it has to be
-    // built against the cut the descriptor is about to declare.
-    let declared_cut = match descriptor.cut_inner_radius {
-        0 => None,
-        radius => Some(i32::from(radius)),
-    };
-    let run_out_indices =
-        build_run_out_spiral_indices(width, height, record_profile, declared_cut)?;
-    let mut metadata_indices = lead_in_indices.clone();
-    let run_out_start = metadata_indices.len();
 
-    metadata_indices.extend_from_slice(&run_out_indices);
-
-    let byte_capacity =
-        record_descriptor::metadata_byte_capacity_for_pixel_count(metadata_indices.len());
+    // A reader reads the grey lead-in before it knows anything about the
+    // record, and the trailer's toning is one of the things it learns there.
+    // So the lead-in fills first and the trailer takes the rest. The split
+    // falls on a byte, so each band packs its own bits.
+    let lead_in_capacity =
+        record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
+    let trailer_capacity = trailer.map_or(0, |(indices, clock)| {
+        record_descriptor::band_byte_capacity(indices.len(), clock)
+    });
 
     let descriptor_bytes = record_cut::descriptor::encode_record_descriptor_stream(
         main_b_value,
         descriptor,
-        byte_capacity,
+        lead_in_capacity + trailer_capacity,
     )?;
 
+    let head = descriptor_bytes.len().min(lead_in_capacity);
     let written_pixels =
-        paint_metadata_bytes_as_grayscale(data, &metadata_indices, &descriptor_bytes);
+        paint_metadata_bytes_as_grayscale(data, &lead_in_indices, &descriptor_bytes[..head]);
 
-    let lead_in_fade_pixels = metadata_fade_pixel_count(lead_in_indices.len(), LEAD_IN_TURNS);
-    let run_out_fade_pixels =
-        metadata_fade_pixel_count(run_out_indices.len(), RUN_OUT_TURNS);
+    let fade_pixels = metadata_fade_pixel_count(lead_in_indices.len(), LEAD_IN_TURNS);
 
-    let boundary_fade_pixels = if written_pixels < run_out_start {
-        lead_in_fade_pixels
-    } else {
-        run_out_fade_pixels
-    };
+    paint_unused_metadata_groove(data, &lead_in_indices, written_pixels, 17, fade_pixels);
 
-    paint_unused_metadata_groove(
-        data,
-        &metadata_indices,
-        written_pixels,
-        17,
-        boundary_fade_pixels,
-    );
-
-    if written_pixels < run_out_start {
-        paint_unused_metadata_groove(data, &metadata_indices, run_out_start, 31, 0);
+    if head < descriptor_bytes.len() {
+        let Some((indices, clock)) = trailer else {
+            bail!("the descriptor overran the lead-in and this record has no trailer to hold it");
+        };
+        // The trailer is read with the tone or the wheel, and both are
+        // segments. A segment past the lead-in is one the reader cannot
+        // reach before it needs it.
+        let head_bytes = &descriptor_bytes[..head];
+        if record_descriptor::run_out_tone_from_partial_stream(head_bytes).is_none()
+            && record_descriptor::tone_clock_map_from_partial_stream(head_bytes).is_none()
+        {
+            bail!(
+                "the descriptor spills into the trailer, and neither the trailer's tone nor \
+                 the record's wheel fits in the lead-in"
+            );
+        }
+        record_cut::descriptor::paint_band_bytes_as_toned(
+            data,
+            width,
+            height,
+            indices,
+            &descriptor_bytes[head..],
+            clock,
+        )?;
     }
 
     record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
@@ -2092,6 +2176,7 @@ fn render_track_scanline_onto_transparent_spiral(
     dummy_spiral_regions: &[DummySpiralPixelRegion],
     tone_clock: Option<(&[u8], &record_groove::ToneClock)>,
     tone_preview: bool,
+    trailer_tone: Option<[u8; 3]>,
 ) -> Result<TransparentRender> {
     let spiral_mask =
         build_spiral_mask(width, height, b_value, family, record_profile,
@@ -2118,7 +2203,24 @@ fn render_track_scanline_onto_transparent_spiral(
         .first()
         .zip(deadwax_indices.last())
         .map(|(first, last)| (*first, *last));
-    paint_unused_metadata_groove(&mut data, &deadwax_indices, 0, 53, 0);
+    // The deadwax is the groove the head kept cutting, so it takes the tone
+    // the groove above it was cut in: the wheel pocket by pocket, or the
+    // span's own base where the record carries no wheel.
+    let groove_clock = tone_clock.map(|(_, clock)| clock);
+    let single_tone = if groove_clock.is_some() {
+        None
+    } else {
+        descriptor_input.tone_spans.first().map(|span| span.base)
+    };
+    paint_toned_groove(
+        &mut data,
+        width,
+        height,
+        &deadwax_indices,
+        groove_clock,
+        single_tone,
+        53,
+    );
 
     // What the cut left standing between the programme and the descriptor's
     // inner band, declared so that something other than this renderer can
@@ -2296,11 +2398,38 @@ fn render_track_scanline_onto_transparent_spiral(
         }
     }
 
-    // The extent is the lathe's to declare, not the caller's: it is a fact
-    // about where the groove actually stopped, which nothing above this
-    // knows until the cut has been laid down.
+    // The renderer declares the extent, because the extent states the radius
+    // at which the groove stopped. That radius is known after the cut is laid
+    // down, so the caller supplies no extent.
     let mut descriptor_input = descriptor_input.clone();
     descriptor_input.deadwax = deadwax_extent;
+
+    // The trailer is matte when the caller names a tone for it, and it takes
+    // the wheel of the record otherwise. In both cases it carries at the rate
+    // of the clock, and the descriptor writes into it after the lead-in fills.
+    // Paint it first, so the part that the header leaves keeps the colour of
+    // the band.
+    let trailer_indices =
+        build_run_out_spiral_indices(width, height, record_profile, Some(cut_inner_radius))?;
+    let trailer_tone = trailer_tone.or(single_tone);
+    // The tone that the band is cut in, which the descriptor reports to a
+    // reader. It is the colour of the caller when the caller gives one, and the
+    // single tone of the record otherwise.
+    descriptor_input.run_out_tone = trailer_tone;
+    paint_toned_groove(
+        &mut data,
+        width,
+        height,
+        &trailer_indices,
+        groove_clock,
+        trailer_tone,
+        31,
+    );
+    let trailer_clock = match (trailer_tone, groove_clock) {
+        (Some(tone), _) => Some(record_descriptor::trailer_clock(tone)?),
+        (None, Some(clock)) => Some(record_descriptor::band_clock(clock)),
+        (None, None) => None,
+    };
 
     let descriptor = paint_descriptor_spiral(
         &mut data,
@@ -2309,6 +2438,9 @@ fn render_track_scanline_onto_transparent_spiral(
         record_profile,
         b_value,
         &descriptor_input,
+        trailer_clock
+            .as_ref()
+            .map(|clock| (trailer_indices.as_slice(), clock)),
     )?;
 
     let pixels_remaining =
@@ -2658,13 +2790,12 @@ fn render_payload_codes_to_transparent_spiral(
         .map(|region| region.pixel_count)
         .sum::<usize>();
     let required_track_pixel_count = track.pixel_count.saturating_add(dummy_spiral_pixel_count);
-    // The nominal the cut is laid out against: the caller's declared final
-    // size, not what this render is holding. A progressive load passes the
-    // same nominal for every chunk, so every partial render resolves the
-    // same pitch and paints a prefix of one groove — nothing already cut
-    // ever moves. It is floored at what we actually have, so a payload that
-    // comes in over its nominal is laid out for its real size rather than
-    // being cut off.
+    // The nominal size that the cut is laid out against, which is the declared
+    // final size from the caller. A progressive load passes the same nominal
+    // for every chunk, so every partial render resolves the same pitch and
+    // paints a prefix of one groove. Each drawn pixel therefore holds its seat.
+    // The nominal has a floor at the present payload size, so a payload above
+    // its nominal is laid out at its real size.
     let nominal_track_pixel_count = render_options
         .fit_track_pixel_count
         .filter(|value| *value > 0);
@@ -2703,16 +2834,16 @@ fn render_payload_codes_to_transparent_spiral(
         .map(record_descriptor::CacheEncryptionDescriptor::from_secret_base64url)
         .transpose()?;
 
-    // A cut that reaches the label declares no deadwax; anything short
-    // declares where its groove stops and what feed the rest is cut at, so a
-    // reader holding only the PNG can walk the whole spiral.
+    // A cut that reaches the label declares no deadwax. A shorter cut declares
+    // the radius at which its groove stops, and the feed that the rest is cut
+    // at, so a reader with the PNG alone walks the whole spiral.
     let declares_deadwax =
         cut_inner_radius > payload_inner_radius(&describe_record_profile(&normalized_profile)?);
     let descriptor_input = RecordDescriptorInput {
-        // The hand the programme is cut with, carried into the descriptor so
-        // a reader retraces what was actually cut rather than what the house
-        // used to cut. Absent from the caller means the house hand, and the
-        // descriptor then writes no segment at all.
+        // The hand that the programme is cut with. The descriptor carries it,
+        // so a reader retraces the cut of this record rather than the house
+        // hand. An absent value from the caller selects the house hand, and the
+        // descriptor then writes no segment.
         spiral_anticlockwise: !render_options.spiral_clockwise.unwrap_or(true),
         cut_inner_radius: if declares_deadwax {
             u16::try_from(cut_inner_radius).context("cut inner radius does not fit u16")?
@@ -2752,6 +2883,7 @@ fn render_payload_codes_to_transparent_spiral(
         // `render_track_scanline_onto_transparent_spiral`. Nothing above the
         // lathe knows where the groove stopped.
         deadwax: None,
+        run_out_tone: run_out_tone(render_options),
     };
 
     progress("groove…");
@@ -2769,6 +2901,7 @@ fn render_payload_codes_to_transparent_spiral(
         &dummy_spiral_regions,
         tone_clock.as_ref().map(|clock| (codes, clock)),
         render_options.groove_tone_preview.unwrap_or(false),
+        run_out_tone(render_options),
     )?;
 
     let min_perceptible_turn_gap = resolve_render_min_perceptible_turn_gap(render_options)?
@@ -3342,6 +3475,25 @@ mod tests {
         }
     }
 
+    /// `len` bytes of real codec output, from a byte into the golden ECDC.
+    ///
+    /// A groove holds whatever the record holds, and what a record holds is
+    /// EnCodec: high-entropy bytes whose colours land all over a pocket's
+    /// palette. A constant fill is the easy case — its bytes cluster, so a
+    /// palette that could not tell two neighbouring colours apart would
+    /// never be asked to — which makes a fill the wrong thing to prove a
+    /// carrier with. `from` moves the window so entries cut from one file
+    /// are not cut from the same bytes.
+    fn codec_bytes(from: usize, len: usize) -> Vec<u8> {
+        let id = "lori-asha-westside-single45-hq";
+        let ecdc = fixture_bytes(id, &format!("{id}.ecdc"));
+        assert!(
+            ecdc.len() > from + len,
+            "the golden ECDC is shorter than the slice asked for"
+        );
+        ecdc[from..from + len].to_vec()
+    }
+
     /// A raw RGB code block of `byte_length`, taken from a golden payload so
     /// the pixel content is realistic. Sliced off the BRS1 magic so the
     /// renderer treats it as a code block rather than a chunk stream, which
@@ -3364,10 +3516,9 @@ mod tests {
         .payload
     }
 
-    /// The cut a progressive load lays down must be the finished cut, not a
-    /// smaller record that happens to be on the way to it. Pin the nominal
-    /// and the pitch must not move as chunks arrive — that is the whole
-    /// invariant behind rendering a record the way a lathe cuts one.
+    /// A progressive load lays down the finished cut at every step. A pinned
+    /// nominal holds the pitch while the chunks arrive. This invariant makes
+    /// the render follow the way a lathe cuts.
     #[test]
     fn a_pinned_nominal_holds_the_pitch_still_while_the_payload_grows() {
         let nominal_bytes = 90_000;
@@ -3449,8 +3600,8 @@ mod tests {
         }
     }
 
-    /// A cut that does not fill its band stops short of the label and leaves
-    /// the rest as deadwax, which is the whole point of the span.
+    /// A cut below a full band stops short of the label and leaves the rest of
+    /// the band as deadwax. The span sets that stop radius.
     #[test]
     fn a_short_cut_stops_short_of_the_label() {
         let geometry = describe_record_profile("lp").unwrap();
@@ -3521,20 +3672,19 @@ mod tests {
         );
     }
 
-    /// A dubplate's deadwax is tens of turns, not a handful. One four-minute
-    /// track leaves about 66 mm of travel on a 12", which at the spiral feed
-    /// is some sixty turns — the broad ladder you can see on a real one. If
-    /// this ever falls to single figures the run-out has stopped being a
-    /// run-out and gone back to being three rings near the label.
+    /// The deadwax of a dubplate holds tens of turns. One four-minute track
+    /// leaves about 66 mm of travel on a 12", which is about sixty turns at the
+    /// spiral feed. A physical dubplate shows that broad ladder. A count in
+    /// single figures means that the run-out has taken the band and left three
+    /// rings near the label.
     #[test]
     fn a_dubplate_sized_cut_leaves_a_deadwax_of_the_right_order() {
         let cut = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
 
-        // A dubplate's deadwax used to be forty to ninety turns, because the
-        // head kept cutting at a millimetre a turn the whole way to the
-        // trailer. The lead-out now widens into that room first and the
-        // deadwax gets the remainder, so the count is a fraction of what it
-        // was — which is the whole reason the wide extents exist.
+        // The deadwax of a dubplate held forty to ninety turns, because the
+        // head cut at a millimetre a turn up to the trailer. The lead-out now
+        // widens into that space first, and the deadwax takes the remainder,
+        // so the count is lower. The wide extents produce this result.
         assert!(
             (5.0..40.0).contains(&cut.deadwax_turns),
             "expected a dubplate's deadwax after the lead-out took its share, got {} turns",
@@ -3577,10 +3727,10 @@ mod tests {
     /// deadwax. Without the phase carried across it restarts at the top of
     /// the disc and the join is most of a revolution.
     ///
-    /// Measured against the analytic crossing rather than against a
-    /// neighbouring mask pixel: pixel radii quantise to about ±0.7 px, so
-    /// "the last pixel above the transition" can sit a fifth of a turn from
-    /// where the groove actually crosses.
+    /// The test measures against the analytic crossing rather than against a
+    /// neighbouring mask pixel. Pixel radii quantize to about ±0.7 px, so the
+    /// last pixel above the transition can sit a fifth of a turn from the
+    /// crossing of the groove.
     #[test]
     fn the_deadwax_picks_the_groove_up_where_the_programme_left_it() {
         for span in [0.25_f64, 0.33, 0.50] {
@@ -3699,6 +3849,161 @@ mod tests {
     fn fixture_bytes(id: &str, name: &str) -> Vec<u8> {
         let path = fixture_dir(id).join(name);
         fs::read(&path).unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+    }
+
+    // ---- export ---------------------------------------------------------
+
+    use crate::export::{read_rgba, write_rgba, RecordImageFormat};
+
+    /// A short record with a real payload in it, and the stream it carries.
+    fn pressed_record(options: Option<&str>) -> (Vec<u8>, Vec<u8>) {
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
+            tracks: vec![TrackInput {
+                title: "Side A".to_string(),
+                first_revolution_index: None,
+                revolution_count: None,
+            }],
+            track_gaps: vec![],
+        };
+        let entries = vec![PayloadEntryInput {
+            payload_descriptor_index: 0,
+            bytes: codec_bytes(64, 6_000),
+        }];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+        let output =
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, options).unwrap();
+        (output.png_bytes, stream)
+    }
+
+    /// A wheel of sixteen pockets, which is the hard case: a toned cut gives
+    /// every pocket its own palette of a million iso-luma colours and packs
+    /// the payload across them at twenty bits a pixel, so a format that
+    /// moves one channel of one pixel by one step loses the record.
+    fn wheel_options() -> String {
+        let slots: Vec<String> = (0..16)
+            .map(|k| {
+                let t = k as f64 / 16.0 * std::f64::consts::TAU;
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (150.0 + 90.0 * t.cos()) as u8,
+                    (150.0 + 90.0 * (t + 2.094).cos()) as u8,
+                    (150.0 + 90.0 * (t + 4.189).cos()) as u8
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "grooveToneSlots": slots,
+            "grooveToneRings": [8, 8],
+            "grooveToneRotationDegrees": [5.625, 33.0],
+            "grooveToneBlend": true,
+        })
+        .to_string()
+    }
+
+    /// Every format this build can write returns the record's own pixels.
+    ///
+    /// The test compares the pixels byte for byte, and then decodes the
+    /// groove. Each format claims the first property. The second property is
+    /// the readable record. A build with the default features proves PNG here.
+    /// `--features all-formats` exercises the other formats.
+    #[test]
+    fn every_export_format_returns_the_record_exactly() {
+        for (what, options) in [("rgb", None), ("toned", Some(wheel_options()))] {
+            let (png, stream) = pressed_record(options.as_deref());
+            let (width, height, pixels) = read_rgba(&png).unwrap();
+            assert_eq!((width, height), (RECORD_WIDTH, RECORD_HEIGHT));
+
+            for format in RecordImageFormat::available() {
+                let id = format.id();
+                let written = write_rgba(format, width, height, &pixels)
+                    .unwrap_or_else(|error| panic!("{what}: writing {id} failed: {error:#}"));
+
+                let (back_width, back_height, back) = read_rgba(&written)
+                    .unwrap_or_else(|error| panic!("{what}: reading {id} back failed: {error:#}"));
+                assert_eq!(
+                    (back_width, back_height),
+                    (width, height),
+                    "{what}: {id} changed the record's size"
+                );
+                assert_eq!(
+                    back.len(),
+                    pixels.len(),
+                    "{what}: {id} changed how many pixels the record has"
+                );
+                let moved = back
+                    .iter()
+                    .zip(&pixels)
+                    .position(|(there, here)| there != here);
+                assert!(
+                    moved.is_none(),
+                    "{what}: {id} altered byte {} of the record",
+                    moved.unwrap()
+                );
+
+                let decoded =
+                    record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+                        &written,
+                        "single45",
+                        Some(stream.len()),
+                    )
+                    .unwrap_or_else(|error| panic!("{what}: {id} would not decode: {error:#}"));
+                assert_eq!(
+                    decoded.bytes, stream,
+                    "{what}: the groove did not survive {id}"
+                );
+            }
+        }
+    }
+
+    /// A format the build does not carry says so, rather than writing
+    /// something that is not that format.
+    #[test]
+    fn an_uncompiled_format_refuses_by_name() {
+        let pixels = vec![0u8; 4];
+        for format in RecordImageFormat::ALL {
+            let written = write_rgba(format, 1, 1, &pixels);
+            if format.is_available() {
+                assert!(written.is_ok(), "{} is compiled in", format.id());
+            } else {
+                let error = written.expect_err("an uncompiled format must not write").to_string();
+                assert!(
+                    error.contains(format.id()),
+                    "{} refused without naming itself: {error}",
+                    format.id()
+                );
+            }
+        }
+    }
+
+    /// The names a caller asks for and the names written back agree.
+    #[test]
+    fn a_format_is_found_by_the_name_it_gives() {
+        for format in RecordImageFormat::ALL {
+            assert_eq!(RecordImageFormat::from_id(format.id()), Some(format));
+            assert!(!format.extension().is_empty());
+            assert!(format.media_type().contains('/'));
+        }
+        assert_eq!(RecordImageFormat::from_id("jpeg"), None);
+        assert_eq!(RecordImageFormat::from_id("gif"), None);
+    }
+
+    /// The record must not care which format it arrived in: a PNG written
+    /// as a TIFF and back again is the PNG.
+    #[test]
+    fn a_record_transcodes_through_every_compiled_format() {
+        let (png, stream) = pressed_record(None);
+        for format in RecordImageFormat::available() {
+            let there = crate::export::transcode(&png, format).unwrap();
+            let back = crate::export::transcode(&there, RecordImageFormat::Png).unwrap();
+            let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+                &back,
+                "single45",
+                Some(stream.len()),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:#}", format.id()));
+            assert_eq!(decoded.bytes, stream, "a record lost itself in {}", format.id());
+        }
     }
 
     #[test]
@@ -3833,8 +4138,8 @@ mod tests {
 
     #[test]
     fn two_track_compact_groove_renders_and_decodes_byte_exact() {
-        let payload_one = vec![0xAAu8; 4_000];
-        let payload_two = vec![0xBBu8; 5_500];
+        let payload_one = codec_bytes(64, 4_000);
+        let payload_two = codec_bytes(60_000, 5_500);
 
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
@@ -3976,7 +4281,7 @@ mod tests {
 
     #[test]
     fn archimedean_render_ignores_family_plumbing() {
-        let payload = vec![0x5Au8; 3_000];
+        let payload = codec_bytes(64, 3_000);
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
             tracks: vec![TrackInput {
@@ -4016,8 +4321,8 @@ mod tests {
 
     #[test]
     fn two_track_compact_groove_with_two_descriptors_renders_and_decodes_byte_exact() {
-        let payload_one = vec![0xAAu8; 4_000];
-        let payload_two = vec![0xCCu8; 3_200];
+        let payload_one = codec_bytes(64, 4_000);
+        let payload_two = codec_bytes(60_000, 3_200);
 
         let input = RecordStreamInput {
             payload_descriptors: vec![
@@ -4095,9 +4400,9 @@ mod tests {
     // track_gaps list, never from a special container or codec.
     #[test]
     fn track_gap_entry_uses_lighter_groove_tone_and_round_trips() {
-        let music_one = vec![0xAAu8; 4_000];
-        let gap = vec![0xCCu8; 1_500];
-        let music_two = vec![0xBBu8; 5_500];
+        let music_one = codec_bytes(64, 4_000);
+        let gap = codec_bytes(20_000, 1_500);
+        let music_two = codec_bytes(40_000, 5_500);
 
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
@@ -4197,9 +4502,9 @@ mod tests {
     /// descriptor.
     #[test]
     fn clock_toned_groove_round_trips_with_gaps() {
-        let music_one = vec![0xAAu8; 4_000];
-        let gap = vec![0xCCu8; 1_500];
-        let music_two = vec![0xBBu8; 5_500];
+        let music_one = codec_bytes(64, 4_000);
+        let gap = codec_bytes(20_000, 1_500);
+        let music_two = codec_bytes(40_000, 5_500);
 
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
@@ -4286,9 +4591,9 @@ mod tests {
             assert_ne!(slot.gap_base, slot.base);
         }
 
-        // No longer than one tone at the same budget — a pixel or two
-        // shorter, in fact: spans each pad their own tail, the clock's one
-        // stream pads once.
+        // At the same budget, a clock cut is one or two pixels shorter than a
+        // single-tone cut. Each span of a single-tone cut pads its own tail,
+        // and the one stream of a clock pads once.
         let single = serde_json::json!({ "grooveToneColor": slots[0] }).to_string();
         let single_output =
             render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&single)).unwrap();
@@ -4324,7 +4629,7 @@ mod tests {
         };
         let entries = vec![PayloadEntryInput {
             payload_descriptor_index: 0,
-            bytes: vec![0x5Au8; 11_000],
+            bytes: codec_bytes(64, 11_000),
         }];
         let stream = encode_record_stream(&input, &entries).unwrap();
 
@@ -4390,11 +4695,95 @@ mod tests {
         assert_eq!(decoded.bytes, stream, "ringed clock groove did not round-trip");
     }
 
+    /// The two rings turn independently, and the record carries both.
+    ///
+    /// Every other clock test here sets one angle for the whole wheel, and the
+    /// renderer pads that angle onto every ring. Those tests therefore leave
+    /// the pair that a re-press draws, an independent inner turn and outer
+    /// turn, uncut. This test cuts such a pair and reads the ring angles back
+    /// off the record.
+    ///
+    /// The angles are whole degrees, and each angle sits inside one pocket
+    /// width of its own ring: 45° for the eight-pocket inner ring, and 22.5°
+    /// for the sixteen-pocket outer ring. Above those widths a ring boundary
+    /// land back on themselves and the pockets re-read the same art through
+    /// them, so the record is one that has already been pressed.
+    #[test]
+    fn the_rings_turn_independently_and_the_record_carries_both() {
+        let input = RecordStreamInput {
+            payload_descriptors: vec![PayloadDescriptorInput::from_container("ECDC")],
+            tracks: vec![TrackInput {
+                title: "Side A".to_string(),
+                first_revolution_index: Some(0),
+                revolution_count: Some(1),
+            }],
+            track_gaps: Vec::new(),
+        };
+        let entries = vec![PayloadEntryInput {
+            payload_descriptor_index: 0,
+            bytes: codec_bytes(64, 11_000),
+        }];
+        let stream = encode_record_stream(&input, &entries).unwrap();
+
+        let cells: Vec<String> = (0..24)
+            .map(|k| {
+                let t = k as f64 / 24.0 * std::f64::consts::TAU;
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (150.0 + 90.0 * t.cos()) as u8,
+                    (150.0 + 90.0 * (t + 2.094).cos()) as u8,
+                    (150.0 + 90.0 * (t + 4.189).cos()) as u8
+                )
+            })
+            .collect();
+        let cut = |turns: [f64; 2]| {
+            let options = serde_json::json!({
+                "grooveToneSlots": cells,
+                "grooveToneRings": [8, 16],
+                "grooveToneRotationDegrees": turns,
+                "grooveToneBlend": true,
+            })
+            .to_string();
+            render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&options)).unwrap()
+        };
+
+        let output = cut([37.0, 11.0]);
+        let clock = output
+            .descriptor
+            .tone_clock
+            .as_ref()
+            .expect("clock in descriptor");
+        assert_eq!(
+            clock.rotation_centidegrees,
+            vec![3_700, 1_100],
+            "each ring keeps the turn it was given, rather than the last one padded across"
+        );
+
+        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+            &output.png_bytes,
+            "single45",
+            Some(stream.len()),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.bytes, stream,
+            "a wheel with its rings turned apart did not come back"
+        );
+
+        // The outer turn has to be doing something, or a re-press that only
+        // moved it would mint the edition it already pressed.
+        let same_outer_as_inner = cut([37.0, 37.0]);
+        assert_ne!(
+            output.png_bytes, same_outer_as_inner.png_bytes,
+            "turning only the outer ring changed nothing about the record"
+        );
+    }
+
     #[test]
     fn gap_tone_lightness_zero_matches_track_tone() {
-        let music_one = vec![0xAAu8; 4_000];
-        let gap = vec![0xCCu8; 1_500];
-        let music_two = vec![0xBBu8; 5_500];
+        let music_one = codec_bytes(64, 4_000);
+        let gap = codec_bytes(20_000, 1_500);
+        let music_two = codec_bytes(40_000, 5_500);
 
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
@@ -4458,7 +4847,7 @@ mod tests {
                 "payloadDescriptors": [{ "container": "TEST" }],
                 "trackListing": [{ "number": 1, "title": "A", "payloadEntryIndex": 0 }],
             }),
-            &[vec![0xAAu8; 4_000]],
+            &[codec_bytes(64, 4_000)],
         );
         let options = serde_json::json!({
             "grooveToneColor": "#FFC0CB",
@@ -4472,8 +4861,8 @@ mod tests {
 
     #[test]
     fn no_track_gaps_produces_no_lighter_spans() {
-        let payload_one = vec![0xAAu8; 4_000];
-        let payload_two = vec![0xBBu8; 5_500];
+        let payload_one = codec_bytes(64, 4_000);
+        let payload_two = codec_bytes(60_000, 5_500);
         let input = RecordStreamInput {
             payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
             tracks: vec![
@@ -4514,12 +4903,205 @@ mod tests {
             .all(|span| span.base == base));
     }
 
+    /// The bands below the programme are grooves on a picture record, so
+    /// they carry the picture's colours: the deadwax in the wheel's own
+    /// pockets, the trailer in the one matte tone it was cut with. The
+    /// lead-in stays grey, because a reader has to read it before it knows
+    /// any of this.
+    #[test]
+    fn the_deadwax_and_the_trailer_are_cut_in_colour() {
+        let slots: Vec<String> = (0..24)
+            .map(|slot| format!("#{:02X}{:02X}{:02X}", 60 + slot * 8, 120 + slot * 4, 200 - slot * 6))
+            .collect();
+        let options = serde_json::json!({
+            "grooveSpanFraction": 0.33,
+            "grooveToneSlots": slots,
+            "grooveToneRings": [8, 16],
+            "runOutToneColor": "#7A4B2A",
+        })
+        .to_string();
+        // Short enough that the cut stops well up the side and leaves both
+        // bands room to be looked at.
+        let output =
+            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
+                .unwrap();
+
+        let rgba = record_decode::load_record_rgba(&output.png_bytes).unwrap().2;
+        let read = |index: usize| {
+            let at = index * 4;
+            [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]]
+        };
+        let is_grey = |pixel: [u8; 4]| pixel[0] == pixel[1] && pixel[1] == pixel[2];
+
+        let cut = i32::from(output.payload.cut_inner_radius);
+        let trailer =
+            record_core::build_run_out_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp", Some(cut))
+                .unwrap();
+        assert!(!trailer.is_empty(), "the record has no trailer to look at");
+        let matte = [0x7A, 0x4B, 0x2A];
+        for &index in &trailer {
+            let pixel = read(index);
+            assert_eq!(
+                [pixel[0], pixel[1], pixel[2]],
+                matte,
+                "a trailer pixel is not the tone the trailer was cut in"
+            );
+        }
+
+        // The deadwax takes the wheel, so it is not one colour — but no part
+        // of it is the grey ladder either.
+        let deadwax = build_deadwax_spiral_indices(
+            RECORD_WIDTH,
+            RECORD_HEIGHT,
+            f64::from_bits(output.descriptor.b_value_bits),
+            &output.descriptor.spiral_family,
+            "lp",
+            cut,
+        )
+        .unwrap();
+        assert!(!deadwax.is_empty(), "the record has no deadwax to look at");
+        let toned = deadwax
+            .iter()
+            .filter(|&&index| !is_grey(read(index)))
+            .count();
+        assert!(
+            toned * 10 > deadwax.len() * 9,
+            "only {toned} of {} deadwax pixels carry a colour",
+            deadwax.len()
+        );
+
+        // And the bootstrap band is untouched.
+        let lead_in =
+            build_lead_in_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp").unwrap();
+        for &index in &lead_in {
+            assert!(
+                is_grey(read(index)),
+                "a lead-in pixel is not grey, and the descriptor is read before anything is known"
+            );
+        }
+
+        assert_eq!(
+            output.descriptor.run_out_tone,
+            Some(matte),
+            "the trailer's tone is not on the wire"
+        );
+    }
+
+    /// The trailer is still a carrier. When the header outgrows the lead-in
+    /// the rest goes into the coarse rings — in a palette around the tone
+    /// they are cut in, so the band still reads as one matte ring — and it
+    /// comes back byte for byte.
+    #[test]
+    fn a_header_too_big_for_the_lead_in_goes_into_the_trailer() {
+        // Three creator fields at their own limit: 3 000 bytes against the
+        // 2 428 an LP's lead-in holds, so the stream has to cross into the
+        // band below.
+        let long = "WESTSIDE-".repeat(111);
+        let options = serde_json::json!({
+            "grooveSpanFraction": 0.33,
+            "grooveToneColor": "#FF2582",
+            "runOutToneColor": "#7A4B2A",
+            "headerLabel": long,
+            "headerArtworkCredit": long,
+            "headerCanonicalUrl": long,
+        })
+        .to_string();
+        let output =
+            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
+                .unwrap();
+
+        assert!(
+            output.descriptor.stream_byte_length > 0,
+            "the record carries no stream"
+        );
+        assert_eq!(
+            output.descriptor.label.as_deref(),
+            Some(long.as_str()),
+            "the header did not survive the cut"
+        );
+
+        // And off the record itself, which is the only proof that matters:
+        // the reader has to find the tone in the lead-in, build the palette
+        // and walk the rings.
+        let (_, read_back) =
+            record_decode::decode_record_descriptor_bytes_from_png(&output.png_bytes, Some("lp"))
+                .unwrap();
+        let descriptor = record_descriptor::decode_record_descriptor_bytes(&read_back).unwrap();
+        assert_eq!(descriptor.label.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.artwork_credit.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.canonical_url.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.run_out_tone, Some([0x7A, 0x4B, 0x2A]));
+
+        // The written part of the band is still the band's own colour: an
+        // iso-luma palette varies the colour and never the light.
+        let rgba = record_decode::load_record_rgba(&output.png_bytes).unwrap().2;
+        let trailer = record_core::build_run_out_spiral_indices(
+            RECORD_WIDTH,
+            RECORD_HEIGHT,
+            "lp",
+            Some(i32::from(output.payload.cut_inner_radius)),
+        )
+        .unwrap();
+        let clock = record_descriptor::trailer_clock([0x7A, 0x4B, 0x2A]).unwrap();
+        let palette = record_groove::TonedPalette::from_config(clock.config(0, false)).unwrap();
+        let matte_luma = record_groove::luma_rec709(&[0x7Au8, 0x4B, 0x2A, 255], 0);
+        let window = f64::from(clock.slots[0].luma_tolerance) + 1.0;
+        for &index in trailer.iter().take(400) {
+            let at = index * 4;
+            let colour = [rgba[at], rgba[at + 1], rgba[at + 2]];
+            assert!(
+                palette.index_of(colour).is_some(),
+                "a trailer pixel is not in the band's own palette"
+            );
+            assert!(
+                (record_groove::luma_rec709(&rgba, index) - matte_luma).abs() <= window,
+                "a written trailer pixel changed the band's light, not just its colour"
+            );
+        }
+    }
+
+    /// A trailer toned by the wheel carries the same header the same way. The
+    /// pixel takes the palette of the pocket it sits in and the bit stream
+    /// runs across the pockets, which is the encoding the programme carries.
+    #[test]
+    fn a_wheel_toned_trailer_carries_the_header_too() {
+        let slots: Vec<String> = (0..24)
+            .map(|slot| format!("#{:02X}{:02X}{:02X}", 60 + slot * 8, 120 + slot * 4, 200 - slot * 6))
+            .collect();
+        let long = "WESTSIDE-".repeat(111);
+        let options = serde_json::json!({
+            "grooveSpanFraction": 0.33,
+            "grooveToneSlots": slots,
+            "grooveToneRings": [8, 16],
+            "headerLabel": long,
+            "headerArtworkCredit": long,
+            "headerCanonicalUrl": long,
+        })
+        .to_string();
+        let output =
+            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
+                .unwrap();
+
+        assert_eq!(
+            output.descriptor.run_out_tone, None,
+            "no tone was given for the trailer"
+        );
+
+        let (_, read_back) =
+            record_decode::decode_record_descriptor_bytes_from_png(&output.png_bytes, Some("lp"))
+                .unwrap();
+        let descriptor = record_descriptor::decode_record_descriptor_bytes(&read_back).unwrap();
+        assert_eq!(descriptor.label.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.artwork_credit.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.canonical_url.as_deref(), Some(long.as_str()));
+    }
+
     #[test]
     fn gap_tone_lightness_is_boosted_for_lighter_records() {
         fn rendered_gap_base(hex: &str) -> [u8; 3] {
-            let music_one = vec![0xAAu8; 4_000];
-            let gap = vec![0xCCu8; 1_500];
-            let music_two = vec![0xBBu8; 5_500];
+            let music_one = codec_bytes(64, 4_000);
+            let gap = codec_bytes(20_000, 1_500);
+            let music_two = codec_bytes(40_000, 5_500);
             let input = RecordStreamInput {
                 payload_descriptors: vec![PayloadDescriptorInput::from_container("TEST")],
                 tracks: vec![

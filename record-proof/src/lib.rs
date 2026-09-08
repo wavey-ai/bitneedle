@@ -219,9 +219,9 @@ impl ProofConfig {
                 tone_spans.push(candidate);
             }
         }
-        // A clock's pockets are palettes like any other; the proof paints
-        // one swatch row per distinct palette, byte length being meaningless
-        // for a tone chosen by angle.
+        // Each pocket of a clock holds a palette. The proof paints one swatch
+        // row per distinct palette. A tone chosen by angle carries no byte
+        // length, so the proof records none.
         if let Some(clock) = &descriptor.tone_clock {
             for slot in &clock.slots {
                 for (base, luma_tolerance) in [
@@ -901,7 +901,7 @@ mod tests {
             }
             assert_eq!(changed, proof.stats.painted_pixels);
 
-            // The QR payload decodes back to the config we painted.
+            // The QR payload decodes back to the painted config.
             let bytes = proof.config.to_bytes().unwrap();
             assert_eq!(ProofConfig::from_bytes(&bytes).unwrap(), proof.config);
         }

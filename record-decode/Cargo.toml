@@ -7,6 +7,28 @@ repository = "https://github.com/wavey-ai/bitneedle"
 readme = "README.md"
 license = "Apache-2.0"
 
+[features]
+default = []
+# The formats a pressed record can be read back from.
+#
+# A record is not a picture of data: every groove pixel carries payload, so
+# only a format that returns all four channels of every pixel exactly can be
+# read at all. PNG is not a feature — it is what the press writes, and this
+# crate exists to read what the press writes. The rest are here because a
+# record exported as one of them is still a record, and a reader that cannot
+# read what the exporter writes is not a reader.
+#
+# Each one costs binary size, so a build takes only the formats it will see.
+tiff = ["image/tiff"]
+bmp = ["image/bmp"]
+qoi = ["image/qoi"]
+webp = ["image/webp"]
+tga = ["image/tga"]
+pnm = ["image/pnm"]
+# The raw sidecar: the magic, the width, the height, then the pixels.
+rgba = []
+all-formats = ["tiff", "bmp", "qoi", "webp", "tga", "pnm", "rgba"]
+
 [dev-dependencies]
 anyhow = "1"
 png = "0.17"

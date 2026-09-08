@@ -1,12 +1,12 @@
-//! Is the dither free at the 2 px floor?
+//! Ink cost of the dither at the 2 px floor.
 //!
-//! A constant-pitch cut — vari-pitch at a depth of 0.001, which is 0.1% of
-//! pitch and needs no format change, since Archimedean writes no spiral
-//! segment and so has nowhere to record a wobble.
+//! The cut holds a constant pitch. It uses vari-pitch at a depth of 0.001,
+//! which is 0.1% of pitch. This depth needs no format change, because an
+//! Archimedean cut writes no spiral segment and therefore records no wobble.
 //!
-//! Ink is counted off the drawn mask. Phase alone cannot move the pitch, so
-//! it should not move the ink; amplitude and frequency displace each turn
-//! within a land of about one pixel, so they might.
+//! The example counts the ink off the drawn mask. Phase holds the pitch, so it
+//! holds the ink. Amplitude and frequency displace each turn within a land of
+//! about one pixel, so they can move the ink.
 use anyhow::Result;
 use record_core::{build_spiral_mask_with_family, SpiralFamily, VariPitchPlacement, VariPitchTuning};
 

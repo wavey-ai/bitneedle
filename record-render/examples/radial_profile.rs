@@ -1,13 +1,13 @@
-//! What a groove actually looks like along a radius.
+//! Ink profile of a groove along a radius.
 //!
 //!     cargo run --release -p record-render --example radial_profile -- <png> [rays]
 //!
-//! Walks out from the centre and records where ink starts and stops. The
-//! separation a cut is *asked* for is centre to centre between turns; what
-//! decides whether the artwork shows is the *land* — the gap left between
-//! them once each turn has been drawn a pixel wide and antialiased. This
-//! prints both, measured, because at these pitches the land is sub-pixel and
-//! arithmetic about it has been wrong twice.
+//! The example walks out from the centre and records the start radius and the
+//! stop radius of each ink run. The requested separation of a cut is centre to
+//! centre between turns. The *land* is the gap between two turns after each
+//! turn is drawn one pixel wide and antialiased, and the land decides whether
+//! the artwork shows. This example prints both figures from measurement,
+//! because the land is sub-pixel at these pitches.
 use anyhow::Result;
 
 fn main() -> Result<()> {

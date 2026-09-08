@@ -297,13 +297,14 @@ impl WasmPayloadDecodeResult {
         self.metadata_json.clone()
     }
 
-    /// JSON array of `{afterByteOffset, sampleCount}` spans describing where,
-    /// in `payloadBytes`, GAP-container silence belongs. `payloadBytes` itself
-    /// excludes GAP entries entirely (they carry no real codec data — see
-    /// `PAYLOAD_CONTAINER_GAP`), so the EnCodec decoder never sees them; the
-    /// player splices `sampleCount` zero-filled PCM samples after decoding
-    /// the byte at `afterByteOffset` instead. Empty array (`"[]"`) when the
-    /// record has no GAP entries (the common case).
+    /// JSON array of `{afterByteOffset, sampleCount}` spans. Each span states
+    /// where GAP-container silence belongs in `payloadBytes`. `payloadBytes`
+    /// holds the codec entries alone, because a GAP entry carries a GAP1
+    /// payload rather than codec data. See `PAYLOAD_CONTAINER_GAP`. The EnCodec
+    /// decoder therefore reads codec entries alone, and the player splices
+    /// `sampleCount` zero-filled PCM samples after it decodes the byte at
+    /// `afterByteOffset`. A record with no GAP entries gives an empty array,
+    /// `"[]"`, which is the common case.
     #[wasm_bindgen(js_name = silenceMapJson)]
     pub fn silence_map_json(&self) -> String {
         self.silence_map_json.clone()
@@ -519,8 +520,8 @@ fn build_ecdc_programme_json(options_json: &str) -> Result<String> {
     }
 
     serde_json::to_string(&serde_json::json!({
-        // Retain the original singular field for old readers while making the
-        // complete descriptor table and per-entry indexes authoritative.
+        // Keep the original singular field for earlier readers. The complete
+        // descriptor table and the per-entry indexes are authoritative.
         "ecdcDescriptor": ecdc_descriptors[0].clone(),
         "ecdcDescriptors": ecdc_descriptors,
         "entryDescriptorIndexes": entry_descriptor_indexes,
@@ -1116,9 +1117,9 @@ fn sidecar_pixel_in_carrier_regions(
     in_label || in_intergroove || in_lead_in || in_deadwax
 }
 
-// Text-avoid geometry was formerly carried in arbitrary BRD1 JSON metadata.
-// The compact descriptor no longer carries that blob, so sidecar ordering is
-// now independent of label compositor hints.
+// Arbitrary BRD1 JSON metadata carried the text-avoid geometry in an earlier
+// format. The compact descriptor omits that blob, so sidecar ordering is
+// independent of the label compositor hints.
 #[derive(Clone)]
 struct TextAvoidSpec;
 
@@ -1345,9 +1346,10 @@ fn find_label_thumbnail_patch_bytes(
 
 /// Extracts the embedded label thumbnail and returns `(bytes, mime)`.
 ///
-/// The thumbnail is stored as a self-contained AVIF (`full-label-thumbnail-avif`
-/// base) — a downscaled render of the label. WASM cannot decode AVIF, so the
-/// stored image is returned verbatim for the browser to decode and display.
+/// The thumbnail is stored as a self-contained AVIF, under the
+/// `full-label-thumbnail-avif` base. It is a downscaled render of the label.
+/// This build holds no AVIF decoder, so it returns the stored image verbatim,
+/// and the browser decodes and displays it.
 fn extract_label_thumbnail_image(
     png_bytes: &[u8],
     record_profile: Option<&str>,
@@ -1446,9 +1448,9 @@ fn decode_record_png_sidecar_with_context(
 fn decoded_chunk_stream_payload_bytes(chunk_stream_bytes: &[u8]) -> Result<Vec<u8>> {
     let stream = record_core::parse_chunk_stream(chunk_stream_bytes)
         .context("decoded groove is not a valid BCS2 chunk stream")?;
-    // The spiral chunks are fragments of a single ECDC (header + per-spiral
-    // frames); reassemble by plain concatenation back into that one ECDC. Track
-    // titles/boundaries ride along in the BRS1 `trackListing` metadata.
+    // The spiral chunks are fragments of one ECDC object, which holds a header
+    // and the per-spiral frames. Concatenate them to rebuild that object. The
+    // BRS1 `trackListing` metadata carries the track titles and boundaries.
     Ok(record_core::chunk_stream_payload_bytes(&stream))
 }
 
@@ -1462,10 +1464,11 @@ struct SilenceSpan {
     sample_count: usize,
 }
 
-/// Reconstruct a record stream's decodable payload as a back-to-back stream of
-/// standalone ECDC objects, excluding any GAP-container entries (see
-/// `PAYLOAD_CONTAINER_GAP`) — those carry a canonical GAP1 payload, not codec
-/// data, and must never reach the EnCodec decoder.
+/// Reconstruct the decodable payload of a record stream as a back-to-back
+/// stream of standalone ECDC objects. The result holds the codec entries alone.
+/// A GAP-container entry carries a canonical GAP1 payload rather than codec
+/// data, so this function excludes it and keeps it away from the EnCodec
+/// decoder. See `PAYLOAD_CONTAINER_GAP`.
 ///
 /// The programme format stores one canonical ECDC descriptor in BRS1 metadata
 /// plus many *headerless* ECDC payload entries — one discrete EnCodec frame per
@@ -1494,10 +1497,11 @@ fn ecdc_only_payload_bytes_with_silence_map(
     )
     .context("failed to resolve BRS1 payload entries")?;
 
-    // A gap is an ECDC entry that no musical track covers. Build the set of
-    // track-covered entry indexes so untracked entries can be excluded from the
-    // decodable timeline and spliced as exact zero PCM (the default gap policy),
-    // even though their stored bytes are valid, decodable ECDC ambience.
+    // A gap is an ECDC entry outside every musical track. Build the set of
+    // track-covered entry indexes, so this function excludes an untracked entry
+    // from the decodable timeline and splices exact zero PCM in its place, which
+    // is the default gap policy. The stored bytes of such an entry are valid,
+    // decodable ECDC ambience.
     let mut entry_is_tracked = vec![false; resolved_entries.len()];
     for track in &stream.metadata.tracks {
         let start = track.first_revolution_index;
@@ -1557,11 +1561,11 @@ fn ecdc_only_payload_bytes_with_silence_map(
             );
         }
 
-        // Untracked ECDC entries are inter-track gaps: exclude their (valid,
-        // decodable) ECDC ambience from the decoded timeline and record a
-        // silence span so the player splices exact zero PCM of the entry's real
-        // ECDC duration. Diagnostic playback that wants to audition the ambience
-        // can decode the stored bytes directly instead.
+        // An untracked ECDC entry is an inter-track gap. Exclude its valid,
+        // decodable ECDC ambience from the decoded timeline, and record a
+        // silence span, so the player splices exact zero PCM over the real ECDC
+        // duration of the entry. Diagnostic playback decodes the stored bytes
+        // directly to hear that ambience.
         if !entry_is_tracked.get(entry_index).copied().unwrap_or(false) {
             let sample_count =
                 record_core::ecdc::headerless_entry_sample_count(entry_bytes, descriptor)
@@ -1708,12 +1712,12 @@ mod tests {
         TrackInput,
     };
 
-    // The compact two-track groove is the smallest fixture that exercises
-    // payload entries, track listing, and the chunk-stream payload offsets
-    // that `decode_record_metadata_json` (the function the WASM facade
-    // exposes) and native `record_core::parse_chunk_stream` must agree on.
-    // `record-render`/`record-cut` are dev-dependencies here purely to build
-    // the test fixture PNG; this crate's own (non-test) code never renders.
+    // The compact two-track groove is the smallest fixture that exercises the
+    // payload entries, the track listing, and the chunk-stream payload offsets.
+    // `decode_record_metadata_json`, which the WASM facade exposes, and the
+    // native `record_core::parse_chunk_stream` must agree on those offsets.
+    // `record-render` and `record-cut` are dev-dependencies that build the test
+    // fixture PNG. The library code of this crate performs no render.
     #[test]
     fn wasm_facade_decode_matches_native_decode() {
         let payload_one = vec![0xAAu8; 4_000];
