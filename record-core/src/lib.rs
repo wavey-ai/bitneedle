@@ -227,7 +227,10 @@ pub const RUN_OUT_MAX_EXTENT_MM: f64 = 25.0;
 pub const LEAD_OUT_BYTE_CAPACITY: u32 = 512;
 
 pub const LEAD_IN_OUTER_EDGE_INSET: i32 = 1;
-pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 0;
+/// Mirrors `record_descriptor::METADATA_GRAYSCALE_BITS_PER_PIXEL`, which owns
+/// the encoding; this crate sits below that one and cannot import it. The two
+/// must agree — the capacity helpers here and the painting there are the same
+/// arithmetic read from opposite ends.
 pub const METADATA_GRAYSCALE_BITS_PER_PIXEL: u32 = 6;
 pub const KNOWN_RECORD_PROFILES: &[&str] = &["single45", "single45vintage", "ten", "lp"];
 

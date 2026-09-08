@@ -68,9 +68,19 @@ label, and the last of them closes on itself. The substantive changes are:
 * Section 7.14 specifies the lead-out geometry revision. It is the one segment
   a decoder MUST NOT skip.
 
-Records written under draft-04 remain readable, and their bytes do not move.
-The lead-out bands they were cut with are revision 1 of Section 7.14, which is
-what an absent segment declares.
+Records written under draft-04 are NOT readable by a draft-05 decoder and
+MUST be re-cut. Section 7.1 changes the encoding of the descriptor band
+itself, from four bits per pixel on a sixteen-rung ladder based at 120 to six
+bits per pixel on a sixty-four-rung ladder based at 96. That change is beneath the descriptor, so no
+field inside the descriptor can announce it — the geometry revision of
+Section 7.14 included. A draft-04 record read by a draft-05 decoder fails at
+the BRD1 magic, which is the correct outcome and the only one available.
+
+The geometry revision is therefore not a compatibility mechanism for this
+revision. It exists for the next one: the lead-out extent is derived rather
+than declared, so a later change to the constants of Section 6.5.1 would
+otherwise be silent, and the prefix is readable from the header spiral before
+any of that geometry is needed.
 
 ## Changes from draft-03
 
@@ -879,15 +889,56 @@ and that surplus is addressable groove which this document does not promise.
 
 ### 7.1 Pixel Encoding
 
-Each descriptor byte is encoded as two grayscale pixels:
+The descriptor is a bit stream painted six bits to a pixel as a rung on a
+grey ladder.
 
-    first pixel  = 120 + high nibble
-    second pixel = 120 + low nibble
+    bits per pixel = 6
+    levels         = 64
+    step           = 1
+    base           = (255 - (levels - 1) * step) / 2 = 96
+    grey(level)    = base + (level mod 64) * step
 
-R, G, and B MUST be equal and MUST lie in the inclusive range 120 to 135.
-Canonical encoders MUST write these pixels with non-zero alpha. Decoders MUST
-recover nibble values from RGB. They MUST derive descriptor length from the
-BRD1 prefix.
+The ladder is therefore the sixty-four consecutive greys 96 through 159. A
+level is painted as an opaque grey: R, G, and B MUST be equal, alpha MUST be
+non-zero, and the value MUST be one of those rungs.
+
+The band is centred deliberately. The lead-in and the run-out are rings that
+a person sees, and a ladder reaching for the ends of the range draws them as
+a barcode of black and white pixels rather than as a grey ring. Sixty-four
+rungs one value apart need only sixty-four values, which leaves ninety-six
+values of headroom below the darkest rung and the same above the lightest.
+
+Decoders MUST recover a level by exact match,
+
+    level(value) = value - base,  rejected unless 0 <= level < 64
+
+and MUST refuse a pixel whose value is not a rung, whose channels are
+unequal, or whose alpha is zero. The match is exact rather than nearest
+because the band is lossless from cutter to reader: a record is decoded from
+the PNG it was cut as, at its own raster, with no resample, no recompression
+and no print-and-scan in the path. A value that is not a rung did not come
+off a canonical encoder, and snapping it to the nearest one would turn a
+corrupted record into a plausible one and leave the CRC of Section 7.5 to be
+the first thing that noticed.
+
+Levels are concatenated most significant bit first, and the resulting bit
+stream is cut into octets most significant bit first. The pixel count for a
+descriptor of N octets is therefore
+
+    pixels = ceil(N * 8 / 6)
+
+and the octet capacity of a carrier of P pixels is floor(P * 6 / 8). When the
+descriptor's bit length is not a multiple of six, the final pixel carries
+trailing bits belonging to no octet; encoders SHOULD write them as zero and
+decoders MUST ignore them.
+
+Decoders MUST derive descriptor length from the BRD1 prefix.
+
+This replaces the draft-04 encoding, which spent a whole pixel on four bits
+and placed all sixteen levels between 120 and 135. Six bits per pixel is what
+pays for the run-out of Section 6.5 being narrower than the band it replaced:
+the header spiral and a two-turn run-out together carry more descriptor at
+six bits than the four-turn band carried at four.
 
 ### 7.2 Prefix
 
@@ -1259,8 +1310,18 @@ was cut under.
 
 Revision 1 is the geometry of Sections 6.5 and 6.6: a deadwax at the lathe's
 feed, a run-out of one to four rings opening outward by the taper, and a
-locked groove closing on itself. An absent segment declares revision 1, so a
-record written before this segment existed decodes as what it is.
+locked groove closing on itself.
+
+Revision 0 is the draft-04 trailer — a single Archimedean spiral of two turns
+from the cut inner radius to the payload inner radius, with no locked groove.
+An absent segment declares revision 0, because a record written before this
+segment existed was written before revision 1 existed. An encoder claiming
+revision 1 MUST say so explicitly; absence is not an assertion of the
+geometry this revision introduced.
+
+No decoder is required to trace revision 0. A record carrying it cannot be
+read for the unrelated reason of Section 7.1, and a decoder that declines it
+declines it by name rather than by CRC failure.
 
 A decoder MUST reject a record whose revision it does not recognise. This is
 the one segment it may not skip, and the reason is that the trailer is derived

@@ -4919,6 +4919,80 @@ mod tests {
         }
     }
 
+    /// The committed golden PNGs still decode.
+    ///
+    /// This is the one thing `renders_*_golden_and_decodes_back_to_payload`
+    /// cannot check. Those render a fresh PNG and decode that, so they
+    /// round-trip the current build against itself and pass no matter what
+    /// the encoding is — a change to the descriptor's pixel encoding leaves
+    /// them green while every record ever cut becomes unreadable, and the
+    /// files on disk go stale without a single test noticing.
+    ///
+    /// A golden is only a golden if something reads the bytes that are
+    /// checked in. When this fails after a deliberate format change, re-bless
+    /// with `regenerate_golden_records` and commit the PNGs in the same
+    /// commit as the change.
+    #[test]
+    fn the_committed_golden_pngs_still_decode() {
+        for golden in GOLDENS {
+            let png = fixture_bytes(golden.id, golden.record_png_name);
+            let stream = chunk_stream_for_payload(golden.id, golden.payload_name);
+
+            let (profile, decoded) = record_decode::decode_record_png_to_chunk_stream(&png)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} on disk no longer decodes: {error:#}\n\
+                         if the format changed on purpose, re-bless the goldens with \
+                         `cargo test -p record-render --lib regenerate_golden_records -- --ignored`",
+                        golden.record_png_name
+                    )
+                });
+
+            assert_eq!(profile, golden.profile);
+            assert_eq!(
+                decoded.bytes, stream,
+                "{} decodes, but not back to the payload beside it",
+                golden.record_png_name
+            );
+        }
+    }
+
+    /// The descriptor bands are mid-grey on a pressed record, not just in the
+    /// constants. The lead-in is a ring a person sees.
+    #[test]
+    fn the_descriptor_band_of_a_pressed_record_is_mid_grey() {
+        for golden in GOLDENS {
+            let png = fixture_bytes(golden.id, golden.record_png_name);
+            let image = image::load_from_memory(&png).expect("golden png").to_rgba8();
+            let (width, height) = (image.width() as usize, image.height() as usize);
+            let rgba = image.into_raw();
+
+            let lead_in =
+                record_core::build_lead_in_spiral_indices(width, height, golden.profile, None, None, None)
+                    .expect("lead-in indices");
+
+            for &index in &lead_in {
+                let (r, g, b, a) = (
+                    rgba[index * 4],
+                    rgba[index * 4 + 1],
+                    rgba[index * 4 + 2],
+                    rgba[index * 4 + 3],
+                );
+                if a == 0 {
+                    continue;
+                }
+                assert!(r == g && g == b, "{} lead-in pixel is not grey", golden.profile);
+                assert!(
+                    (record_descriptor::METADATA_GRAYSCALE_BASE
+                        ..=record_descriptor::METADATA_GRAYSCALE_TOP)
+                        .contains(&r),
+                    "{} lead-in pixel {r} is outside the mid-grey band",
+                    golden.profile
+                );
+            }
+        }
+    }
+
     #[test]
     fn renders_single45_golden_and_decodes_back_to_payload() {
         assert_render_decodes_to_payload(

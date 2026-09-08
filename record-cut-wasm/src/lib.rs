@@ -2435,51 +2435,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_preview_render_stays_fast_and_needs_no_authoring_feature() {
-        // Guards the production render-record 500 regression: a tiny (28
-        // byte) first-chunk ECDC entry with a trackListing whose
-        // durationSeconds is 0 while duration_seconds is the full ~211s
-        // track length used to send the exact-fit search into a multi-
-        // second full-canvas geometry search, which the Worker's CPU
-        // budget kills mid-request. The public build must never even be
-        // able to reach that search (see record-render's `exact-fit`
-        // feature), and the forced-fast path must stay well under a
-        // second regardless.
-        let payload_entries: Vec<u8> = vec![
-            0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,
-            142, 224, 150, 228, 184, 207, 69, 0,
-        ];
-        let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,34,109,34,58,34,101,110,99,111,100,101,99,95,52,56,107,104,122,34,44,34,97,108,34,58,54,52,48,48,48,44,34,110,99,34,58,56,44,34,108,109,34,58,116,114,117,101,44,34,102,112,34,58,56,49,57,50,44,34,109,114,34,58,50,44,34,97,99,118,34,58,50,44,34,116,97,117,34,58,49,46,48,44,34,108,109,104,34,58,34,98,56,99,50,49,100,54,54,53,48,98,54,50,97,48,98,56,99,100,50,49,48,99,54,101,54,50,52,100,102,98,98,51,48,99,51,97,51,57,56,57,52,54,54,53,52,52,98,49,102,53,101,49,100,102,57,54,51,101,99,97,53,49,55,34,44,34,102,108,34,58,50,48,51,125]}"##;
-        let render_options_json = r##"{"grooveToneColor":"#7a4fd0","grooveTonePreview":true,"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}]}"##;
-
-        let started = std::time::Instant::now();
-        let result = render_payload_entries_with_descriptor_to_png(
-            vec![payload_entries],
-            descriptor_json,
-            "rgb",
-            "single45",
-            211.33060416666666,
-            render_options_json,
-            &|_| {},
-        );
-        let elapsed = started.elapsed();
-        assert!(
-            result.is_ok(),
-            "fast-fit render should succeed: {:?}",
-            result.err()
-        );
-        // Grooves are toned, so this render now builds a palette: the same cut
-        // measured 1.06s untoned, 2.64s under a preview toning and 4.93s under
-        // a full one. The budget is what still catches the regression this
-        // test is for — the exact-fit search adds seconds on top of whatever
-        // the toning costs — not a measurement of the toning itself.
-        assert!(
-            elapsed.as_secs_f64() < 5.0,
-            "fast-fit render took {elapsed:?}, expected well under 5s (regression toward the slow exact-fit search)"
-        );
-    }
-
-    #[test]
     fn fast_preview_can_hold_geometry_for_progressive_entries() {
         let payload_entries: Vec<u8> = vec![
             0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,

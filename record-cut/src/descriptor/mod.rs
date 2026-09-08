@@ -18,7 +18,7 @@ pub use raster::{
 };
 pub use record_descriptor::{
     grayscale_value_for_level, level_for_grayscale_value, METADATA_GRAYSCALE_BITS_PER_PIXEL,
-    METADATA_GRAYSCALE_LEVELS, METADATA_GRAYSCALE_NIBBLE_BASE, METADATA_GRAYSCALE_STEP,
+    METADATA_GRAYSCALE_BASE, METADATA_GRAYSCALE_LEVELS, METADATA_GRAYSCALE_STEP,
 };
 
 pub use encode::{

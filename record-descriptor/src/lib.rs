@@ -37,46 +37,66 @@ pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 ///
 /// The lead-in and run-out are the bands that must be readable before
 /// anything about the record is known, so they cannot be toned and cannot be
-/// palette-coded. Grey is not the problem. The old encoding's problem was that
-/// it spent a whole pixel on four bits and then put all sixteen levels between
-/// 120 and 135, one value apart: nothing in a spread that narrow reads as
-/// tone, and nothing one value apart survives a resample. It was flat to look
-/// at and brittle to read, for the same reason.
+/// palette-coded. They are plain grey, and the only question is which greys.
 ///
-/// Six bits puts sixty-four levels across the full range in steps of
-/// [`METADATA_GRAYSCALE_STEP`]. The band gains real tonal range, a pixel may
-/// drift by half a step and still read back, and the stream gets half again
-/// as many bits per pixel as the nibble encoding it replaces — which is what
-/// pays for the run-out dropping from four turns to two.
+/// Six bits is what the carrier needs. The run-out went from four turns to
+/// two, and six bits per pixel is what makes that back: the lead-in and a
+/// two-turn run-out together hold more descriptor at six bits than the old
+/// four-turn band held at four.
 pub const METADATA_GRAYSCALE_BITS_PER_PIXEL: u32 = 6;
 
 /// The number of distinct greys, `2^METADATA_GRAYSCALE_BITS_PER_PIXEL`.
 pub const METADATA_GRAYSCALE_LEVELS: u32 = 1 << METADATA_GRAYSCALE_BITS_PER_PIXEL;
 
-/// The gap between adjacent levels, chosen so the ladder spans the full
-/// 0..=255 range as widely as it can while landing on whole values.
-pub const METADATA_GRAYSCALE_STEP: u8 = (255 / (METADATA_GRAYSCALE_LEVELS - 1)) as u8;
+/// The gap between adjacent levels.
+///
+/// One. A record is decoded from the PNG it was cut as, losslessly and at its
+/// own raster — there is no resample, no recompression, and no print-and-scan
+/// in the path, so a pixel arrives at the reader carrying exactly the value
+/// the cutter wrote. A ladder that spreads its rungs apart is buying tolerance
+/// against drift that cannot happen, and paying for it in the only currency
+/// that shows: how far the band has to reach toward black and white.
+///
+/// Adjacent rungs mean the sixty-four levels occupy sixty-four values, which
+/// is what lets the whole band sit in the middle of the range.
+pub const METADATA_GRAYSCALE_STEP: u8 = 1;
 
-/// Retained so callers that only wanted the darkest level keep working; the
-/// ladder now starts at zero and climbs by [`METADATA_GRAYSCALE_STEP`].
-pub const METADATA_GRAYSCALE_NIBBLE_BASE: u8 = 0;
+/// The darkest grey on the ladder.
+///
+/// Centred, so the band is mid-grey rather than a spread from black to white:
+/// sixty-four rungs one apart span sixty-four values, and putting that window
+/// in the middle of 0..=255 puts it at 96..=159. Nothing the lead-in paints is
+/// darker than 96 or lighter than 159, which is the point — the descriptor
+/// bands read as one flat grey ring at the rim and at the label, not as a
+/// barcode of black and white pixels.
+pub const METADATA_GRAYSCALE_BASE: u8 =
+    ((255 - (METADATA_GRAYSCALE_LEVELS - 1) * METADATA_GRAYSCALE_STEP as u32) / 2) as u8;
+
+/// The lightest grey on the ladder.
+pub const METADATA_GRAYSCALE_TOP: u8 = METADATA_GRAYSCALE_BASE
+    + ((METADATA_GRAYSCALE_LEVELS - 1) as u8) * METADATA_GRAYSCALE_STEP;
 
 /// The grey a level is painted as.
 pub fn grayscale_value_for_level(level: u32) -> u8 {
-    ((level % METADATA_GRAYSCALE_LEVELS) as u8).saturating_mul(METADATA_GRAYSCALE_STEP)
+    METADATA_GRAYSCALE_BASE
+        + ((level % METADATA_GRAYSCALE_LEVELS) as u8) * METADATA_GRAYSCALE_STEP
 }
 
-/// The level a grey reads back as: the nearest rung of the ladder, so a pixel
-/// that drifted by up to half a step still decodes. A value past the top rung
-/// by more than half a step is not one of ours and is refused.
+/// The level a grey reads back as.
+///
+/// An exact match, not a nearest rung. The band is lossless end to end, so a
+/// value that is not on the ladder did not come off a Bitneedle cutter, and
+/// guessing which rung it meant would turn a corrupted record into a plausible
+/// one. Off the ladder is refused, and the CRC never has to be the first thing
+/// that notices.
 pub fn level_for_grayscale_value(value: u8) -> Option<u32> {
+    let offset = value.checked_sub(METADATA_GRAYSCALE_BASE)? as u32;
     let step = METADATA_GRAYSCALE_STEP as u32;
-    let half = step / 2;
-    let top = (METADATA_GRAYSCALE_LEVELS - 1) * step;
-    if value as u32 > top + half {
+    if offset % step != 0 {
         return None;
     }
-    Some(((value as u32 + half) / step).min(METADATA_GRAYSCALE_LEVELS - 1))
+    let level = offset / step;
+    (level < METADATA_GRAYSCALE_LEVELS).then_some(level)
 }
 
 /// Fixed by the BRD1 v2 format: release commitments are always SHA-256,
@@ -234,9 +254,20 @@ pub const SEGMENT_GROOVE_HANDEDNESS: u8 = 34;
 /// plausible rubbish.
 ///
 /// Payload: one byte, the revision. Absent means
-/// [`LEAD_OUT_GEOMETRY_REVISION_ORIGINAL`], so a record written before this
+/// [`LEAD_OUT_GEOMETRY_REVISION_DRAFT04`], so a record written before this
 /// existed decodes as what it is.
 pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
+
+/// The draft-04 trailer: a single Archimedean spiral of two turns from the
+/// cut inner radius to the payload inner radius, and no locked groove.
+///
+/// This build does not cut it and does not trace it. It is named because an
+/// absent segment means it, and a record that means it should be refused by
+/// name rather than by a CRC failure ten steps later. Nothing readable
+/// carries it in any case: draft-05 also changed the descriptor band's own
+/// pixel encoding, so a record of this vintage fails at the BRD1 magic
+/// before its segments are ever parsed.
+pub const LEAD_OUT_GEOMETRY_REVISION_DRAFT04: u8 = 0;
 
 /// The first lead-out geometry: a fine deadwax at the lathe's feed, a run-out
 /// of one to four rings opening outward by [`record_core::RUN_OUT_TAPER`],
@@ -250,7 +281,7 @@ pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_ORIGINAL;
 /// puts there is between that writer and whoever reads it back.
 pub const DEADWAX_ENCODING_UNPAINTED: u8 = 0;
 /// One nibble per pixel as a grey step, the way the descriptor's own bands
-/// are painted ([`METADATA_GRAYSCALE_NIBBLE_BASE`]).
+/// are painted ([`METADATA_GRAYSCALE_BASE`]).
 pub const DEADWAX_ENCODING_GRAYSCALE_NIBBLE: u8 = 1;
 /// The carrier's own encoding: an iso-luma palette around the groove tone,
 /// at the clock's bits per pixel. A band written this way is the record's
@@ -1565,8 +1596,15 @@ fn clockwise_by_default() -> bool {
     true
 }
 
+/// Absence is not an assertion of the geometry this revision introduced.
+///
+/// A record with no segment 35 was written before segment 35 existed, which
+/// is to say before revision 1 existed, so the only honest reading of its
+/// silence is the trailer that came before. Defaulting the other way was
+/// backwards: it made every record ever cut claim bands it was never cut
+/// with, which is the one thing the segment was added to prevent.
 fn original_lead_out_geometry() -> u8 {
-    LEAD_OUT_GEOMETRY_REVISION_ORIGINAL
+    LEAD_OUT_GEOMETRY_REVISION_DRAFT04
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2758,7 +2796,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         deferred_attestation,
         deadwax,
         lead_out_geometry_revision: lead_out_geometry
-            .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_ORIGINAL),
+            .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04),
     };
     // Null or signed: a deferred field with no attestation over it is a
     // malformed record, not merely an untrusted one.
@@ -3601,40 +3639,54 @@ mod tests {
         }
     }
 
+    /// The band is mid-grey, and that is the whole point of it.
+    ///
+    /// Nothing the descriptor paints may be black, near-black, white or
+    /// near-white: the lead-in and run-out are rings a person looks at, and a
+    /// ladder that reaches for the ends of the range draws them as a barcode.
+    /// Sixty-four rungs one value apart occupy sixty-four values, and those
+    /// sit in the middle with ninety-six values of headroom either side.
     #[test]
-    fn the_ladder_spans_the_range_and_fits_in_u8() {
-        let top = grayscale_value_for_level(METADATA_GRAYSCALE_LEVELS - 1);
-        assert_eq!(grayscale_value_for_level(0), 0);
-        assert!(
-            top as u32 >= 200,
-            "the ladder tops out at {top}; it should reach most of the range"
-        );
-        // The band this replaced was sixteen values wide and read as one flat
-        // tone. This one has to be far wider than that to read as tone.
-        assert!(top > 16, "the ladder spans {top} — no wider than the flat band");
+    fn the_ladder_is_mid_grey_at_both_ends() {
+        let darkest = grayscale_value_for_level(0);
+        let lightest = grayscale_value_for_level(METADATA_GRAYSCALE_LEVELS - 1);
+
+        assert_eq!(darkest, METADATA_GRAYSCALE_BASE);
+        assert_eq!(lightest, METADATA_GRAYSCALE_TOP);
+        assert_eq!((darkest, lightest), (96, 159));
+
+        // Centred: the room below the darkest rung equals the room above the
+        // lightest, so the band cannot creep toward either end unnoticed.
+        assert_eq!(i32::from(darkest), 255 - i32::from(lightest));
     }
 
+    /// Off the ladder is refused rather than rounded to the nearest rung.
+    ///
+    /// The band is lossless end to end — no resample, no recompression, no
+    /// print and scan — so a pixel arrives carrying exactly the value the
+    /// cutter wrote. A value that is not a rung did not come off a cutter, and
+    /// snapping it to the closest one would turn a corrupted record into a
+    /// plausible one and leave the CRC to be the first thing that noticed.
     #[test]
-    fn a_pixel_that_drifted_under_half_a_step_still_reads() {
-        // Exactly half a step is the tie between two rungs and rounds up, so
-        // the guaranteed tolerance is one short of it either way.
-        let tolerance = (METADATA_GRAYSCALE_STEP / 2) as i32 - 1;
-        assert!(tolerance >= 1, "the ladder must tolerate at least one value of drift");
-        for level in 0..METADATA_GRAYSCALE_LEVELS {
-            let grey = grayscale_value_for_level(level) as i32;
-            for drift in -tolerance..=tolerance {
-                let drifted = (grey + drift).clamp(0, 255) as u8;
-                let Some(read) = level_for_grayscale_value(drifted) else {
-                    panic!("level {level} at {grey} drifted by {drift} and was refused");
-                };
-                assert_eq!(read, level, "level {level} drifted by {drift} and misread");
+    fn a_grey_off_the_ladder_is_refused() {
+        // Every value below the band and above it.
+        for value in 0..METADATA_GRAYSCALE_BASE {
+            assert_eq!(level_for_grayscale_value(value), None, "{value} is below the band");
+        }
+        for value in (METADATA_GRAYSCALE_TOP + 1)..=255 {
+            assert_eq!(level_for_grayscale_value(value), None, "{value} is above the band");
+        }
+        // And, when the step ever widens again, the gaps between the rungs.
+        if METADATA_GRAYSCALE_STEP > 1 {
+            for level in 0..(METADATA_GRAYSCALE_LEVELS - 1) {
+                let between = grayscale_value_for_level(level) + 1;
+                assert_eq!(
+                    level_for_grayscale_value(between),
+                    None,
+                    "{between} falls between two rungs"
+                );
             }
         }
-    }
-
-    #[test]
-    fn a_grey_far_past_the_top_rung_is_refused() {
-        assert_eq!(level_for_grayscale_value(255), None);
     }
 
     #[test]
@@ -3688,12 +3740,19 @@ mod lead_out_geometry_tests {
     }
 
     /// A record that says nothing about its lead-out geometry was cut before
-    /// the segment existed, and that is the first revision.
+    /// the segment existed — so before revision 1 existed, and its silence
+    /// means the trailer that came before rather than the one that came
+    /// after.
     #[test]
-    fn an_absent_revision_is_the_original() {
+    fn an_absent_revision_is_the_draft04_trailer() {
         assert_eq!(
             original_lead_out_geometry(),
-            LEAD_OUT_GEOMETRY_REVISION_ORIGINAL
+            LEAD_OUT_GEOMETRY_REVISION_DRAFT04
+        );
+        assert_ne!(
+            original_lead_out_geometry(),
+            LEAD_OUT_GEOMETRY_REVISION_ORIGINAL,
+            "absence must not assert the geometry this build cuts"
         );
     }
 

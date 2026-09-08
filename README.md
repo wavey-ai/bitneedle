@@ -67,8 +67,8 @@ closed ring that never lets go.
    │groove│            │               │             │ 3.2 mm in│ 3.5 mm  │
    ├──────┼────────────┼───────────────┼─────────────┼──────────┼─────────┤
    │  ―   │ BRD1 [1/2] │ audio payload │ free carrier│ BRD1 [2/2]         │
-   │      │ grey nibble│ rgb / toned   │ unwritten   │ grey nibble        │
-   │      │ 4 bits/px  │ 20 bits/px    │ today       │ 4 bits/px          │
+   │      │ grey 96-159│ rgb / toned   │ unwritten   │ grey 96-159        │
+   │      │ 6 bits/px  │ 20 bits/px    │ today       │ 6 bits/px          │
    └──────┴────────────┴───────────────┴─────────────┴──────────┴─────────┘
                         └── the cut stops wherever the programme ran out;
                             the run-out claims what it can reach of the rest
@@ -77,7 +77,20 @@ closed ring that never lets go.
 **Lead-in** — two fixed turns at the rim. Carries the first half of the BRD1
 descriptor, including the 29-byte prefix a decoder reads before anything
 else. Because the prefix must be readable before any palette is known, this
-band is painted in grey nibbles (base 120, one nibble per pixel).
+band is painted as plain grey: 64 consecutive rungs, 96 to 159, six bits to a
+pixel. The window is centred on purpose — the lead-in and run-out are rings
+you actually look at, and a ladder that reaches for black and white draws
+them as a barcode instead of a grey ring. Sixty-four rungs one value apart
+need only sixty-four values, so the band sits in the middle with 96 values of
+headroom either side. Decoding is an exact match, not a nearest rung: the
+path is lossless from cutter to reader, so a pixel that is not a rung is a
+corrupted pixel and is refused rather than guessed at.
+
+The ladder changed with draft-05, and it is a breaking change: it is the
+encoding of the descriptor itself, so a record cut under draft-04 fails at
+the BRD1 magic and cannot be read. Nothing inside the descriptor can version
+this, because the descriptor is what became unreadable. Records of that
+vintage have to be re-cut.
 
 **Programme** — the audio, at the pitch the fit solved for. It is laid out
 from the rim against a nominal span and stops at `cut_inner_radius`, which
