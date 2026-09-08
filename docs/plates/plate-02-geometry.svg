@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" font-family="Georgia, 'Times New Roman', serif">
+  <defs>
+    <pattern id="grid2" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24,0 H0 V24" fill="none" stroke="#201A15" stroke-width="0.5" opacity="0.07"/>
+    </pattern>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#201A15"/>
+    </marker>
+    <marker id="arr2s" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M10,0 L0,5 L10,10 z" fill="#201A15"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="520" fill="#F7F2E7"/>
+  <rect x="0" y="0" width="960" height="520" fill="url(#grid2)"/>
+  <rect x="8" y="8" width="944" height="504" fill="none" stroke="#201A15" stroke-width="2"/>
+  <rect x="16" y="16" width="928" height="488" fill="none" stroke="#201A15" stroke-width="0.75"/>
+
+  <text x="40" y="54" font-family="'Courier New', monospace" font-size="12" letter-spacing="4" fill="#201A15">PLATE II</text>
+  <text x="40" y="82" font-size="26" fill="#201A15">ONE CANVAS, THREE FORMATS</text>
+  <text x="920" y="54" text-anchor="end" font-family="'Courier New', monospace" font-size="11" fill="#201A15">RIAA GEOMETRY · 576²</text>
+  <line x1="40" y1="94" x2="920" y2="94" stroke="#201A15" stroke-width="0.75"/>
+  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every profile draws at one size — 287 px from rim to centre — so the label's share of the canvas is the format's face.</text>
+
+  <!-- dimension lines -->
+  <g font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">
+    <line x1="75" y1="140" x2="305" y2="140" stroke="#201A15" stroke-width="1" marker-start="url(#arr2s)" marker-end="url(#arr2)"/>
+    <text x="190" y="134" text-anchor="middle">Ø 174.6 mm</text>
+    <line x1="365" y1="140" x2="595" y2="140" stroke="#201A15" stroke-width="1" marker-start="url(#arr2s)" marker-end="url(#arr2)"/>
+    <text x="480" y="134" text-anchor="middle">Ø 250.8 mm</text>
+    <line x1="655" y1="140" x2="885" y2="140" stroke="#201A15" stroke-width="1" marker-start="url(#arr2s)" marker-end="url(#arr2)"/>
+    <text x="770" y="134" text-anchor="middle">Ø 301.6 mm</text>
+  </g>
+
+  <!-- DISC 1: 7in single45 -->
+  <g>
+    <circle cx="190" cy="272" r="115" fill="none" stroke="#201A15" stroke-width="2"/>
+    <circle cx="190" cy="272" r="112" fill="none" stroke="#201A15" stroke-width="1" stroke-dasharray="6 4"/>
+    <circle cx="190" cy="272" r="71" fill="none" stroke="#201A15" stroke-width="1.25" stroke-dasharray="1.5 3"/>
+    <circle cx="190" cy="272" r="65" fill="none" stroke="#201A15" stroke-width="1"/>
+    <circle cx="190" cy="272" r="60" fill="#E3D5B8" stroke="#201A15" stroke-width="1.5"/>
+    <circle cx="190" cy="272" r="25" fill="none" stroke="#201A15" stroke-width="1" stroke-dasharray="4 3"/>
+    <circle cx="190" cy="272" r="23" fill="none" stroke="#201A15" stroke-width="0.75" stroke-dasharray="4 3"/>
+    <circle cx="190" cy="272" r="5" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
+    <text x="190" y="414" text-anchor="middle" font-size="17" fill="#201A15">7″ · single45</text>
+    <text x="190" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 92 mm · + dink 38.1</text>
+    <text x="190" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 52.7% of canvas</text>
+  </g>
+
+  <!-- DISC 2: 10in ten -->
+  <g>
+    <circle cx="480" cy="272" r="115" fill="none" stroke="#201A15" stroke-width="2"/>
+    <circle cx="480" cy="272" r="112" fill="none" stroke="#201A15" stroke-width="1" stroke-dasharray="6 4"/>
+    <circle cx="480" cy="272" r="55" fill="none" stroke="#201A15" stroke-width="1.25" stroke-dasharray="1.5 3"/>
+    <circle cx="480" cy="272" r="49" fill="none" stroke="#201A15" stroke-width="1"/>
+    <circle cx="480" cy="272" r="46" fill="#E3D5B8" stroke="#201A15" stroke-width="1.5"/>
+    <circle cx="480" cy="272" r="3.2" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
+    <text x="480" y="414" text-anchor="middle" font-size="17" fill="#201A15">10″ · ten</text>
+    <text x="480" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 100 mm</text>
+    <text x="480" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 39.9% of canvas</text>
+  </g>
+
+  <!-- DISC 3: 12in lp -->
+  <g>
+    <circle cx="770" cy="272" r="115" fill="none" stroke="#201A15" stroke-width="2"/>
+    <circle cx="770" cy="272" r="112" fill="none" stroke="#201A15" stroke-width="1" stroke-dasharray="6 4"/>
+    <circle cx="770" cy="272" r="46" fill="none" stroke="#201A15" stroke-width="1.25" stroke-dasharray="1.5 3"/>
+    <circle cx="770" cy="272" r="41" fill="none" stroke="#201A15" stroke-width="1"/>
+    <circle cx="770" cy="272" r="38" fill="#E3D5B8" stroke="#201A15" stroke-width="1.5"/>
+    <circle cx="770" cy="272" r="3" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
+    <text x="770" y="414" text-anchor="middle" font-size="17" fill="#201A15">12″ · lp</text>
+    <text x="770" y="432" text-anchor="middle" font-family="'Courier New', monospace" font-size="10" fill="#201A15">label Ø 100 mm</text>
+    <text x="770" y="450" text-anchor="middle" font-size="14" font-weight="bold" fill="#201A15">label 33.2% of canvas</text>
+  </g>
+
+  <!-- legend -->
+  <g font-family="'Courier New', monospace" font-size="10" fill="#201A15">
+    <line x1="40" y1="474" x2="72" y2="474" stroke="#201A15" stroke-width="2"/>
+    <text x="78" y="477">disc edge</text>
+    <line x1="168" y1="474" x2="200" y2="474" stroke="#201A15" stroke-width="1" stroke-dasharray="6 4"/>
+    <text x="206" y="477">payload outer</text>
+    <line x1="322" y1="474" x2="354" y2="474" stroke="#201A15" stroke-width="1.25" stroke-dasharray="1.5 3"/>
+    <text x="360" y="477">payload inner</text>
+    <line x1="480" y1="474" x2="512" y2="474" stroke="#201A15" stroke-width="1"/>
+    <text x="518" y="477">lock</text>
+    <rect x="580" y="467" width="20" height="12" fill="#E3D5B8" stroke="#201A15" stroke-width="1"/>
+    <text x="606" y="477">label</text>
+    <circle cx="672" cy="473" r="6" fill="none" stroke="#201A15" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="684" y="477">dink + knockout</text>
+  </g>
+  <text x="920" y="500" text-anchor="end" font-family="'Courier New', monospace" font-size="10" fill="#201A15">№ BN–II · vintage 7″ carries the 84 mm label at r 138 px</text>
+</svg>

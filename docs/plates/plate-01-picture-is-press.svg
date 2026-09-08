@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" font-family="Georgia, 'Times New Roman', serif">
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24,0 H0 V24" fill="none" stroke="#201A15" stroke-width="0.5" opacity="0.07"/>
+    </pattern>
+    <radialGradient id="sunset" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#F6D789"/>
+      <stop offset="45%" stop-color="#E8955A"/>
+      <stop offset="70%" stop-color="#B65A63"/>
+      <stop offset="100%" stop-color="#4E4468"/>
+    </radialGradient>
+    <filter id="static" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" stitchTiles="stitch"/>
+    </filter>
+    <filter id="grain" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+    <clipPath id="clipL"><circle cx="270" cy="300" r="140"/></clipPath>
+    <clipPath id="clipR"><circle cx="690" cy="300" r="140"/></clipPath>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#201A15"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="560" fill="#F7F2E7"/>
+  <rect x="0" y="0" width="960" height="560" fill="url(#grid)"/>
+  <rect x="8" y="8" width="944" height="544" fill="none" stroke="#201A15" stroke-width="2"/>
+  <rect x="16" y="16" width="928" height="528" fill="none" stroke="#201A15" stroke-width="0.75"/>
+
+  <text x="40" y="54" font-family="'Courier New', monospace" font-size="12" letter-spacing="4" fill="#201A15">PLATE I</text>
+  <text x="40" y="82" font-size="26" fill="#201A15">THE PICTURE IS THE PRESS</text>
+  <text x="920" y="54" text-anchor="end" font-family="'Courier New', monospace" font-size="11" fill="#201A15">BITNEEDLE · 576² CANVAS</text>
+  <line x1="40" y1="94" x2="920" y2="94" stroke="#201A15" stroke-width="0.75"/>
+  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every groove pixel holds part of the payload — hold its brightness, and the picture survives the press.</text>
+
+  <!-- LEFT: RGB noise disc -->
+  <circle cx="270" cy="300" r="140" fill="#1C1C1E"/>
+  <g clip-path="url(#clipL)">
+    <rect x="130" y="160" width="280" height="280" filter="url(#static)" opacity="0.9"/>
+    <circle cx="270" cy="300" r="133" fill="none" stroke="#8F8F8F" stroke-width="7" opacity="0.95"/>
+    <g fill="none" stroke="#000000" opacity="0.35">
+      <circle cx="270" cy="300" r="124"/><circle cx="270" cy="300" r="116"/>
+      <circle cx="270" cy="300" r="108"/><circle cx="270" cy="300" r="100"/>
+      <circle cx="270" cy="300" r="92"/><circle cx="270" cy="300" r="84"/>
+      <circle cx="270" cy="300" r="76"/><circle cx="270" cy="300" r="68"/>
+    </g>
+    <g fill="none" stroke="#FFFFFF" opacity="0.08">
+      <circle cx="270" cy="300" r="120"/><circle cx="270" cy="300" r="104"/>
+      <circle cx="270" cy="300" r="88"/><circle cx="270" cy="300" r="72"/>
+    </g>
+    <g fill="none" stroke="#4A4A4A" stroke-width="1.5">
+      <circle cx="270" cy="300" r="52"/><circle cx="270" cy="300" r="56"/><circle cx="270" cy="300" r="60"/>
+    </g>
+  </g>
+  <circle cx="270" cy="300" r="140" fill="none" stroke="#201A15" stroke-width="2"/>
+  <circle cx="270" cy="300" r="46" fill="#14110E" stroke="#201A15" stroke-width="1.5"/>
+  <text x="270" y="296" text-anchor="middle" font-size="10" letter-spacing="2" fill="#F7F2E7">BITNEEDLE</text>
+  <text x="270" y="310" text-anchor="middle" font-family="'Courier New', monospace" font-size="8.5" fill="#F7F2E7">SIDE A · 33⅓</text>
+  <circle cx="270" cy="300" r="6" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
+
+  <!-- RIGHT: toned art disc -->
+  <circle cx="690" cy="300" r="140" fill="url(#sunset)"/>
+  <g clip-path="url(#clipR)">
+    <rect x="550" y="160" width="280" height="280" filter="url(#grain)" opacity="0.16"/>
+    <g fill="none" stroke="#2A1F18" opacity="0.32">
+      <circle cx="690" cy="300" r="124"/><circle cx="690" cy="300" r="116.5"/>
+      <circle cx="690" cy="300" r="109"/><circle cx="690" cy="300" r="101.5"/>
+      <circle cx="690" cy="300" r="94"/><circle cx="690" cy="300" r="86.5"/>
+      <circle cx="690" cy="300" r="79"/><circle cx="690" cy="300" r="71.5"/>
+      <circle cx="690" cy="300" r="64"/>
+    </g>
+    <circle cx="690" cy="300" r="133" fill="none" stroke="#8F8F8F" stroke-width="7" opacity="0.95"/>
+    <g fill="none" stroke="#43302A" stroke-width="1.5">
+      <circle cx="690" cy="300" r="52"/><circle cx="690" cy="300" r="56"/><circle cx="690" cy="300" r="60"/>
+    </g>
+    <circle cx="690" cy="300" r="50" fill="none" stroke="#F7F2E7" stroke-width="1" opacity="0.7"/>
+  </g>
+  <circle cx="690" cy="300" r="140" fill="none" stroke="#201A15" stroke-width="2"/>
+  <circle cx="690" cy="300" r="46" fill="#173F3C" stroke="#201A15" stroke-width="1.5"/>
+  <text x="690" y="296" text-anchor="middle" font-size="10" letter-spacing="2" fill="#F7F2E7">LORI ASHA</text>
+  <text x="690" y="310" text-anchor="middle" font-family="'Courier New', monospace" font-size="8.5" fill="#F7F2E7">WESTSIDE · 33⅓</text>
+  <circle cx="690" cy="300" r="6" fill="#F7F2E7" stroke="#201A15" stroke-width="1.5"/>
+
+  <!-- centre arrow: same bytes -->
+  <line x1="430" y1="300" x2="518" y2="300" stroke="#201A15" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="474" y="284" text-anchor="middle" font-family="'Courier New', monospace" font-size="11" letter-spacing="1" fill="#201A15">SAME BYTES</text>
+  <text x="474" y="318" text-anchor="middle" font-size="12" font-style="italic" fill="#201A15">another palette</text>
+
+  <!-- captions -->
+  <text x="270" y="468" text-anchor="middle" font-size="13" fill="#201A15">Fig. 1a — RGB · three bytes to a pixel</text>
+  <text x="270" y="486" text-anchor="middle" font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">the densest cut · full-colour noise</text>
+  <text x="690" y="468" text-anchor="middle" font-size="13" fill="#201A15">Fig. 1b — TONED · twenty bits to a pixel</text>
+  <text x="690" y="486" text-anchor="middle" font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">luma held · chroma drifts · the picture survives</text>
+
+  <text x="40" y="528" font-family="'Courier New', monospace" font-size="10" fill="#201A15">Groove enlarged ×18 · geometry true to the 576² canvas.</text>
+  <text x="920" y="528" text-anchor="end" font-family="'Courier New', monospace" font-size="10" fill="#201A15">№ BN–I</text>
+</svg>

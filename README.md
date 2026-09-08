@@ -3,12 +3,45 @@
 Bitneedle is the public reference implementation for Bitneedle picture records.
 A Bitneedle picture record is an image that contains recoverable audio data.
 
+## The picture is the press
+
+![Plate I — the same bytes cut as RGB noise and as a toned picture](docs/plates/plate-01-picture-is-press.svg)
+
+*Fig. 1 — the same bytes, two palettes. The lead-in stays grey; the programme takes the picture.*
+
+Every groove pixel holds part of the payload, and the encoding decides what
+the disc looks like:
+
+- **RGB** lays three bytes to a pixel — the densest cut, and full-colour noise.
+- **Toned** holds each pixel's brightness and drifts its chroma about a base
+  tone, at twenty bits to a pixel — so the song reads as haze, sage, dusty
+  rose, and still decodes bit-exact.
+- **The wheel** tones by position instead of by record: twenty-four pockets
+  across the band, each taking its colour from the artwork it covers, so a
+  finished record can carry the whole picture and remain a carrier.
+
+### The tone clock
+
+![Plate IV — the house wheel: eight pockets inside, sixteen outside](docs/plates/plate-04-tone-clock.svg)
+
+*Fig. 2 — radius picks the ring, rotation picks the slot. Turn it and the
+edition changes while the picture holds.*
+
+Two controls make a re-press a different record: **rotation**, in hundredths
+of a degree per ring, and a **base nudge** of one 8-bit step, which re-sorts
+nearly the whole million-entry palette while moving the colour less than a
+just-noticeable difference. The picture holds; the pressing changes.
+
 ## Record geometry
 
 Every profile takes its dimensions from the RIAA standard. The three sizes have
 three outer diameters, and each size starts its recorded band at its own
 diameter. A 10 in and a 12 in share one inner recording diameter. All three
 sizes share one centre hole.
+
+![Plate II — every profile draws at one size, so the label's share of the canvas is the format's face](docs/plates/plate-02-geometry.svg)
+
+*Fig. 3 — one canvas, three formats. Exact figures below.*
 
 | | 7 in `single45` | 7 in `single45vintage` | 10 in `ten` | 12 in `lp` |
 | --- | --- | --- | --- | --- |
@@ -56,6 +89,14 @@ exact angle at which the programme leaves it, so a reader passes from the
 payload into the deadwax in one move. The groove ends in a closed ring, which is
 the locked groove.
 
+![Plate III — rim to label: one continuous groove through six bands](docs/plates/plate-03-groove.svg)
+
+*Fig. 4 — bands true to order; widths not to scale. The programme claims what
+it can reach, the run-out claims the rest.*
+
+<details>
+<summary>The same section as text</summary>
+
 ```
    travel of the stylus  ──────────────────────────────────────────────────▶
 
@@ -76,6 +117,8 @@ the locked groove.
                         └── the cut stops wherever the programme ran out;
                             the run-out claims what it can reach of the rest
 ```
+
+</details>
 
 **Lead-in** — two fixed turns at the rim. This band carries the whole BRD1
 descriptor, including the 29-byte prefix that a decoder reads first. A decoder
