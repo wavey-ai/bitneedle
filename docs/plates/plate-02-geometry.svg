@@ -20,7 +20,7 @@
   <text x="40" y="82" font-size="26" fill="#201A15">ONE IMAGE SIZE</text>
   <text x="920" y="54" text-anchor="end" font-family="'Courier New', monospace" font-size="11" fill="#201A15">RIAA GEOMETRY · 576²</text>
   <line x1="40" y1="94" x2="920" y2="94" stroke="#201A15" stroke-width="0.75"/>
-  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every profile uses one image size: 287 px from rim to centre. The label share differs by profile.</text>
+  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">Every profile uses one image size: 287 px from edge to centre. The label share differs by profile.</text>
 
   <!-- dimension lines -->
   <g font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">

@@ -40,7 +40,7 @@
   </g>
   <!-- lead-in ring -->
   <circle cx="300" cy="310" r="198" fill="none" stroke="#8F8F8F" stroke-width="4"/>
-  <!-- rim -->
+  <!-- edge -->
   <circle cx="300" cy="310" r="200" fill="none" stroke="#201A15" stroke-width="2"/>
   <!-- run-out + lock -->
   <g fill="none" stroke="#201A15" stroke-width="1">
@@ -58,7 +58,7 @@
   <g font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">
     <line x1="600" y1="190" x2="458" y2="187" stroke="#201A15" stroke-width="1"/>
     <circle cx="458" cy="187" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
-    <text x="610" y="186" font-family="Georgia, serif" font-size="14">Rim</text>
+    <text x="610" y="186" font-family="Georgia, serif" font-size="14">Edge</text>
     <text x="610" y="202">outer_radius · 287 px</text>
 
     <line x1="600" y1="230" x2="484" y2="236" stroke="#201A15" stroke-width="1"/>
