@@ -508,6 +508,18 @@ pub fn sections(report: &SidecarReport) -> Vec<ManifestSection> {
             decode.carrier_pairs, decode.carrier_pixels
         ),
     ));
+    // Where the stream sits. The carriers fill in order, so a row that holds
+    // its whole capacity is a carrier the stream filled and passed through,
+    // and the first row short of its capacity is where the stream ended.
+    for usage in &decode.carriers {
+        carried.push(ManifestRow::new(
+            format!("  {}", usage.carrier),
+            format!(
+                "{} of {} bytes over {} {}",
+                usage.used_bytes, usage.capacity_bytes, usage.units, usage.kind
+            ),
+        ));
+    }
     carried.push(ManifestRow::new("Items", validation.item_count.to_string()));
     carried.push(ManifestRow::new(
         "Attested",

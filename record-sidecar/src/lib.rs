@@ -395,6 +395,24 @@ pub struct SidecarDecodeResult {
     pub carrier_pixels: usize,
     pub carrier_pairs: usize,
     pub capacity_bytes: usize,
+    /// What each carrier of the plan holds, and what the stream took of it,
+    /// in fill order. Empty for a sidecar read off a bare pair set.
+    #[serde(default)]
+    pub carriers: Vec<SidecarCarrierUsage>,
+}
+
+/// One carrier's share of a sidecar stream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarCarrierUsage {
+    pub carrier: String,
+    /// `groove` for a carrier holding octets in its pixels, `pairs` for one
+    /// holding bits by modulation.
+    pub kind: String,
+    /// Pixels for a groove carrier, pairs for a pair carrier.
+    pub units: usize,
+    pub capacity_bytes: usize,
+    pub used_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -408,6 +426,10 @@ pub struct SidecarCapacity {
     pub capacity_bytes: usize,
     pub bits_per_pair: f64,
     pub two_bit_pairs: usize,
+    /// The octets each carrier holds, in fill order. Empty for an estimate
+    /// taken off a bare pair set.
+    #[serde(default)]
+    pub by_carrier: Vec<(String, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -2950,30 +2972,62 @@ fn build_sidecar_carrier_pairs(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What a set of carriers holds on this pressing.
+///
+/// The estimate is taken off the carrier plan, which is the same plan the
+/// writer fills, so a groove carrier reports the octets its pixels hold rather
+/// than nothing. A pair-only estimate reported nothing for the groove
+/// carriers, which is what a caller sizing an image to the record would then
+/// have believed.
 fn sidecar_capacity_entry_json(
-    width: usize,
-    height: usize,
-    b_value: f64,
-    spiral_family: &record_core::SpiralFamily,
-    record_profile: &str,
-    cut_inner_radius: Option<i32>,
-    rgba: &[u8],
+    context: &RecordPngContext,
     scheme: &str,
     carriers: Vec<SidecarCarrier>,
     text_avoid: Option<&TextAvoidSpec>,
 ) -> Result<serde_json::Value> {
-    let carrier_pairs = build_sidecar_carrier_pairs(
-        width,
-        height,
-        b_value,
-        spiral_family,
-        record_profile,
-        cut_inner_radius,
+    let plan = build_sidecar_plan(
+        context.width,
+        context.height,
+        &context.descriptor,
+        context.descriptor_bytes,
         &carriers,
         SIDECAR_DEFAULT_SEED,
         text_avoid,
     )?;
-    let capacity = sidecar_capacity_for_pairs(scheme, &carriers, &carrier_pairs, rgba)?;
+    let usage = sidecar_plan_capacities(&plan, scheme, &context.rgba)?;
+    let capacity_bytes: usize = usage.iter().map(|(_, capacity)| capacity).sum();
+    let mut carrier_pixels = 0usize;
+    let mut carrier_pairs = 0usize;
+    for run in &plan {
+        match run {
+            SidecarRun::Groove { indices, .. } => carrier_pixels += indices.len(),
+            SidecarRun::Steg { pairs, .. } => {
+                carrier_pairs += pairs.len();
+                carrier_pixels += pairs.len() * 2;
+            }
+        }
+    }
+    let capacity = SidecarCapacity {
+        scheme: normalize_sidecar_scheme(Some(scheme))?,
+        carriers: carriers
+            .iter()
+            .map(|carrier| sidecar_carrier_name(*carrier).to_string())
+            .collect(),
+        carrier_pixels,
+        carrier_pairs,
+        capacity_bits: capacity_bytes * 8,
+        capacity_bytes,
+        bits_per_pair: if carrier_pairs > 0 {
+            (capacity_bytes * 8) as f64 / carrier_pairs as f64
+        } else {
+            0.0
+        },
+        two_bit_pairs: 0,
+        by_carrier: usage
+            .into_iter()
+            .map(|(carrier, bytes)| (sidecar_carrier_name(carrier).to_string(), bytes))
+            .collect(),
+    };
     serde_json::to_value(capacity).context("failed to serialize sidecar capacity")
 }
 
@@ -3049,7 +3103,7 @@ fn decode_record_png_sidecar_with_context(
         &scheme,
         length,
     )?;
-    let result = describe_sidecar_from_plan(&bts1, &scheme, &plan, capacity_bytes)?;
+    let result = describe_sidecar_from_plan(&bts1, &scheme, &plan, &context.rgba)?;
 
     if let Some(pointer) = pointer.as_ref() {
         let actual: [u8; 32] = Sha256::digest(&bts1).into();
@@ -3380,39 +3434,21 @@ pub fn estimate_record_png_sidecar_capacity_json(
             "twoBitThreshold": SIDECAR_SAFE_V2_MIN_SCORE,
         },
         "label": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            sidecar_cut_inner_radius(&context.descriptor),
-            &context.rgba,
+            &context,
             scheme,
             vec![SidecarCarrier::Label],
             text_avoid,
         )?,
         "intergroove": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            sidecar_cut_inner_radius(&context.descriptor),
-            &context.rgba,
+            &context,
             scheme,
             vec![SidecarCarrier::Intergroove],
             text_avoid,
         )?,
         "combined": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            sidecar_cut_inner_radius(&context.descriptor),
-            &context.rgba,
+            &context,
             scheme,
-            vec![SidecarCarrier::Label, SidecarCarrier::Intergroove],
+            SIDECAR_FILL_ORDER.to_vec(),
             text_avoid,
         )?,
     }))
@@ -4174,6 +4210,7 @@ pub fn sidecar_capacity_for_pairs(
         } else {
             bit_capacity as f64 / pairs.len() as f64
         },
+        by_carrier: Vec::new(),
         two_bit_pairs,
     })
 }
@@ -4399,22 +4436,40 @@ pub fn describe_sidecar_from_plan(
     bsc1: &[u8],
     scheme: &str,
     plan: &[SidecarRun],
-    capacity_bytes: usize,
+    rgba: &[u8],
 ) -> Result<SidecarDecodeResult> {
     let validation = validate_sidecar_container(bsc1)?;
     let sha256 = sha256_base64url(bsc1);
+    let capacities = sidecar_plan_capacities(plan, scheme, rgba)?;
+    let capacity_bytes: usize = capacities.iter().map(|(_, capacity)| capacity).sum();
     let mut carrier_pairs = 0usize;
     let mut carrier_pixels = 0usize;
-    for run in plan {
-        match run {
-            SidecarRun::Groove { indices, .. } => carrier_pixels += indices.len(),
+    let mut carriers = Vec::with_capacity(plan.len());
+    let mut remaining = bsc1.len();
+    for (run, (carrier, capacity)) in plan.iter().zip(capacities) {
+        let used = capacity.min(remaining);
+        remaining -= used;
+        let (kind, units) = match run {
+            SidecarRun::Groove { indices, .. } => {
+                carrier_pixels += indices.len();
+                ("groove", indices.len())
+            }
             SidecarRun::Steg { pairs, .. } => {
                 carrier_pairs += pairs.len();
                 carrier_pixels += pairs.len() * 2;
+                ("pairs", pairs.len())
             }
-        }
+        };
+        carriers.push(SidecarCarrierUsage {
+            carrier: sidecar_carrier_name(carrier).to_string(),
+            kind: kind.to_string(),
+            units,
+            capacity_bytes: capacity,
+            used_bytes: used,
+        });
     }
     Ok(SidecarDecodeResult {
+        carriers,
         ok: true,
         descriptor: serde_json::json!({
             "container": "BSC1",
@@ -4454,6 +4509,7 @@ pub fn decode_sidecar_from_pairs(
         carrier_pixels: pairs.len() * 2,
         carrier_pairs: pairs.len(),
         capacity_bytes: capacity,
+        carriers: Vec::new(),
     };
     Ok((bsc1, result))
 }
