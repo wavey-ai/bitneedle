@@ -206,6 +206,46 @@ pub fn manifest_report_json(png: &[u8]) -> Result<String> {
     serde_json::to_string(&report).context("failed to serialize the record manifest")
 }
 
+/// What can be read without walking the groove.
+///
+/// A record is proved a record by its descriptor, which lives in the lead-in
+/// and costs a PNG decode and a descriptor parse. Everything the shelf needs
+/// to file it — profile, identity, size — is in there. Recovering the groove
+/// itself is the expensive half: a clock-toned record builds one palette per
+/// pocket, tens of them, before a single byte comes back. So intake asks this
+/// question and the deck asks the full one when the record is played. A file
+/// that gets past this and is not a record fails at the deck rather than at
+/// the door.
+pub fn structure_report(png: &[u8]) -> Result<ManifestReport> {
+    let (profile, descriptor) = record_decode::decode_record_descriptor_from_png(png, None)
+        .context("this file could not be read as a record")?;
+
+    let mut record = ManifestSection::new("RECORD");
+    record.push(ManifestRow::new("Bytes", format_bytes(png.len())));
+    if let Some((width, height, depth, colour)) = crate::png_ihdr(png) {
+        record.push(ManifestRow::new("Canvas", format!("{width} × {height}")));
+        record.push(ManifestRow::new(
+            "Pixels",
+            format!("{depth}-bit, colour type {colour}"),
+        ));
+    }
+    record.push(ManifestRow::new("Profile", &profile));
+    record.push(ManifestRow::new("Payload", &descriptor.payload_encoding));
+    record.push(ManifestRow::new(
+        "Stream",
+        format_bytes(descriptor.stream_byte_length),
+    ));
+
+    Ok(ManifestReport {
+        // The descriptor parsed and named a profile: the file is a record.
+        // The groove is not read here, so there is nothing to fail yet.
+        ok: true,
+        checks_passed: 0,
+        checks_failed: 0,
+        sections: vec![record, identity_section(&descriptor)],
+    })
+}
+
 fn record_section(
     png: &[u8],
     decoded: &record_decode::DecodedRecord,

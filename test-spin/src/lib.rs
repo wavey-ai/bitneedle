@@ -19,7 +19,10 @@ use std::fmt::Write as _;
 pub mod manifest;
 pub mod sidecars;
 
-pub use manifest::{manifest_report, manifest_report_json, ManifestReport, ManifestRow, ManifestSection};
+pub use manifest::{
+    manifest_report, manifest_report_json, structure_report, ManifestReport, ManifestRow,
+    ManifestSection,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct InspectionOptions<'a> {
