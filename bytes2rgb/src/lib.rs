@@ -595,8 +595,9 @@ pub use span::{decode_toned_spans, ToneSpan};
 
 pub mod clock;
 pub use clock::{
-    decode_toned_clock, encode_toned_clock, pixel_angle, pixel_radius, ClockSlot, ToneClock,
-    TONE_CLOCK_MAX_SLOTS, TONE_CLOCK_MIN_SLOTS, TONE_CLOCK_ROTATION_UNITS_PER_TURN,
+    decode_toned_clock, decode_toned_clock_raster, encode_toned_clock, pixel_angle, pixel_radius,
+    ClockSlot, ToneClock, TONE_CLOCK_MAX_SLOTS, TONE_CLOCK_MIN_SLOTS,
+    TONE_CLOCK_ROTATION_UNITS_PER_TURN,
 };
 
 /// Configuration for a [`TonedPalette`].

@@ -22,6 +22,7 @@
 use crate::{ToneOrdering, TonedConfig, TonedPalette};
 use anyhow::{bail, Context, Result};
 use std::f64::consts::{FRAC_PI_2, TAU};
+use std::sync::Arc;
 
 pub const TONE_CLOCK_MIN_SLOTS: usize = 2;
 pub const TONE_CLOCK_MAX_SLOTS: usize = 64;
@@ -472,6 +473,66 @@ pub fn decode_toned_clock(
             radii.len()
         );
     }
+    let words = decode_clock_words(rgba, clock, byte_length, |index| (angles[index], radii[index]))?;
+    pack_clock_words(&words, clock.bits_per_pixel, byte_length)
+}
+
+/// The same, taking each pixel's index on the raster instead of its angle and
+/// distance. The decode walks the spiral, so it already holds the raster
+/// index; the angle and the radius are the two numbers that index is made of,
+/// and reading them here spares the caller two scratch vectors the size of
+/// the groove.
+pub fn decode_toned_clock_raster(
+    rgba: &[u8],
+    clock: &ToneClock,
+    width: usize,
+    height: usize,
+    pixel_indices: &[usize],
+    byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    clock.validate()?;
+    if !rgba.len().is_multiple_of(4) {
+        bail!("RGBA length must be divisible by 4");
+    }
+    let pixel_count = rgba.len() / 4;
+    if pixel_indices.len() != pixel_count {
+        bail!(
+            "{} pixel indices given for {pixel_count} clock-toned pixels",
+            pixel_indices.len()
+        );
+    }
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let words = decode_clock_words(rgba, clock, byte_length, |index| {
+        let raster = pixel_indices[index];
+        let x = (raster % width) as f64;
+        let y = (raster / width) as f64;
+        (
+            pixel_angle(x, y, center_x, center_y),
+            pixel_radius(x, y, center_x, center_y),
+        )
+    })?;
+    pack_clock_words(&words, clock.bits_per_pixel, byte_length)
+}
+
+/// The wheel's words, in one pass.
+///
+/// `slot_at` gives the angle and the distance of groove pixel `i`. Each pixel
+/// is looked up once, in the palette of its own pocket; the pocket's palette
+/// is built the first time it is seen and kept for the rest of the pass. The
+/// pockets are a fixed, small set, so the table is an array indexed by the key
+/// the pixel already computes — no scan of the whole groove per pocket, no
+/// hashing, no lock.
+fn decode_clock_words<F>(
+    rgba: &[u8],
+    clock: &ToneClock,
+    byte_length: Option<usize>,
+    slot_at: F,
+) -> Result<Vec<u32>>
+where
+    F: Fn(usize) -> (f64, f64),
+{
+    let pixel_count = rgba.len() / 4;
     if let Some(byte_length) = byte_length {
         if clock.pixel_count(byte_length) > pixel_count {
             bail!(
@@ -482,32 +543,44 @@ pub fn decode_toned_clock(
         }
     }
 
-    let keys = clock.palette_keys(angles, radii);
+    let mut palettes: Vec<Option<Arc<TonedPalette>>> = vec![None; 2 * TONE_CLOCK_MAX_CELLS];
     let mut words = vec![0u32; pixel_count];
-    for key in distinct_keys(&keys) {
-        let palette = TonedPalette::shared(clock.config_for_key(key))?;
-        for (pixel_index, _) in keys.iter().enumerate().filter(|(_, &k)| k == key) {
-            let at = pixel_index * 4;
-            let color = [rgba[at], rgba[at + 1], rgba[at + 2]];
-            let Some(index) = palette.index_of(color) else {
-                bail!(
-                    "pixel {pixel_index} #{:02X}{:02X}{:02X} is not in tone clock pocket {}'s {} palette",
-                    color[0],
-                    color[1],
-                    color[2],
-                    key / 2,
-                    if key % 2 == 1 { "gap" } else { "track" }
-                );
-            };
-            words[pixel_index] = index;
+    for (pixel_index, word) in words.iter_mut().enumerate() {
+        let (angle, away) = slot_at(pixel_index);
+        let cell = clock.cell_index(pixel_index, angle, away);
+        let key = cell * 2 + usize::from(clock.is_gap(pixel_index));
+        if palettes[key].is_none() {
+            palettes[key] = Some(TonedPalette::shared(clock.config_for_key(key as u16))?);
         }
+        let palette = palettes[key].as_ref().expect("palette was just built");
+        let at = pixel_index * 4;
+        let color = [rgba[at], rgba[at + 1], rgba[at + 2]];
+        let Some(index) = palette.index_of(color) else {
+            bail!(
+                "pixel {pixel_index} #{:02X}{:02X}{:02X} is not in tone clock pocket {}'s {} palette",
+                color[0],
+                color[1],
+                color[2],
+                cell,
+                if key % 2 == 1 { "gap" } else { "track" }
+            );
+        };
+        *word = index;
     }
+    Ok(words)
+}
 
-    let bits_per_pixel = clock.bits_per_pixel;
-    let mut bytes = Vec::with_capacity(pixel_count * bits_per_pixel as usize / 8 + 1);
+/// Packs `bits_per_pixel`-wide words back into bytes, then trims the padding
+/// to the declared length.
+fn pack_clock_words(
+    words: &[u32],
+    bits_per_pixel: u32,
+    byte_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(words.len() * bits_per_pixel as usize / 8 + 1);
     let mut acc = 0u64;
     let mut acc_bits = 0u32;
-    for word in words {
+    for &word in words {
         acc = (acc << bits_per_pixel) | u64::from(word);
         acc_bits += bits_per_pixel;
         while acc_bits >= 8 {

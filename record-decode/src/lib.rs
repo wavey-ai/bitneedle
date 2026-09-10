@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use bytes2rgb::rgba_to_bytes as track_rgba_to_bytes;
 use bytes2rgb::{
-    decode_toned_clock, decode_toned_spans, pixel_angle, pixel_radius, ClockSlot, ToneClock,
+    decode_toned_clock_raster, decode_toned_spans, ClockSlot, ToneClock,
     ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig,
 };
 use record_core::{
@@ -110,43 +110,21 @@ fn decode_clock_toned_track_to_bytes(
     record_descriptor::validate_tone_clock(clock, expected_byte_length)
         .context("invalid toned-v2 tone clock")?;
     let wheel = tone_clock_from_descriptor(clock);
-    let center_x = width as f64 / 2.0;
-    let center_y = height as f64 / 2.0;
-    let angles: Vec<f64> = pixel_indices
-        .iter()
-        .map(|&index| {
-            pixel_angle(
-                (index % width) as f64,
-                (index / width) as f64,
-                center_x,
-                center_y,
-            )
-        })
-        .collect();
-    // The ring a pixel is in, off the same two numbers its angle came from.
-    let radii: Vec<f64> = pixel_indices
-        .iter()
-        .map(|&index| {
-            pixel_radius(
-                (index % width) as f64,
-                (index / width) as f64,
-                center_x,
-                center_y,
-            )
-        })
-        .collect();
     // A payload that came in over its nominal keeps writing past the cut;
     // whatever was lifted beyond the declared length is padding to the wheel.
     let needed = expected_byte_length
         .map(|length| record_descriptor::tone_clock_pixel_count(clock, length))
         .transpose()?
-        .unwrap_or(angles.len())
-        .min(angles.len());
-    decode_toned_clock(
+        .unwrap_or(pixel_indices.len())
+        .min(pixel_indices.len());
+    // The decode reads the angle and the distance off the raster index it was
+    // handed, so no angle or radius vectors are built here.
+    decode_toned_clock_raster(
         &track_data[..needed * 4],
         &wheel,
-        &angles[..needed],
-        &radii[..needed],
+        width,
+        height,
+        &pixel_indices[..needed],
         expected_byte_length,
     )
     .context("failed to decode toned-v2 groove pixels")
