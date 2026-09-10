@@ -1058,10 +1058,27 @@ fn sidecar_lead_in_outer_radius(geometry: &record_core::RecordProfileGeometry) -
         .max(geometry.payload_outer_radius + 1)
 }
 
+/// The cut inner radius a sidecar traces the run-out with. See the note on
+/// the same function in `record_sidecar`.
+fn sidecar_cut_inner_radius(descriptor: &record_descriptor::RecordDescriptor) -> Option<i32> {
+    match descriptor.cut_inner_radius {
+        0 => None,
+        radius => Some(i32::from(radius)),
+    }
+}
+
+/// The pixels a sidecar must not write to: the lead-in band and the run-out.
+///
+/// The run-out is traced with the record's own cut inner radius, so that the
+/// turns a cut near the rim leaves above the payload inner radius are
+/// protected. See the note on the same function in `record_sidecar`.
 fn build_sidecar_protected_metadata_pixels(
     width: usize,
     height: usize,
     record_profile: &str,
+    b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
+    cut_inner_radius: Option<i32>,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -1070,9 +1087,23 @@ fn build_sidecar_protected_metadata_pixels(
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?
     {
         protected[pixel_index] = true;
+    }
+    // The deadwax carries bytes and is traced apart from the programme's
+    // groove. See the same function in `record_sidecar`.
+    if let Some(radius) = cut_inner_radius {
+        for pixel_index in record_core::build_deadwax_spiral_indices(
+            width,
+            height,
+            b_value,
+            spiral_family,
+            record_profile,
+            radius,
+        )? {
+            protected[pixel_index] = true;
+        }
     }
     Ok(protected)
 }
@@ -1080,8 +1111,7 @@ fn build_sidecar_protected_metadata_pixels(
 #[derive(Debug, Clone, Copy)]
 struct SidecarCarrierRegions {
     label: bool,
-    payload_intergroove: bool,
-    lead_in_deadwax: bool,
+    intergroove: bool,
 }
 
 fn sidecar_pixel_in_carrier_regions(
@@ -1090,7 +1120,7 @@ fn sidecar_pixel_in_carrier_regions(
     width: usize,
     height: usize,
     geometry: &record_core::RecordProfileGeometry,
-    payload_intergroove_is_available: bool,
+    off_groove: bool,
     regions: SidecarCarrierRegions,
 ) -> bool {
     let center_x = width as f64 / 2.0;
@@ -1102,19 +1132,14 @@ fn sidecar_pixel_in_carrier_regions(
     let in_label = regions.label
         && distance > sidecar_label_inner_radius(geometry) as f64
         && distance < label_outer_radius;
-    let in_intergroove = regions.payload_intergroove
-        && distance > geometry.payload_inner_radius as f64
-        && distance < geometry.payload_outer_radius as f64
-        && payload_intergroove_is_available;
-    let in_lead_in = regions.lead_in_deadwax
-        && payload_intergroove_is_available
-        && distance > geometry.payload_outer_radius as f64
-        && distance < sidecar_lead_in_outer_radius(geometry) as f64;
-    let in_deadwax = regions.lead_in_deadwax
-        && payload_intergroove_is_available
+    // Every pixel between the grooves: the outer rim, the payload band, the
+    // deadwax, and the clearance above the label. See the same predicate in
+    // `record_sidecar`.
+    let in_intergroove = regions.intergroove
+        && off_groove
         && distance > label_outer_radius
-        && distance < geometry.payload_inner_radius as f64;
-    in_label || in_intergroove || in_lead_in || in_deadwax
+        && distance < sidecar_lead_in_outer_radius(geometry) as f64;
+    in_label || in_intergroove
 }
 
 // Arbitrary BRD1 JSON metadata carried the text-avoid geometry in an earlier
@@ -1144,12 +1169,13 @@ fn build_sidecar_carrier_region_pairs(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
+    cut_inner_radius: Option<i32>,
     regions: SidecarCarrierRegions,
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
-    let mask = if regions.payload_intergroove || regions.lead_in_deadwax {
+    let mask = if regions.intergroove {
         Some(record_core::build_spiral_mask_with_family(
             width,
             height,
@@ -1163,8 +1189,14 @@ fn build_sidecar_carrier_region_pairs(
     } else {
         None
     };
-    let mut protected =
-        build_sidecar_protected_metadata_pixels(width, height, &geometry.record_profile)?;
+    let mut protected = build_sidecar_protected_metadata_pixels(
+        width,
+        height,
+        &geometry.record_profile,
+        b_value,
+        spiral_family,
+        cut_inner_radius,
+    )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
 
@@ -1178,11 +1210,11 @@ fn build_sidecar_carrier_region_pairs(
                 continue;
             }
 
-            let first_payload_intergroove_available = mask
+            let first_off_groove = mask
                 .as_ref()
                 .map(|mask| mask.kinds[first] == 0)
                 .unwrap_or(false);
-            let second_payload_intergroove_available = mask
+            let second_off_groove = mask
                 .as_ref()
                 .map(|mask| mask.kinds[second] == 0)
                 .unwrap_or(false);
@@ -1193,7 +1225,7 @@ fn build_sidecar_carrier_region_pairs(
                 width,
                 height,
                 &geometry,
-                first_payload_intergroove_available,
+                first_off_groove,
                 regions,
             );
             let second_ok = sidecar_pixel_in_carrier_regions(
@@ -1202,7 +1234,7 @@ fn build_sidecar_carrier_region_pairs(
                 width,
                 height,
                 &geometry,
-                second_payload_intergroove_available,
+                second_off_groove,
                 regions,
             );
 
@@ -1226,6 +1258,7 @@ fn build_sidecar_carrier_pairs(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
+    cut_inner_radius: Option<i32>,
     carriers: &[record_sidecar::SidecarCarrier],
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
@@ -1236,10 +1269,10 @@ fn build_sidecar_carrier_pairs(
         b_value,
         spiral_family,
         record_profile,
+        cut_inner_radius,
         SidecarCarrierRegions {
             label: carriers.contains(&record_sidecar::SidecarCarrier::Label),
-            payload_intergroove: carriers.contains(&record_sidecar::SidecarCarrier::Intergroove),
-            lead_in_deadwax: carriers.contains(&record_sidecar::SidecarCarrier::LeadInDeadwax),
+            intergroove: carriers.contains(&record_sidecar::SidecarCarrier::Intergroove),
         },
         seed,
         text_avoid,
@@ -1403,6 +1436,7 @@ fn decode_record_png_sidecar_with_context(
         context.descriptor.b_value(),
         &context.descriptor.spiral_family,
         &context.record_profile,
+        sidecar_cut_inner_radius(&context.descriptor),
         &carriers,
         seed,
         text_avoid.as_ref(),

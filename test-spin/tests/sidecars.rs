@@ -41,7 +41,7 @@ fn with_sidecar(png: &[u8], items: serde_json::Value) -> Vec<u8> {
     let options = serde_json::json!({
         "sidecar": {
             "scheme": "pairsign-safe-luma-v2",
-            "carriers": ["label", "leadInDeadwax"],
+            "carriers": ["label", "leadIn"],
             "items": items,
         }
     });

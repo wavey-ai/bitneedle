@@ -151,25 +151,27 @@ sequence holding whatever of the BRD1 stream outgrew the lead-in, guaranteed to
 hold **512 bytes** on every profile at every extent, and a filled band holds
 several times that.
 
-The trailer is cut **matte**, in one tone, for every finish that the programme
-carries. The rings cross the artwork nearest the label, and they carry data
-rather than a visible message. They are therefore cut in a colour that the
-picture already holds at that radius, and they read as part of the record. The
-caller chooses that colour by reading the artwork, and
+The trailer rings cross the artwork nearest the label. They carry data rather
+than a visible message. They are therefore cut in a colour that the picture
+already holds at that radius, and they read as part of the record.
+
+The trailer takes one of two tonings. A record with a wheel cuts the trailer by
+the wheel: each pixel takes the colour of the pocket it passes through, which is
+the colour the band it crosses was read in. A record without a wheel cuts the
+trailer in one tone. The caller chooses that tone by reading the artwork, and
 `SEGMENT_LEAD_OUT_GEOMETRY` (35) names it on the wire.
 
-One tone also makes the band writable. Its bytes use the same 64-symbol ladder
-at the same six bits to a pixel, in **iso-luma colours around that tone**. The
+Both tonings make the band writable. The bytes use the same 64-symbol ladder at
+the same six bits to a pixel, in **iso-luma colours around a base tone**. The
 palette varies the colour and holds the luma constant, so a written ring and an
-unwritten ring carry the same brightness. The palette derives from the tone
-alone, as the tightest luma window that yields 64 colours. The wire therefore
-carries the colour alone, and both sides derive one palette from it.
+unwritten ring carry the same brightness. The palette derives from the base tone
+alone, as the tightest luma window that yields 64 colours. A wheeled trailer
+derives one palette for each pocket, from that pocket's own tone.
 
-Segment 35 is therefore written at the front of the body, before any field
-whose length a writer chooses. A reader that walks the trailer needs the tone
-before it reaches the band, and four bytes at the front of the body give it
-there. A trailer cut by the wheel holds many palettes, so it carries no data. In
-that case the header stays in the lead-in, or the encoder refuses the cut.
+A reader needs the toning before it reaches the band. Segment 35 is therefore
+written at the front of the body, before any field whose length a writer
+chooses. A wheeled trailer needs the tone clock map instead, and that map must
+fit in the lead-in. The encoder refuses a cut that satisfies neither condition.
 
 The exact radii, in rendered pixels on the 576 x 576 canvas:
 

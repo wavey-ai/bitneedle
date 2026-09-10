@@ -194,11 +194,17 @@ error values from 3 through 18.
 
 ## The tone clock
 
-A clock tones the groove by *the position of a pixel on the disc*. The payload
+A clock tones the groove by *the position of a pixel on the disc*. The clock
 band divides by radius into rings. Each ring divides into equal angular slots
 from its own rotation. The coordinates of a pixel therefore give its pocket. The
 house wheel is `[8, 16]`: eight pockets across the inside of the band, sixteen
 around the outside, and twenty-four in total.
+
+The band runs from the label edge out to the outermost groove. It therefore
+holds every band the groove runs through: the programme, the deadwax, the
+run-out rings and the locked groove. A radius outside the band takes the
+nearest ring, so a band that stopped at the programme gave the innermost ring
+to every trailer pixel.
 
 Each pocket carries its own base tone and its own luma tolerance. The record
 holds the map, which is the wheel itself, so a reader recovers the pockets from

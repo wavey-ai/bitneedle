@@ -6,7 +6,7 @@ BRS1 plus an optional BSC1**.
 BPK1 transports these exact components before PNG rendering.
 
 This README gives explanatory information. The normative specification is
-`draft-bitneedle-picture-record-format-05.txt`.
+`draft-bitneedle-picture-record-format-06.txt`.
 
 ## At a glance
 

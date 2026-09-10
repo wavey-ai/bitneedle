@@ -16,6 +16,12 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use record_core::{SpiralFamily, SPIRAL_FAMILY_VARI_PITCH_CODE};
 use record_groove::{ClockSlot, ToneClock, TonedPalette};
+
+/// The clock a toned band is read with.
+///
+/// [`trailer_clock`] and [`band_clock`] return this type, so a caller that
+/// holds one needs to be able to name it.
+pub use record_groove::ToneClock as BandToneClock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
@@ -301,8 +307,30 @@ pub const LEAD_OUT_GEOMETRY_REVISION_ORIGINAL: u8 = 1;
 /// not as the run-out of that record.
 pub const LEAD_OUT_GEOMETRY_REVISION_FILLED: u8 = 2;
 
+/// The merged lock: the run-out's descent ends above the lock radius, and the
+/// locked groove closes the ring.
+///
+/// Revision 2 ran the descent to the lock radius. The last arc of that descent
+/// drew a row of pixels beside the lock circle. The two rows touch, and they
+/// read as one groove two pixels wide.
+///
+/// This revision ends the travel at [`record_core::LOCK_MERGE_PX`] above the
+/// lock radius. The locked groove starts at the angle the descent reached, so
+/// the traversal stays continuous. Every groove in the band is one pixel wide.
+///
+/// The run-out holds fewer pixels than it holds at revision 2. The trailer
+/// carrier holds 781 bytes at the narrowest legal cut of the `lp` profile,
+/// which keeps the guarantee of 512 bytes on every registered profile.
+///
+/// A record cut under [`LEAD_OUT_GEOMETRY_REVISION_FILLED`] holds its run-out
+/// pixels in another order. Its descriptor reads back while the stream fits the
+/// lead-in, which is the ordinary case, and its groove and programme hold their
+/// bytes. A reader must treat the band that this build traces there as another
+/// band, and not as the run-out of that record.
+pub const LEAD_OUT_GEOMETRY_REVISION_MERGED: u8 = 3;
+
 /// The revision this build cuts and can read.
-pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_FILLED;
+pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_MERGED;
 
 /// The deadwax is an empty groove. A writer and its reader agree on the content
 /// of that groove between them.

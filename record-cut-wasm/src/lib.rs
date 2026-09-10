@@ -364,7 +364,7 @@ fn patternize_record_png_explore(
             "sidecar": {
                 "scheme": record_sidecar::SIDECAR_SCHEME_PAIRSIGN_SAFE_LUMA_V2,
                 "seed": record_sidecar::SIDECAR_DEFAULT_SEED,
-                "carriers": ["label", "intergroove", "leadInDeadwax"],
+                "carriers": ["label", "intergroove", "leadIn"],
                 "items": sidecar_items,
             },
         })
@@ -513,7 +513,7 @@ fn patternize_storage_fit(
         "label": fit("label"),
         "intergroove": fit("intergroove"),
         "combined": fit("combined"),
-        "leadInDeadwax": fit("leadInDeadwax"),
+        "leadIn": fit("leadIn"),
         "expandedIntergroove": fit("expandedIntergroove"),
         "expandedCombined": fit("expandedCombined"),
     })
@@ -1082,6 +1082,40 @@ pub fn render_payload_entries_with_descriptor_to_png_native_with_progress(
         record_profile,
         duration_seconds,
         render_options_json,
+        progress,
+    )
+    .map(Into::into)
+}
+
+/// The wheel lab's cut: the same groove, with no decode-and-compare proof.
+///
+/// A `verify: false` in the options reaches the outer proof but never the
+/// inner one — `record-render` never learned the flag — so this entry point
+/// forces it off at both levels instead of trusting the JSON. Same pixels
+/// as the verified cut; nothing here is kept or pressed.
+pub fn cut_without_verify(
+    payload_entries: Vec<Vec<u8>>,
+    payload_descriptor_json: &str,
+    code_format: &str,
+    record_profile: &str,
+    duration_seconds: f64,
+    render_options_json: &str,
+    progress: &dyn Fn(&str),
+) -> Result<NativeRenderResult> {
+    let mut options_value: serde_json::Value = serde_json::from_str(render_options_json)
+        .context("render options JSON is invalid")?;
+    options_value
+        .as_object_mut()
+        .context("render options JSON must be an object")?
+        .insert("verify".to_string(), serde_json::Value::Bool(false));
+    let options_json = options_value.to_string();
+    render_payload_entries_with_descriptor_to_png(
+        payload_entries,
+        payload_descriptor_json,
+        code_format,
+        record_profile,
+        duration_seconds,
+        &options_json,
         progress,
     )
     .map(Into::into)
@@ -2458,6 +2492,56 @@ mod tests {
     }
 
     #[test]
+    fn cut_without_verify_matches_verified_pixels_and_skips_proving() {
+        let payload_entry: Vec<u8> = vec![
+            0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,
+            142, 224, 150, 228, 184, 207, 69, 0,
+        ];
+        let descriptor_json = r##"{"container":"ECDC","codec":"ECDC","sampleRate":48000,"channels":2,"blockSamples":64960,"outputOffsetSamples":480,"outputSamples":64000,"codecMetadata":[123,125]}"##;
+        let options_json = r##"{"trackListing":[{"number":1,"durationSeconds":0,"startSeconds":0,"endSeconds":0}],"grooveToneSlots":["#FF0000","#00FF00","#0000FF","#FFFF00"]}"##;
+        let stages = std::cell::RefCell::new(Vec::new());
+        let verified = render_payload_entries_with_descriptor_to_png(
+            vec![payload_entry.clone()],
+            descriptor_json,
+            "rgb",
+            "single45",
+            211.33060416666666,
+            options_json,
+            &|stage: &str| {
+                stages.borrow_mut().push(stage.to_string());
+            },
+        )
+        .expect("verified cut should render");
+        assert!(
+            stages.borrow().iter().any(|stage| stage == "proving…"),
+            "verified cut should prove, got: {:?}",
+            stages.borrow()
+        );
+        stages.borrow_mut().clear();
+        let plain = cut_without_verify(
+            vec![payload_entry],
+            descriptor_json,
+            "rgb",
+            "single45",
+            211.33060416666666,
+            options_json,
+            &|stage: &str| {
+                stages.borrow_mut().push(stage.to_string());
+            },
+        )
+        .expect("unverified cut should render");
+        assert!(
+            !stages.borrow().iter().any(|stage| stage == "proving…"),
+            "unverified cut must never prove, got: {:?}",
+            stages.borrow()
+        );
+        assert_eq!(
+            plain.png_bytes, verified.png_bytes,
+            "skipping the proof must not move a pixel"
+        );
+    }
+
+    #[test]
     fn patternized_record_restores_exact_payload_before_decode() {
         let payload_entry: Vec<u8> = vec![
             0, 0, 0, 20, 142, 148, 51, 24, 50, 43, 204, 119, 248, 149, 116, 149, 137, 70, 212, 74,
@@ -2532,7 +2616,7 @@ mod tests {
 
         let (rewritten, _summary) = rewrite_record_png_preserving_pattern_items(
             &patternized.png_bytes,
-            r##"{"sidecar":{"items":[{"type":"json","codec":"raw","name":"bitneedle-issuance-v1.json","json":{"kind":"bitneedle-issuance-v1"}}],"carriers":["label","intergroove","leadInDeadwax"]}}"##,
+            r##"{"sidecar":{"items":[{"type":"json","codec":"raw","name":"bitneedle-issuance-v1.json","json":{"kind":"bitneedle-issuance-v1"}}],"carriers":["label","intergroove","leadIn"]}}"##,
             Some("single45"),
         )
         .expect("rewrite should preserve Patternize map");

@@ -66,6 +66,18 @@ pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
 /// requested separation. A finer cut needs a larger canvas.
 pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 
+/// The radial distance at which the run-out's descent has merged into the
+/// locked groove, in pixels.
+///
+/// The descent ends above the lock radius. A groove that keeps travelling
+/// once it is inside this distance draws a second row against the lock
+/// circle, and the two rows read as one groove two pixels wide. The distance
+/// is [`MIN_TURN_SEPARATION_PX`] for the reason given there: two pixels is
+/// what the raster resolves, and a descent that closes to less than that
+/// lands on the pixels the lock groove draws. The locked groove closes the
+/// ring from this radius.
+pub const LOCK_MERGE_PX: f64 = MIN_TURN_SEPARATION_PX;
+
 /// The narrowest label clearance that still cuts a readable run-out, in
 /// pixels: [`RUN_OUT_TURNS`] turns at [`MIN_TURN_SEPARATION_PX`] apart.
 ///
@@ -1550,6 +1562,148 @@ pub fn build_band_spiral_indices(
         .collect())
 }
 
+/// A band traced from a given start angle, with the outer edge included or
+/// excluded.
+///
+/// [`build_band_spiral_indices`] starts every band at [`DEFAULT_START_ANGLE`]
+/// and drops the outer edge. The deadwax needs neither. It begins where the
+/// programme left the groove, so it takes its start angle from that radius,
+/// and it begins exactly on its outer edge because it is the same groove
+/// continuing. Dropping that first turn would put its first addressable pixel
+/// most of a revolution away from the programme's last.
+///
+/// The band is always Archimedean. A descriptor rides here, and a reader must
+/// trace it before it knows the payload's family.
+pub fn build_band_spiral_indices_at_angle(
+    width: usize,
+    height: usize,
+    band_outer_radius: f64,
+    band_inner_radius: f64,
+    band_pitch: f64,
+    start_angle: f64,
+    include_outer_edge: bool,
+) -> Result<Vec<usize>> {
+    let (occupied, traced, center_x, center_y) = trace_record_spiral_with_family(
+        width,
+        height,
+        band_pitch,
+        &SpiralFamily::Archimedean,
+        None,
+        start_angle,
+        1.0,
+        true,
+        band_outer_radius,
+        band_inner_radius,
+    )?;
+
+    let mut ordered = Vec::with_capacity(traced.len());
+    for pixel_index in traced {
+        if occupied[pixel_index] == 0 {
+            continue;
+        }
+        let x = pixel_index % width;
+        let y = pixel_index / width;
+        let dx = x as f64 - center_x;
+        let dy = y as f64 - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let within_outer = include_outer_edge || distance < band_outer_radius;
+        if distance > band_inner_radius && within_outer {
+            ordered.push(pixel_index);
+        }
+    }
+    Ok(ordered)
+}
+
+/// The angle at which the programme's groove passes `target_radius`.
+///
+/// The deadwax takes the groove up where the programme leaves it, so the two
+/// bands join into one groove. A band started at a fixed angle is a second
+/// spiral inside the first.
+pub fn groove_angle_at_radius(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    target_radius: f64,
+) -> Result<f64> {
+    let geometry = describe_record_profile(record_profile)?;
+    let record_radius = width.min(height) as f64 / 2.0;
+    let resolved_pitch = resolve_pitch(b_value, None)?;
+    let bounded_outer_radius =
+        (payload_outer_radius_from_geometry(&geometry) as f64).min(record_radius - 1.0);
+    let vari = vari_pitch_params(family, (bounded_outer_radius / resolved_pitch).max(0.0));
+    let mut swept_theta = 0.0_f64;
+    let mut theta_effective = 0.0_f64;
+    let mut angle = DEFAULT_START_ANGLE;
+    let mut radius = bounded_outer_radius;
+
+    while radius > target_radius && radius >= 0.0 {
+        let (local_pitch, factor) = match &vari {
+            None => (resolved_pitch, 1.0),
+            Some(params) => {
+                let factor = params.pitch_factor(swept_theta);
+                (resolved_pitch * factor, factor)
+            }
+        };
+        let theta_step = 1.0
+            / (radius * radius + local_pitch * local_pitch)
+                .sqrt()
+                .max(1e-6);
+        swept_theta += theta_step;
+        theta_effective += factor * theta_step;
+        angle = DEFAULT_START_ANGLE - swept_theta;
+        radius = match &vari {
+            None => bounded_outer_radius - resolved_pitch * swept_theta,
+            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
+        };
+    }
+
+    Ok(angle)
+}
+
+/// Where the deadwax stops: the outermost turn of the lead-out, plus the
+/// daylight two bands need not to round onto each other's pixels.
+pub fn deadwax_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
+    let lead_out =
+        lead_out_geometry_with_extent(record_profile, cut_inner_radius, LeadOutExtent::Fill)?;
+    Ok(lead_out.entry_radius + MIN_TURN_SEPARATION_PX)
+}
+
+/// The deadwax band, as pixels in trace order.
+///
+/// Empty where the cut left no room for a turn. The band is traced from the
+/// one place that knows its geometry, so a writer and a reader cannot compute
+/// it from two sets of constants that agree only by inspection.
+pub fn build_deadwax_spiral_indices(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: i32,
+) -> Result<Vec<usize>> {
+    let band_inner = deadwax_inner_radius(record_profile, Some(cut_inner_radius))?;
+    let band_outer = cut_inner_radius as f64;
+
+    if band_outer <= band_inner + 1.0 {
+        return Ok(Vec::new());
+    }
+
+    let start_angle =
+        groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
+
+    build_band_spiral_indices_at_angle(
+        width,
+        height,
+        band_outer,
+        band_inner,
+        deadwax_spiral_pitch(record_profile)?,
+        start_angle,
+        true,
+    )
+}
+
 pub fn build_lead_in_spiral_indices(
     width: usize,
     height: usize,
@@ -1978,6 +2132,13 @@ pub fn build_lead_out_indices_with_extent(
         let turn = ((swept / (2.0 * PI)).floor() as usize).min(turn_count - 1);
         let within = swept / (2.0 * PI) - turn as f64;
         let radius = boundaries[turn] + (boundaries[turn + 1] - boundaries[turn]) * within;
+        // The descent ends where it meets the lock. Travel that continues
+        // inside `LOCK_MERGE_PX` lays a second row against the lock circle,
+        // and the two rows read as one band two pixels wide. The lock
+        // closes the ring from this radius.
+        if radius - geometry.lock_radius <= LOCK_MERGE_PX {
+            break;
+        }
         put(
             radius,
             DEFAULT_START_ANGLE - swept,
@@ -1995,7 +2156,7 @@ pub fn build_lead_out_indices_with_extent(
     while locked < 2.0 * PI {
         put(
             geometry.lock_radius,
-            DEFAULT_START_ANGLE - (total_sweep + locked),
+            DEFAULT_START_ANGLE - (swept + locked),
             &mut occupied,
             &mut ordered,
         );

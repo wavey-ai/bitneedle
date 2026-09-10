@@ -149,7 +149,7 @@ pub fn encode_record_descriptor_stream(
         .context("record descriptor length overflow")?;
 
     if payload_len > byte_capacity {
-        bail!("record descriptor exceeds combined lead-in and deadwax capacity");
+        bail!("record descriptor exceeds combined lead-in and trailer capacity");
     }
     if payload_len > u16::MAX as usize {
         bail!("record descriptor payload is too large");

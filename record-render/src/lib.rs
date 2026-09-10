@@ -161,6 +161,14 @@ pub struct RenderOptions {
     /// skips its decode-and-compare when this is set, whatever `verify`
     /// says. Never kept, never pressed.
     pub groove_tone_preview: Option<bool>,
+    /// Decode the pressed groove back and compare bytes before handing the
+    /// PNG over. On by default: a press that cannot prove it reads is not a
+    /// press. A live cut that is looked at and never kept — the wheel lab's
+    /// CUT disc, which cuts again on every move of the hand — passes `false`
+    /// and skips the second half of the work; the pixels are the same either
+    /// way, only the proof is skipped. A preview skips the proof whatever
+    /// this says.
+    pub verify: Option<bool>,
     /// The tone the trailer is cut in: the coarse run-out rings and the lock
     /// groove, as one CSS hex colour.
     ///
@@ -629,11 +637,14 @@ pub fn render_payload_codes_to_png_with_progress(
     // not a debug aid — it catches toned capacity mismatches, palette drift,
     // and groove-extraction errors before any corrupted PNG leaves the encoder.
     // Skipped only for inputs that are not BRS1 record streams (e.g. raw RGB
-    // code blocks), which have no chunk-stream decode contract — and for
-    // preview tones, which carry no payload by design and so have nothing to
-    // reconstruct.
+    // code blocks), which have no chunk-stream decode contract — for preview
+    // tones, which carry no payload by design and so have nothing to
+    // reconstruct — and when the caller passes `verify: false`: a live cut
+    // that is looked at and never kept.
+    let preview = render_options.groove_tone_preview.unwrap_or(false);
     if codes.starts_with(record_core::RECORD_STREAM_MAGIC)
-        && !render_options.groove_tone_preview.unwrap_or(false)
+        && render_options.verify.unwrap_or(true)
+        && !preview
     {
         progress("proving…");
         verify_rendered_record_roundtrip(&png_bytes, &normalized_profile, codes)
@@ -1056,47 +1067,15 @@ fn build_band_spiral_indices(
     // programme's last.
     include_outer_edge: bool,
 ) -> Result<Vec<usize>> {
-    let (occupied, traced_pixel_indices, center_x, center_y) = trace_record_spiral(
+    record_core::build_band_spiral_indices_at_angle(
         width,
         height,
-        band_pitch,
-        // Deadwax bands are always Archimedean: the descriptor rides here,
-        // and a decoder must be able to read it before it knows the
-        // payload's family.
-        &SpiralFamily::Archimedean,
-        None,
-        start_angle,
-        1.0,
-        true,
         band_outer_radius,
         band_inner_radius,
-    )?;
-
-    let mut ordered = Vec::with_capacity(traced_pixel_indices.len());
-
-    for pixel_index in traced_pixel_indices {
-        if occupied[pixel_index] == 0 {
-            continue;
-        }
-
-        let x = pixel_index % width;
-        let y = pixel_index / width;
-        let dx = x as f64 - center_x;
-        let dy = y as f64 - center_y;
-        let distance = (dx * dx + dy * dy).sqrt();
-
-        // The trace begins on the outer edge, so for the deadwax there is
-        // nothing above it to exclude — and testing the radius would drop the
-        // whole first turn to rounding, putting the carrier's first pixel a
-        // third of a revolution away from the programme's last.
-        let within_outer = include_outer_edge || distance < band_outer_radius;
-
-        if distance > band_inner_radius && within_outer {
-            ordered.push(pixel_index);
-        }
-    }
-
-    Ok(ordered)
+        band_pitch,
+        start_angle,
+        include_outer_edge,
+    )
 }
 
 fn build_lead_in_spiral_indices(
@@ -1131,63 +1110,6 @@ fn build_run_out_spiral_indices(
     record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)
 }
 
-/// The deadwax: the groove the head keeps cutting after the programme has
-/// finished, from where the cut stopped in to the descriptor's own band.
-///
-/// It is unmodulated, which is not an omission — a real deadwax carries no
-/// signal either. It is a groove because the cutter head was still down, and
-/// it is the reason a record has a wide silver run-out instead of a blank
-/// annulus. The pitch is the lathe's spiral feed, so the turn count is
-/// whatever the remaining travel yields rather than a number chosen here.
-/// The angle the programme's groove has reached by the time it crosses
-/// `target_radius`, walked with the same arithmetic the mask is traced with.
-///
-/// This is what makes the deadwax a continuation rather than a second
-/// spiral that happens to sit inside the first. The vari-pitch radius is a
-/// running integral with no closed form, so the only way to land on the
-/// same phase is to take the same steps.
-fn groove_angle_at_radius(
-    width: usize,
-    height: usize,
-    b_value: f64,
-    family: &SpiralFamily,
-    record_profile: &str,
-    target_radius: f64,
-) -> Result<f64> {
-    let geometry = describe_record_profile(record_profile)?;
-    let record_radius = width.min(height) as f64 / 2.0;
-    let resolved_pitch = resolve_pitch(b_value, None)?;
-    let bounded_outer_radius = (payload_outer_radius(&geometry) as f64).min(record_radius - 1.0);
-    let vari = vari_pitch_params(family, (bounded_outer_radius / resolved_pitch).max(0.0));
-    let mut swept_theta = 0.0_f64;
-    let mut theta_effective = 0.0_f64;
-    let mut angle = DEFAULT_START_ANGLE;
-    let mut radius = bounded_outer_radius;
-
-    while radius > target_radius && radius >= 0.0 {
-        let (local_pitch, factor) = match &vari {
-            None => (resolved_pitch, 1.0),
-            Some(params) => {
-                let factor = params.pitch_factor(swept_theta);
-                (resolved_pitch * factor, factor)
-            }
-        };
-        let theta_step = 1.0
-            / (radius * radius + local_pitch * local_pitch)
-                .sqrt()
-                .max(1e-6);
-        swept_theta += theta_step;
-        theta_effective += factor * theta_step;
-        angle = DEFAULT_START_ANGLE - swept_theta;
-        radius = match &vari {
-            None => bounded_outer_radius - resolved_pitch * swept_theta,
-            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
-        };
-    }
-
-    Ok(angle)
-}
-
 /// Where the deadwax has to stop: the outermost turn of the lead-out, plus
 /// the daylight two bands need not to round onto each other's pixels.
 ///
@@ -1216,28 +1138,13 @@ fn build_deadwax_spiral_indices(
     record_profile: &str,
     cut_inner_radius: i32,
 ) -> Result<Vec<usize>> {
-    let band_inner = deadwax_inner_radius(record_profile, Some(cut_inner_radius))?;
-    let band_outer = cut_inner_radius as f64;
-
-    if band_outer <= band_inner + 1.0 {
-        return Ok(Vec::new());
-    }
-
-    // Take the groove up at the point where the programme leaves it. This
-    // start angle joins the two bands into one groove, so a reader passes from
-    // the last programme pixel into the first deadwax pixel. A deadwax started
-    // at a fixed angle is a second spiral inside the first.
-    let start_angle =
-        groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
-
-    build_band_spiral_indices(
+    record_core::build_deadwax_spiral_indices(
         width,
         height,
-        band_outer,
-        band_inner,
-        record_core::deadwax_spiral_pitch(record_profile)?,
-        start_angle,
-        true,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
     )
 }
 
@@ -2010,8 +1917,8 @@ fn paint_toned_groove(
                 let x = (pixel_index % width) as f64;
                 let y = (pixel_index / width) as f64;
                 let angle = record_groove::pixel_angle(x, y, center_x, center_y);
-                // Both bands sit inside the wheel's span, where a radius
-                // takes the nearest ring.
+                // Both bands sit inside the wheel's span, which reaches
+                // the label, so each takes the ring it is actually in.
                 let away = record_groove::pixel_radius(x, y, center_x, center_y);
                 clock.slots[clock.cell_index(sequence, angle, away)].base
             }
@@ -3122,11 +3029,18 @@ fn groove_clock_track(
         );
     }
 
-    // The band the rings divide is the groove's own. A ring is a band of the
-    // record and it can only tone the part of it the spiral runs through, so
-    // the wheel is laid across the payload annulus rather than across the
-    // whole disc — where the innermost ring would be under the label, toning
-    // nothing.
+    // The band the rings divide is every band the groove runs through. A
+    // ring is a band of the record and it can only tone the part of it the
+    // spiral reaches, so the wheel is laid across the disc from the label
+    // out to the outermost groove, and not across the whole disc — where
+    // the innermost ring would be under the label, toning nothing.
+    //
+    // The band reaches the label and not the programme's inner radius,
+    // because the deadwax, the run-out rings and the locked groove are cut
+    // between the two. A band that started at the programme left those
+    // bands outside it, and [`ToneClock::ring_index`] clamps a radius
+    // outside the band to the nearest ring — so every trailer pixel took
+    // the innermost ring however many rings the wheel had.
     let geometry = record_core::describe_record_profile(record_profile)?;
     let span_of = |radius: i32| -> u16 {
         let whole = f64::from(geometry.outer_radius).max(1.0);
@@ -3135,7 +3049,7 @@ fn groove_clock_track(
         .round() as u16
     };
     let span = (
-        span_of(geometry.payload_inner_radius),
+        span_of(geometry.label_radius),
         span_of(geometry.payload_outer_radius),
     );
 
@@ -3739,7 +3653,7 @@ mod tests {
                 &format!(r#"{{"grooveSpanFraction":{span}}}"#),
             );
 
-            let crossing = groove_angle_at_radius(
+            let crossing = record_core::groove_angle_at_radius(
                 RECORD_WIDTH,
                 RECORD_HEIGHT,
                 cut.b_value,
@@ -4661,10 +4575,15 @@ mod tests {
         assert_eq!(clock.rings, vec![8, 16]);
         assert_eq!(clock.slots.len(), 24);
         assert!(clock.has_rings(), "a ringed wheel is written as one");
-        // The band the rings divide is the groove's own, not the disc's:
-        // an inner ring under the label would tone nothing.
+        // The band the rings divide reaches the label, not the spindle: an
+        // inner ring under the label would tone nothing, and one that
+        // stopped at the programme would leave the trailer outside the band.
         let geometry = record_core::describe_record_profile("single45").unwrap();
-        assert!(clock.span.0 > 0, "the band starts at the groove, not the spindle");
+        assert!(
+            f64::from(clock.span.0) / f64::from(record_groove::TONE_CLOCK_SPAN_UNITS)
+                >= f64::from(geometry.label_radius) / f64::from(geometry.outer_radius) - 0.001,
+            "the band starts at the label, not the spindle"
+        );
         assert!(
             f64::from(clock.span.1) / f64::from(record_groove::TONE_CLOCK_SPAN_UNITS)
                 <= f64::from(geometry.outer_radius),
@@ -5087,6 +5006,95 @@ mod tests {
             "no tone was given for the trailer"
         );
 
+        let (_, read_back) =
+            record_decode::decode_record_descriptor_bytes_from_png(&output.png_bytes, Some("lp"))
+                .unwrap();
+        let descriptor = record_descriptor::decode_record_descriptor_bytes(&read_back).unwrap();
+        assert_eq!(descriptor.label.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.artwork_credit.as_deref(), Some(long.as_str()));
+        assert_eq!(descriptor.canonical_url.as_deref(), Some(long.as_str()));
+    }
+
+    /// The wheel the app cuts on: three rings, the innermost of them the
+    /// trailer's. The trailer is below the programme, so a band that stopped
+    /// at the programme clamped every trailer pixel to one ring. This holds
+    /// the band open to the label, and holds the stream readable across it.
+    #[test]
+    fn a_three_ring_trailer_spans_its_rings_and_reverses() {
+        let rings = [11u32, 14, 18];
+        let cells: usize = rings.iter().sum::<u32>() as usize;
+        let slots: Vec<String> = (0..cells)
+            .map(|slot| {
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    40 + slot * 4,
+                    90 + slot * 3,
+                    210 - slot * 4
+                )
+            })
+            .collect();
+        let long = "WESTSIDE-".repeat(111);
+        let options = serde_json::json!({
+            "grooveSpanFraction": 0.33,
+            "grooveToneSlots": slots,
+            "grooveToneRings": rings,
+            "headerLabel": long,
+            "headerArtworkCredit": long,
+            "headerCanonicalUrl": long,
+        })
+        .to_string();
+        let output =
+            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
+                .unwrap();
+
+        let clock = output
+            .descriptor
+            .tone_clock
+            .as_ref()
+            .expect("a wheeled cut writes its clock");
+        assert_eq!(clock.rings, rings.to_vec());
+
+        // The band holds the trailer. Without this the run-out and the lock
+        // sit under the band's inner edge and every one of their pixels
+        // takes ring zero.
+        let geometry = record_core::describe_record_profile("lp").unwrap();
+        let inner = f64::from(clock.span.0) / f64::from(record_groove::TONE_CLOCK_SPAN_UNITS);
+        let lock = record_core::lead_out_geometry_with_extent(
+            "lp",
+            Some(i32::from(output.payload.cut_inner_radius)),
+            record_core::LeadOutExtent::Fill,
+        )
+        .unwrap();
+        assert!(
+            inner * f64::from(geometry.outer_radius) < lock.entry_radius,
+            "the wheel's band starts at {inner}, which is outside the trailer"
+        );
+
+        // Every ring the trailer crosses is a ring it is toned by, so more
+        // than one of them answers for the band.
+        let trailer = record_core::build_run_out_spiral_indices(
+            RECORD_WIDTH,
+            RECORD_HEIGHT,
+            "lp",
+            Some(i32::from(output.payload.cut_inner_radius)),
+        )
+        .unwrap();
+        let band = record_descriptor::band_clock(&record_descriptor::tone_clock_from_map(clock));
+        let centre = RECORD_WIDTH as f64 / 2.0;
+        let mut reached = std::collections::BTreeSet::new();
+        for (sequence, &index) in trailer.iter().enumerate() {
+            let x = (index % RECORD_WIDTH) as f64;
+            let y = (index / RECORD_WIDTH) as f64;
+            let away = record_groove::pixel_radius(x, y, centre, centre);
+            reached.insert(band.ring_index(sequence, away));
+        }
+        assert!(
+            reached.len() > 1,
+            "the trailer took one ring of three: {reached:?}"
+        );
+
+        // And it still reverses: the header outgrew the lead-in, so these
+        // three fields were read back out of the trailer itself.
         let (_, read_back) =
             record_decode::decode_record_descriptor_bytes_from_png(&output.png_bytes, Some("lp"))
                 .unwrap();

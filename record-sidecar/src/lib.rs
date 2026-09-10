@@ -19,7 +19,15 @@ pub const SIDECAR_POINTER_LENGTH: usize = 48;
 pub const SIDECAR_POINTER_SCHEME_PAIRSIGN_SAFE_LUMA_V2: u8 = 1;
 pub const SIDECAR_POINTER_CARRIER_LABEL: u8 = 0x01;
 pub const SIDECAR_POINTER_CARRIER_INTERGROOVE: u8 = 0x02;
-pub const SIDECAR_POINTER_CARRIER_LEAD_IN_DEADWAX: u8 = 0x04;
+pub const SIDECAR_POINTER_CARRIER_LEAD_IN: u8 = 0x08;
+pub const SIDECAR_POINTER_CARRIER_DEADWAX: u8 = 0x10;
+pub const SIDECAR_POINTER_CARRIER_TRAILER: u8 = 0x20;
+/// Retired. The flag named a region holding the outer rim band and the
+/// clearance above the label. Those pixels are intergroove, which
+/// [`SIDECAR_POINTER_CARRIER_INTERGROOVE`] names. A pointer carrying this bit
+/// is refused, because the pixels it asks for are addressed by another flag
+/// and a reader that ignored the bit would build a different pair set.
+pub const SIDECAR_POINTER_CARRIER_RETIRED_LEAD_IN_DEADWAX: u8 = 0x04;
 pub const SIDECAR_SCHEME_PAIRSIGN_SAFE_LUMA_V2: &str = "pairsign-safe-luma-v2";
 pub const SIDECAR_DEFAULT_SEED: u32 = 0x4b50_4752;
 pub const SIDECAR_PAIR_SIGN_DELTA: i16 = 4;
@@ -435,15 +443,18 @@ struct RecordPngContext {
 #[derive(Debug, Clone, Copy)]
 struct SidecarCarrierRegions {
     label: bool,
-    payload_intergroove: bool,
-    lead_in_deadwax: bool,
+    intergroove: bool,
 }
 
-// Text-avoid geometry was formerly carried in arbitrary BRD1 JSON metadata.
-// The compact descriptor no longer carries that blob, so sidecar ordering is
-// now independent of label compositor hints.
+/// Label geometry a sidecar keeps clear of.
+///
+/// Text-avoid geometry was formerly carried in arbitrary BRD1 JSON metadata.
+/// The compact descriptor no longer carries that blob, so sidecar ordering is
+/// now independent of label compositor hints. The type carries no geometry and
+/// [`apply_text_avoid_spec`] excludes no pixel. It holds the place of the
+/// hints, which a label compositor may state again.
 #[derive(Clone)]
-struct TextAvoidSpec;
+pub struct TextAvoidSpec;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,9 +470,37 @@ struct RecordRewriteOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SidecarCarrier {
-    Label,
+    /// The spare space of the lead-in groove, past the descriptor's own bytes.
+    LeadIn,
+    /// The deadwax groove, which carries no programme.
+    Deadwax,
+    /// The run-out and the locked groove, past the descriptor's spill.
+    Trailer,
+    /// Every pixel between the grooves, from the label edge out to the rim.
     Intergroove,
-    LeadInDeadwax,
+    /// The label.
+    Label,
+}
+
+/// The order the carriers fill in.
+///
+/// A groove carrier holds bytes in its pixels, at six to twelve bits each. The
+/// intergroove and the label hold bits by pair-sign modulation, at one bit for
+/// every two pixels. The groove carriers therefore come first, and the label
+/// comes last: a writer reaches the label when every other carrier is full.
+pub const SIDECAR_FILL_ORDER: [SidecarCarrier; 5] = [
+    SidecarCarrier::LeadIn,
+    SidecarCarrier::Deadwax,
+    SidecarCarrier::Trailer,
+    SidecarCarrier::Intergroove,
+    SidecarCarrier::Label,
+];
+
+impl SidecarCarrier {
+    /// Whether the carrier holds bytes in groove pixels.
+    pub fn is_groove(self) -> bool {
+        matches!(self, Self::LeadIn | Self::Deadwax | Self::Trailer)
+    }
 }
 
 impl SidecarCarrier {
@@ -2131,9 +2170,14 @@ pub fn parse_sidecar_carrier(raw: &str) -> Result<SidecarCarrier> {
     {
         "label" => Ok(SidecarCarrier::Label),
         "intergroove" | "intragroove" | "groove" => Ok(SidecarCarrier::Intergroove),
-        "leadindeadwax" | "leaddeadwax" | "leadin" | "leadout" | "deadwax" | "runout" => {
-            Ok(SidecarCarrier::LeadInDeadwax)
-        }
+        "leadin" => Ok(SidecarCarrier::LeadIn),
+        "deadwax" => Ok(SidecarCarrier::Deadwax),
+        "trailer" | "runout" | "leadout" | "lockedgroove" => Ok(SidecarCarrier::Trailer),
+        // The rim band and the clearance above the label are intergroove. This
+        // spelling named them when they were a region of their own, and it
+        // named the lead-in groove alongside them, which is a carrier in its
+        // own right now.
+        "leadindeadwax" | "leaddeadwax" => Ok(SidecarCarrier::Intergroove),
         _ => bail!("unknown sidecar carrier: {raw}"),
     }
 }
@@ -2142,7 +2186,9 @@ pub fn sidecar_carrier_name(carrier: SidecarCarrier) -> &'static str {
     match carrier {
         SidecarCarrier::Label => "label",
         SidecarCarrier::Intergroove => "intergroove",
-        SidecarCarrier::LeadInDeadwax => "leadInDeadwax",
+        SidecarCarrier::LeadIn => "leadIn",
+        SidecarCarrier::Deadwax => "deadwax",
+        SidecarCarrier::Trailer => "trailer",
     }
 }
 
@@ -2293,7 +2339,7 @@ fn sidecar_descriptor_geometry(
             "outerRadius": geometry.payload_outer_radius,
             "excludesPayloadSpiralPixels": true,
         },
-        "leadInDeadwax": {
+        "leadIn": {
             "leadIn": {
                 "innerRadius": geometry.payload_outer_radius,
                 "outerRadius": sidecar_lead_in_outer_radius(&geometry),
@@ -2308,10 +2354,35 @@ fn sidecar_descriptor_geometry(
     }))
 }
 
+/// The cut inner radius a sidecar traces the run-out with, from the
+/// descriptor that the record carries.
+///
+/// Zero declares a programme that reached the label and left no lead-out, and
+/// the compact band follows. Any other value is the radius the groove stopped
+/// at, and the band that the cut left follows from it.
+fn sidecar_cut_inner_radius(descriptor: &record_descriptor::RecordDescriptor) -> Option<i32> {
+    match descriptor.cut_inner_radius {
+        0 => None,
+        radius => Some(i32::from(radius)),
+    }
+}
+
+/// The pixels a sidecar must not write to: the lead-in band and the run-out.
+///
+/// The run-out is traced with the record's own cut inner radius. The band
+/// begins at the ceiling that the cut left, so its outermost turn stands as
+/// far out as the programme stopped. Tracing it with no radius gives the
+/// compact band below the payload inner radius, which leaves every turn above
+/// that radius unprotected on a record cut near the rim. A sidecar then writes
+/// over live groove, and the descriptor bytes that the run-out carries are
+/// lost.
 fn build_sidecar_protected_metadata_pixels(
     width: usize,
     height: usize,
     record_profile: &str,
+    b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
+    cut_inner_radius: Option<i32>,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -2320,9 +2391,26 @@ fn build_sidecar_protected_metadata_pixels(
         protected[pixel_index] = true;
     }
     for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, None)?
+        record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?
     {
         protected[pixel_index] = true;
+    }
+    // The deadwax is a band of its own. The spiral mask holds the programme's
+    // groove, and the two bands are traced apart, so a deadwax pixel reads as
+    // off-groove and falls into the intergroove pool. That pool is written by
+    // pair-sign modulation, and the deadwax carries bytes, so a pixel in both
+    // is written twice.
+    if let Some(radius) = cut_inner_radius {
+        for pixel_index in record_core::build_deadwax_spiral_indices(
+            width,
+            height,
+            b_value,
+            spiral_family,
+            record_profile,
+            radius,
+        )? {
+            protected[pixel_index] = true;
+        }
     }
     Ok(protected)
 }
@@ -2345,11 +2433,20 @@ fn label_sidecar_pixels(
     width: usize,
     height: usize,
     record_profile: &str,
+    b_value: f64,
+    spiral_family: &record_core::SpiralFamily,
+    cut_inner_radius: Option<i32>,
     text_avoid: Option<&TextAvoidSpec>,
 ) -> Result<Vec<usize>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
-    let mut protected =
-        build_sidecar_protected_metadata_pixels(width, height, &geometry.record_profile)?;
+    let mut protected = build_sidecar_protected_metadata_pixels(
+        width,
+        height,
+        &geometry.record_profile,
+        b_value,
+        spiral_family,
+        cut_inner_radius,
+    )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
@@ -2381,7 +2478,7 @@ fn sidecar_pixel_in_carrier_regions(
     width: usize,
     height: usize,
     geometry: &record_core::RecordProfileGeometry,
-    payload_intergroove_is_available: bool,
+    off_groove: bool,
     regions: SidecarCarrierRegions,
 ) -> bool {
     let center_x = width as f64 / 2.0;
@@ -2393,19 +2490,336 @@ fn sidecar_pixel_in_carrier_regions(
     let in_label = regions.label
         && distance > sidecar_label_inner_radius(geometry) as f64
         && distance < label_outer_radius;
-    let in_intergroove = regions.payload_intergroove
-        && distance > geometry.payload_inner_radius as f64
-        && distance < geometry.payload_outer_radius as f64
-        && payload_intergroove_is_available;
-    let in_lead_in = regions.lead_in_deadwax
-        && payload_intergroove_is_available
-        && distance > geometry.payload_outer_radius as f64
-        && distance < sidecar_lead_in_outer_radius(geometry) as f64;
-    let in_deadwax = regions.lead_in_deadwax
-        && payload_intergroove_is_available
+    // The intergroove is every pixel between the grooves: the outer rim, the
+    // payload band, the deadwax, and the clearance above the label. A groove
+    // pixel is excluded by `off_groove`, which the spiral mask decides, and by
+    // the protected set, which holds the lead-in and the run-out. What is left
+    // is the space the turns do not occupy, wherever it falls on the disc.
+    //
+    // These bands were three regions under two flags, and the lead-in shared a
+    // flag with the clearance above the label. The two have no relation beyond
+    // both sitting outside the payload band.
+    let in_intergroove = regions.intergroove
+        && off_groove
         && distance > label_outer_radius
-        && distance < geometry.payload_inner_radius as f64;
-    in_label || in_intergroove || in_lead_in || in_deadwax
+        && distance < sidecar_lead_in_outer_radius(geometry) as f64;
+    in_label || in_intergroove
+}
+
+/// How a run of groove pixels carries bytes.
+#[derive(Debug, Clone)]
+pub enum GrooveEncoding {
+    /// The metadata grey ladder of the lead-in, six bits to a pixel.
+    Grey,
+    /// An iso-luma palette around a base tone, at the clock's rate.
+    Toned(record_descriptor::BandToneClock),
+}
+
+impl GrooveEncoding {
+    /// How many bytes `pixels` pixels hold.
+    pub fn byte_capacity(&self, pixels: usize) -> usize {
+        match self {
+            Self::Grey => record_descriptor::metadata_byte_capacity_for_pixel_count(pixels),
+            Self::Toned(clock) => record_descriptor::band_byte_capacity(pixels, clock),
+        }
+    }
+
+    /// How many pixels `bytes` bytes take.
+    pub fn pixel_count(&self, bytes: usize) -> usize {
+        match self {
+            Self::Grey => record_descriptor::metadata_pixel_count_for_byte_length(bytes),
+            Self::Toned(clock) => clock.pixel_count(bytes),
+        }
+    }
+}
+
+/// One run of sidecar carrier, in fill order.
+#[derive(Debug, Clone)]
+pub enum SidecarRun {
+    /// Groove pixels holding bytes directly.
+    Groove {
+        carrier: SidecarCarrier,
+        indices: Vec<usize>,
+        encoding: GrooveEncoding,
+    },
+    /// Off-groove pixel pairs holding bits by pair-sign modulation.
+    Steg {
+        carrier: SidecarCarrier,
+        pairs: Vec<(usize, usize)>,
+    },
+}
+
+impl SidecarRun {
+    pub fn carrier(&self) -> SidecarCarrier {
+        match self {
+            Self::Groove { carrier, .. } | Self::Steg { carrier, .. } => *carrier,
+        }
+    }
+}
+
+/// The clock a record's toned bands are read with.
+///
+/// A record that names a tone for its trailer was cut matte there. A record
+/// that names a wheel gives each pixel the tone of the pocket it passes
+/// through. A record that names neither carries no toned band.
+fn band_clock_for_descriptor(
+    run_out_tone: Option<[u8; 3]>,
+    tone_clock: Option<&record_descriptor::ToneClockDescriptor>,
+) -> Result<Option<record_descriptor::BandToneClock>> {
+    Ok(match (run_out_tone, tone_clock) {
+        (Some(tone), _) => Some(record_descriptor::trailer_clock(tone)?),
+        (None, Some(map)) => Some(record_descriptor::band_clock(
+            &record_descriptor::tone_clock_from_map(map),
+        )),
+        (None, None) => None,
+    })
+}
+
+/// The carriers a record offers, in fill order, with the bytes the descriptor
+/// already holds taken off the front of each groove band.
+///
+/// The offsets are derived rather than declared. The lead-in fills first, to
+/// its own capacity, and the trailer takes what spills. Both sides compute the
+/// same split from the descriptor length, which a reader holds from the prefix
+/// before it walks any band, so the wire carries no offset and the two cannot
+/// disagree.
+pub fn build_sidecar_plan(
+    width: usize,
+    height: usize,
+    descriptor: &record_descriptor::RecordDescriptor,
+    descriptor_byte_length: usize,
+    carriers: &[SidecarCarrier],
+    seed: u32,
+    text_avoid: Option<&TextAvoidSpec>,
+) -> Result<Vec<SidecarRun>> {
+    let record_profile = descriptor.record_profile.as_str();
+    let cut_inner_radius = sidecar_cut_inner_radius(descriptor);
+    let clock = band_clock_for_descriptor(descriptor.run_out_tone, descriptor.tone_clock.as_ref())?;
+
+    let lead_in_indices =
+        record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
+    let lead_in_capacity =
+        record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
+
+    let mut runs = Vec::new();
+    for carrier in SIDECAR_FILL_ORDER {
+        if !carriers.contains(&carrier) {
+            continue;
+        }
+        match carrier {
+            SidecarCarrier::LeadIn => {
+                // The descriptor fills this band from its first pixel. What is
+                // left begins where those bytes end.
+                let head = descriptor_byte_length.min(lead_in_capacity);
+                let used = record_descriptor::metadata_pixel_count_for_byte_length(head);
+                if used < lead_in_indices.len() {
+                    runs.push(SidecarRun::Groove {
+                        carrier,
+                        indices: lead_in_indices[used..].to_vec(),
+                        encoding: GrooveEncoding::Grey,
+                    });
+                }
+            }
+            SidecarCarrier::Deadwax => {
+                // The deadwax carries no programme and no descriptor, so the
+                // whole band is free. A record with no tone offers no band.
+                let Some(clock) = clock.as_ref() else { continue };
+                let Some(radius) = cut_inner_radius else { continue };
+                let indices = record_core::build_deadwax_spiral_indices(
+                    width,
+                    height,
+                    descriptor.b_value(),
+                    &descriptor.spiral_family,
+                    record_profile,
+                    radius,
+                )?;
+                if !indices.is_empty() {
+                    runs.push(SidecarRun::Groove {
+                        carrier,
+                        indices,
+                        encoding: GrooveEncoding::Toned(clock.clone()),
+                    });
+                }
+            }
+            SidecarCarrier::Trailer => {
+                let Some(clock) = clock.as_ref() else { continue };
+                let indices = record_core::build_run_out_spiral_indices(
+                    width,
+                    height,
+                    record_profile,
+                    cut_inner_radius,
+                )?;
+                // What the descriptor spilled past the lead-in sits at the
+                // front of this band.
+                let spill = descriptor_byte_length.saturating_sub(lead_in_capacity);
+                let used = clock.pixel_count(spill);
+                if used < indices.len() {
+                    runs.push(SidecarRun::Groove {
+                        carrier,
+                        indices: indices[used..].to_vec(),
+                        encoding: GrooveEncoding::Toned(clock.clone()),
+                    });
+                }
+            }
+            SidecarCarrier::Intergroove | SidecarCarrier::Label => {
+                let pairs = build_sidecar_carrier_region_pairs(
+                    width,
+                    height,
+                    descriptor.b_value(),
+                    &descriptor.spiral_family,
+                    record_profile,
+                    cut_inner_radius,
+                    SidecarCarrierRegions {
+                        label: carrier == SidecarCarrier::Label,
+                        intergroove: carrier == SidecarCarrier::Intergroove,
+                    },
+                    seed,
+                    text_avoid,
+                )?;
+                if !pairs.is_empty() {
+                    runs.push(SidecarRun::Steg { carrier, pairs });
+                }
+            }
+        }
+    }
+    Ok(runs)
+}
+
+/// The bytes each run of a plan holds, in fill order.
+///
+/// A groove run holds a byte for every six to twelve pixels, which follows
+/// from its encoding alone. A steg run holds a bit for every one or two pairs,
+/// which follows from the picture under those pairs, so the raster decides it.
+pub fn sidecar_plan_capacities(
+    plan: &[SidecarRun],
+    scheme: &str,
+    rgba: &[u8],
+) -> Result<Vec<(SidecarCarrier, usize)>> {
+    let mut out = Vec::with_capacity(plan.len());
+    for run in plan {
+        let capacity = match run {
+            SidecarRun::Groove {
+                indices, encoding, ..
+            } => encoding.byte_capacity(indices.len()),
+            SidecarRun::Steg { pairs, .. } => {
+                sidecar_bit_capacity_for_pairs(scheme, pairs, rgba)? / 8
+            }
+        };
+        out.push((run.carrier(), capacity));
+    }
+    Ok(out)
+}
+
+/// The bytes a plan holds across every run.
+pub fn sidecar_plan_capacity(plan: &[SidecarRun], scheme: &str, rgba: &[u8]) -> Result<usize> {
+    Ok(sidecar_plan_capacities(plan, scheme, rgba)?
+        .into_iter()
+        .map(|(_, capacity)| capacity)
+        .sum())
+}
+
+/// How a byte stream divides across a plan, run by run.
+///
+/// Each run takes what it holds until the stream runs out. The label is the
+/// last run, so a writer reaches it when every carrier above it is full.
+fn sidecar_plan_split(
+    plan: &[SidecarRun],
+    scheme: &str,
+    rgba: &[u8],
+    byte_length: usize,
+) -> Result<Vec<(usize, usize)>> {
+    let capacities = sidecar_plan_capacities(plan, scheme, rgba)?;
+    let total: usize = capacities.iter().map(|(_, capacity)| capacity).sum();
+    if byte_length > total {
+        bail!("sidecar stream is {byte_length} bytes but the plan holds {total} bytes");
+    }
+    let mut spans = Vec::with_capacity(plan.len());
+    let mut offset = 0usize;
+    for (_, capacity) in capacities {
+        let take = capacity.min(byte_length - offset);
+        spans.push((offset, take));
+        offset += take;
+    }
+    Ok(spans)
+}
+
+/// Paints `bytes` across a plan, in fill order.
+///
+/// The groove runs are written first and the steg runs after. The two sets of
+/// pixels are disjoint: a groove pixel is protected from the steg pool, so a
+/// groove write never moves a pair that a steg run is about to read.
+pub fn paint_sidecar_bytes_into_plan(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    plan: &[SidecarRun],
+    scheme: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let spans = sidecar_plan_split(plan, scheme, data, bytes.len())?;
+    for (run, (offset, take)) in plan.iter().zip(spans) {
+        if take == 0 {
+            continue;
+        }
+        let slice = &bytes[offset..offset + take];
+        match run {
+            SidecarRun::Groove {
+                indices, encoding, ..
+            } => match encoding {
+                GrooveEncoding::Grey => {
+                    record_cut::descriptor::paint_metadata_bytes_as_grayscale(data, indices, slice);
+                }
+                GrooveEncoding::Toned(clock) => {
+                    record_cut::descriptor::paint_band_bytes_as_toned(
+                        data, width, height, indices, slice, clock,
+                    )?;
+                }
+            },
+            SidecarRun::Steg { pairs, .. } => {
+                paint_bytes_into_pairs(data, pairs, scheme, slice)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads `byte_length` bytes back from a plan, in fill order.
+pub fn read_sidecar_bytes_from_plan(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    plan: &[SidecarRun],
+    scheme: &str,
+    byte_length: usize,
+) -> Result<Vec<u8>> {
+    let spans = sidecar_plan_split(plan, scheme, rgba, byte_length)?;
+    let mut out = Vec::with_capacity(byte_length);
+    for (run, (_, take)) in plan.iter().zip(spans) {
+        if take == 0 {
+            continue;
+        }
+        let label = sidecar_carrier_name(run.carrier());
+        match run {
+            SidecarRun::Groove {
+                indices, encoding, ..
+            } => match encoding {
+                GrooveEncoding::Grey => out.extend_from_slice(
+                    &record_descriptor::metadata_bytes_from_grayscale_rgba(
+                        rgba, indices, take, label,
+                    )?,
+                ),
+                GrooveEncoding::Toned(clock) => {
+                    out.extend_from_slice(&record_descriptor::band_bytes_from_toned_rgba(
+                        rgba, width, height, indices, clock, take, label,
+                    )?)
+                }
+            },
+            SidecarRun::Steg { pairs, .. } => out.extend_from_slice(
+                &decode_pairsign_sidecar_bytes_from_pairs(rgba, pairs, scheme, take)?,
+            ),
+        }
+    }
+    Ok(out)
 }
 
 fn build_sidecar_carrier_region_pairs(
@@ -2414,12 +2828,13 @@ fn build_sidecar_carrier_region_pairs(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
+    cut_inner_radius: Option<i32>,
     regions: SidecarCarrierRegions,
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
-    let mask = if regions.payload_intergroove || regions.lead_in_deadwax {
+    let mask = if regions.intergroove {
         Some(record_core::build_spiral_mask_with_family(
             width,
             height,
@@ -2433,8 +2848,14 @@ fn build_sidecar_carrier_region_pairs(
     } else {
         None
     };
-    let mut protected =
-        build_sidecar_protected_metadata_pixels(width, height, &geometry.record_profile)?;
+    let mut protected = build_sidecar_protected_metadata_pixels(
+        width,
+        height,
+        &geometry.record_profile,
+        b_value,
+        spiral_family,
+        cut_inner_radius,
+    )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
 
@@ -2448,11 +2869,11 @@ fn build_sidecar_carrier_region_pairs(
                 continue;
             }
 
-            let first_payload_intergroove_available = mask
+            let first_off_groove = mask
                 .as_ref()
                 .map(|mask| mask.kinds[first] == 0)
                 .unwrap_or(false);
-            let second_payload_intergroove_available = mask
+            let second_off_groove = mask
                 .as_ref()
                 .map(|mask| mask.kinds[second] == 0)
                 .unwrap_or(false);
@@ -2463,7 +2884,7 @@ fn build_sidecar_carrier_region_pairs(
                 width,
                 height,
                 &geometry,
-                first_payload_intergroove_available,
+                first_off_groove,
                 regions,
             );
             let second_ok = sidecar_pixel_in_carrier_regions(
@@ -2472,7 +2893,7 @@ fn build_sidecar_carrier_region_pairs(
                 width,
                 height,
                 &geometry,
-                second_payload_intergroove_available,
+                second_off_groove,
                 regions,
             );
 
@@ -2496,6 +2917,7 @@ fn build_sidecar_carrier_pairs(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
+    cut_inner_radius: Option<i32>,
     carriers: &[SidecarCarrier],
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
@@ -2506,10 +2928,10 @@ fn build_sidecar_carrier_pairs(
         b_value,
         spiral_family,
         record_profile,
+        cut_inner_radius,
         SidecarCarrierRegions {
             label: carriers.contains(&SidecarCarrier::Label),
-            payload_intergroove: carriers.contains(&SidecarCarrier::Intergroove),
-            lead_in_deadwax: carriers.contains(&SidecarCarrier::LeadInDeadwax),
+            intergroove: carriers.contains(&SidecarCarrier::Intergroove),
         },
         seed,
         text_avoid,
@@ -2523,6 +2945,7 @@ fn sidecar_capacity_entry_json(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     record_profile: &str,
+    cut_inner_radius: Option<i32>,
     rgba: &[u8],
     scheme: &str,
     carriers: Vec<SidecarCarrier>,
@@ -2534,6 +2957,7 @@ fn sidecar_capacity_entry_json(
         b_value,
         spiral_family,
         record_profile,
+        cut_inner_radius,
         &carriers,
         SIDECAR_DEFAULT_SEED,
         text_avoid,
@@ -2577,6 +3001,7 @@ fn decode_record_png_sidecar_with_context(
         context.descriptor.b_value(),
         &context.descriptor.spiral_family,
         &context.record_profile,
+        sidecar_cut_inner_radius(&context.descriptor),
         &carriers,
         seed,
         text_avoid.as_ref(),
@@ -2895,6 +3320,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.descriptor.b_value(),
             &context.descriptor.spiral_family,
             &context.record_profile,
+            sidecar_cut_inner_radius(&context.descriptor),
             &context.rgba,
             scheme,
             vec![SidecarCarrier::Label],
@@ -2906,6 +3332,7 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.descriptor.b_value(),
             &context.descriptor.spiral_family,
             &context.record_profile,
+            sidecar_cut_inner_radius(&context.descriptor),
             &context.rgba,
             scheme,
             vec![SidecarCarrier::Intergroove],
@@ -2917,46 +3344,10 @@ pub fn estimate_record_png_sidecar_capacity_json(
             context.descriptor.b_value(),
             &context.descriptor.spiral_family,
             &context.record_profile,
+            sidecar_cut_inner_radius(&context.descriptor),
             &context.rgba,
             scheme,
             vec![SidecarCarrier::Label, SidecarCarrier::Intergroove],
-            text_avoid,
-        )?,
-        "leadInDeadwax": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            &context.rgba,
-            scheme,
-            vec![SidecarCarrier::LeadInDeadwax],
-            text_avoid,
-        )?,
-        "expandedIntergroove": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            &context.rgba,
-            scheme,
-            vec![SidecarCarrier::Intergroove, SidecarCarrier::LeadInDeadwax],
-            text_avoid,
-        )?,
-        "expandedCombined": sidecar_capacity_entry_json(
-            context.width,
-            context.height,
-            context.descriptor.b_value(),
-            &context.descriptor.spiral_family,
-            &context.record_profile,
-            &context.rgba,
-            scheme,
-            vec![
-                SidecarCarrier::Label,
-                SidecarCarrier::Intergroove,
-                SidecarCarrier::LeadInDeadwax
-            ],
             text_avoid,
         )?,
     }))
@@ -3173,6 +3564,9 @@ pub fn rewrite_record_png(
                 context.width,
                 context.height,
                 &context.record_profile,
+                context.descriptor.b_value(),
+                &context.descriptor.spiral_family,
+                sidecar_cut_inner_radius(&context.descriptor),
                 text_avoid.as_ref(),
             )?;
             tune_sidecar_pixels(&mut context.rgba, &pixels, tuning);
@@ -3185,10 +3579,10 @@ pub fn rewrite_record_png(
         context.descriptor.b_value(),
         &context.descriptor.spiral_family,
         &context.record_profile,
+        sidecar_cut_inner_radius(&context.descriptor),
         SidecarCarrierRegions {
             label: sidecar.carriers.contains(&SidecarCarrier::Label),
-            payload_intergroove: sidecar.carriers.contains(&SidecarCarrier::Intergroove),
-            lead_in_deadwax: sidecar.carriers.contains(&SidecarCarrier::LeadInDeadwax),
+            intergroove: sidecar.carriers.contains(&SidecarCarrier::Intergroove),
         },
         sidecar.seed,
         text_avoid.as_ref(),
@@ -3373,8 +3767,14 @@ pub fn sidecar_pointer_carrier_flags(carriers: &[SidecarCarrier]) -> u8 {
     if carriers.contains(&SidecarCarrier::Intergroove) {
         flags |= SIDECAR_POINTER_CARRIER_INTERGROOVE;
     }
-    if carriers.contains(&SidecarCarrier::LeadInDeadwax) {
-        flags |= SIDECAR_POINTER_CARRIER_LEAD_IN_DEADWAX;
+    if carriers.contains(&SidecarCarrier::LeadIn) {
+        flags |= SIDECAR_POINTER_CARRIER_LEAD_IN;
+    }
+    if carriers.contains(&SidecarCarrier::Deadwax) {
+        flags |= SIDECAR_POINTER_CARRIER_DEADWAX;
+    }
+    if carriers.contains(&SidecarCarrier::Trailer) {
+        flags |= SIDECAR_POINTER_CARRIER_TRAILER;
     }
     flags
 }
@@ -3383,20 +3783,27 @@ pub fn sidecar_pointer_carriers(flags: u8) -> Result<Vec<SidecarCarrier>> {
     if flags
         & !(SIDECAR_POINTER_CARRIER_LABEL
             | SIDECAR_POINTER_CARRIER_INTERGROOVE
-            | SIDECAR_POINTER_CARRIER_LEAD_IN_DEADWAX)
+            | SIDECAR_POINTER_CARRIER_LEAD_IN
+            | SIDECAR_POINTER_CARRIER_DEADWAX
+            | SIDECAR_POINTER_CARRIER_TRAILER)
         != 0
     {
         bail!("sidecar pointer has unsupported carrier flags {flags:#04x}");
     }
+    // Fill order, not flag order: the plan a reader builds must run the
+    // carriers in the order the writer filled them.
     let mut carriers = Vec::new();
-    if flags & SIDECAR_POINTER_CARRIER_LABEL != 0 {
-        carriers.push(SidecarCarrier::Label);
-    }
-    if flags & SIDECAR_POINTER_CARRIER_INTERGROOVE != 0 {
-        carriers.push(SidecarCarrier::Intergroove);
-    }
-    if flags & SIDECAR_POINTER_CARRIER_LEAD_IN_DEADWAX != 0 {
-        carriers.push(SidecarCarrier::LeadInDeadwax);
+    for carrier in SIDECAR_FILL_ORDER {
+        let bit = match carrier {
+            SidecarCarrier::Label => SIDECAR_POINTER_CARRIER_LABEL,
+            SidecarCarrier::Intergroove => SIDECAR_POINTER_CARRIER_INTERGROOVE,
+            SidecarCarrier::LeadIn => SIDECAR_POINTER_CARRIER_LEAD_IN,
+            SidecarCarrier::Deadwax => SIDECAR_POINTER_CARRIER_DEADWAX,
+            SidecarCarrier::Trailer => SIDECAR_POINTER_CARRIER_TRAILER,
+        };
+        if flags & bit != 0 {
+            carriers.push(carrier);
+        }
     }
     if carriers.is_empty() {
         bail!("sidecar pointer has no carriers");
@@ -3772,24 +4179,27 @@ pub fn decode_pairsign_sidecar_bytes_from_pairs(
     Ok(out)
 }
 
-pub fn paint_sidecar_bytes_into_pairs(
+/// Paints `bytes` across `pairs` by pair-sign modulation.
+///
+/// The bit stream is the caller's. [`paint_sidecar_bytes_into_pairs`] paints a
+/// whole sidecar this way, and a tiered plan paints the run that reaches the
+/// intergroove or the label. Returns how many pairs the bytes took.
+pub fn paint_bytes_into_pairs(
     data: &mut [u8],
     pairs: &[(usize, usize)],
-    sidecar: &PreparedSidecar,
-) -> Result<SidecarRenderSummary> {
-    let carrier_pair_count = pairs.len();
-    let bit_capacity = sidecar_bit_capacity_for_pairs(&sidecar.scheme, pairs, data)?;
-    let capacity_bytes = bit_capacity / 8;
-    let payload_bits = sidecar
-        .bytes
+    scheme: &str,
+    bytes: &[u8],
+) -> Result<usize> {
+    let bit_capacity = sidecar_bit_capacity_for_pairs(scheme, pairs, data)?;
+    let payload_bits = bytes
         .len()
         .checked_mul(8)
         .context("sidecar payload bit length overflow")?;
     if payload_bits > bit_capacity {
         bail!(
-            "sidecar stream is {} bytes but selected carriers only fit {} bytes",
-            sidecar.bytes.len(),
-            capacity_bytes
+            "sidecar run is {} bytes but its pairs only fit {} bytes",
+            bytes.len(),
+            bit_capacity / 8
         );
     }
 
@@ -3797,13 +4207,13 @@ pub fn paint_sidecar_bytes_into_pairs(
     let mut bit_index = 0usize;
     while bit_index < payload_bits {
         let (first_pixel, second_pixel) = pairs[pair_index];
-        let sign_bit = sidecar_payload_bit(&sidecar.bytes, bit_index);
+        let sign_bit = sidecar_payload_bit(bytes, bit_index);
         bit_index += 1;
         let pair_bit_width =
-            sidecar_pair_bit_width_for_scheme(&sidecar.scheme, data, first_pixel, second_pixel)?;
+            sidecar_pair_bit_width_for_scheme(scheme, data, first_pixel, second_pixel)?;
         let magnitude_bit = if pair_bit_width == 2 {
             let bit = if bit_index < payload_bits {
-                let bit = sidecar_payload_bit(&sidecar.bytes, bit_index);
+                let bit = sidecar_payload_bit(bytes, bit_index);
                 bit_index += 1;
                 bit
             } else {
@@ -3816,6 +4226,25 @@ pub fn paint_sidecar_bytes_into_pairs(
         paint_sidecar_pair_bit(data, first_pixel, second_pixel, sign_bit, magnitude_bit);
         pair_index += 1;
     }
+    Ok(pair_index)
+}
+
+pub fn paint_sidecar_bytes_into_pairs(
+    data: &mut [u8],
+    pairs: &[(usize, usize)],
+    sidecar: &PreparedSidecar,
+) -> Result<SidecarRenderSummary> {
+    let carrier_pair_count = pairs.len();
+    let bit_capacity = sidecar_bit_capacity_for_pairs(&sidecar.scheme, pairs, data)?;
+    let capacity_bytes = bit_capacity / 8;
+    if sidecar.bytes.len() > capacity_bytes {
+        bail!(
+            "sidecar stream is {} bytes but selected carriers only fit {} bytes",
+            sidecar.bytes.len(),
+            capacity_bytes
+        );
+    }
+    let pair_index = paint_bytes_into_pairs(data, pairs, &sidecar.scheme, &sidecar.bytes)?;
     let carriers = sidecar
         .carriers
         .iter()
@@ -4033,10 +4462,13 @@ mod tests {
         assert_eq!(decoded.sha256, sidecar.sha256);
     }
 
+    /// A pointer names a set of carriers, and a plan fills them in one order.
+    /// The carriers therefore come back in fill order however they were
+    /// written, so a reader walks the runs as the writer filled them.
     #[test]
-    fn pointer_round_trips_expanded_carriers() {
+    fn pointer_round_trips_carriers_in_fill_order() {
         let options: SidecarRenderOptions = serde_json::from_str(
-            r#"{"carriers":["label","intergroove","leadInDeadwax"],"items":[{"type":"text","codec":"raw","text":"hello"}]}"#,
+            r#"{"carriers":["label","intergroove","leadIn"],"items":[{"type":"text","codec":"raw","text":"hello"}]}"#,
         )
         .unwrap();
         let sidecar = prepare_sidecar_render(Some(&options)).unwrap().unwrap();
@@ -4046,10 +4478,11 @@ mod tests {
         assert_eq!(
             decoded.carriers,
             vec![
-                SidecarCarrier::Label,
+                SidecarCarrier::LeadIn,
                 SidecarCarrier::Intergroove,
-                SidecarCarrier::LeadInDeadwax,
-            ]
+                SidecarCarrier::Label,
+            ],
+            "written label, intergroove, leadIn; read back in fill order"
         );
     }
 
