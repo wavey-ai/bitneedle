@@ -38,10 +38,23 @@ fn press(payload: &[u8]) -> Vec<u8> {
 
 /// The same record with a sidecar painted into its label and lead-in.
 fn with_sidecar(png: &[u8], items: serde_json::Value) -> Vec<u8> {
+    with_sidecar_carriers(png, items, serde_json::json!(["label", "leadIn"]))
+}
+
+/// The same record with a sidecar painted into the named carriers.
+///
+/// The carriers fill in order and the label is last, so a stream that fits an
+/// earlier carrier never reaches the label. A test about the label names the
+/// label alone.
+fn with_sidecar_carriers(
+    png: &[u8],
+    items: serde_json::Value,
+    carriers: serde_json::Value,
+) -> Vec<u8> {
     let options = serde_json::json!({
         "sidecar": {
             "scheme": "pairsign-safe-luma-v2",
-            "carriers": ["label", "leadIn"],
+            "carriers": carriers,
             "items": items,
         }
     });
@@ -123,7 +136,14 @@ fn arbitrary_items_are_checked_as_closely_as_the_named_ones() {
 #[test]
 fn a_label_that_has_been_edited_no_longer_carries_its_sidecar() {
     let png = press(&payload());
-    let png = with_sidecar(&png, serde_json::json!([text_item("note", "hello")]));
+    // The label alone. The carriers fill in order and the label is last, so a
+    // sidecar that names an earlier carrier as well would sit there instead
+    // and would survive a repainted label.
+    let png = with_sidecar_carriers(
+        &png,
+        serde_json::json!([text_item("note", "hello")]),
+        serde_json::json!(["label"]),
+    );
     assert!(
         test_spin::sidecars::inspect(&png, Some(PROFILE)).ok(),
         "the record is sound before it is touched"

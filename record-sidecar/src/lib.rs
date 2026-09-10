@@ -438,6 +438,9 @@ struct RecordPngContext {
     rgba: Vec<u8>,
     record_profile: String,
     descriptor: record_descriptor::RecordDescriptor,
+    /// The octets the descriptor occupies, which a carrier plan starts its
+    /// groove runs past.
+    descriptor_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2241,15 +2244,22 @@ fn record_profile_candidates(record_profile: Option<&str>) -> Result<Vec<String>
     Ok(candidates)
 }
 
+/// The descriptor of a record, and the octets it occupies.
+///
+/// The length is what a carrier plan starts its groove runs past, so it is
+/// carried alongside the fields rather than recovered a second time.
 fn decode_record_descriptor_resolving_profile(
     png_bytes: &[u8],
     record_profile: Option<&str>,
-) -> Result<(String, record_descriptor::RecordDescriptor)> {
+) -> Result<(String, record_descriptor::RecordDescriptor, usize)> {
     let mut failures = Vec::new();
 
     for profile in record_profile_candidates(record_profile)? {
-        match record_decode::decode_record_descriptor_from_png(png_bytes, Some(&profile)) {
-            Ok((normalized_profile, descriptor)) => return Ok((normalized_profile, descriptor)),
+        match record_decode::decode_record_descriptor_bytes_from_png(png_bytes, Some(&profile)) {
+            Ok((normalized_profile, bytes)) => {
+                let descriptor = record_descriptor::decode_record_descriptor_bytes(&bytes)?;
+                return Ok((normalized_profile, descriptor, bytes.len()));
+            }
             Err(error) => failures.push(format!("{profile}: {error:#}")),
         }
     }
@@ -2273,7 +2283,7 @@ fn decode_record_png_context(
     record_profile: Option<&str>,
 ) -> Result<RecordPngContext> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
-    let (record_profile, descriptor) =
+    let (record_profile, descriptor, descriptor_bytes) =
         decode_record_descriptor_resolving_profile(png_bytes, record_profile)?;
 
     Ok(RecordPngContext {
@@ -2282,6 +2292,7 @@ fn decode_record_png_context(
         rgba,
         record_profile,
         descriptor,
+        descriptor_bytes,
     })
 }
 
@@ -2995,23 +3006,27 @@ fn decode_record_png_sidecar_with_context(
         .map(|pointer| pointer.seed)
         .unwrap_or(SIDECAR_DEFAULT_SEED);
     let text_avoid = text_avoid_spec_from_descriptor(&context.descriptor);
-    let carrier_pairs = build_sidecar_carrier_pairs(
+    let plan = build_sidecar_plan(
         context.width,
         context.height,
-        context.descriptor.b_value(),
-        &context.descriptor.spiral_family,
-        &context.record_profile,
-        sidecar_cut_inner_radius(&context.descriptor),
+        &context.descriptor,
+        context.descriptor_bytes,
         &carriers,
         seed,
         text_avoid.as_ref(),
     )?;
-    let capacity_bytes = sidecar_capacity_bytes_for_scheme(&scheme, carrier_pairs.len())?;
+    let capacity_bytes = sidecar_plan_capacity(&plan, &scheme, &context.rgba)?;
     let length = if let Some(pointer) = pointer.as_ref() {
         pointer.length
     } else {
-        let prefix =
-            decode_pairsign_sidecar_bytes_from_pairs(&context.rgba, &carrier_pairs, &scheme, 12)?;
+        let prefix = read_sidecar_bytes_from_plan(
+            &context.rgba,
+            context.width,
+            context.height,
+            &plan,
+            &scheme,
+            12,
+        )?;
         if prefix.len() < 12 || &prefix[..4] != SIDECAR_MAGIC {
             bail!("record does not contain a typed sidecar stream");
         }
@@ -3026,7 +3041,15 @@ fn decode_record_png_sidecar_with_context(
         );
     }
 
-    let (bts1, result) = decode_sidecar_from_pairs(&context.rgba, &carrier_pairs, &scheme, length)?;
+    let bts1 = read_sidecar_bytes_from_plan(
+        &context.rgba,
+        context.width,
+        context.height,
+        &plan,
+        &scheme,
+        length,
+    )?;
+    let result = describe_sidecar_from_plan(&bts1, &scheme, &plan, capacity_bytes)?;
 
     if let Some(pointer) = pointer.as_ref() {
         let actual: [u8; 32] = Sha256::digest(&bts1).into();
@@ -3193,6 +3216,48 @@ fn descriptor_input_with_cache_encryption_option(
         // tells it where the groove stopped.
         deadwax: None,
     }
+}
+
+/// The octets a descriptor takes on a record, before any of it is painted.
+///
+/// A carrier plan starts its groove runs past these octets, and the sidecar
+/// is painted before the descriptor is, so the length has to be known ahead of
+/// the paint. The BSC1 pointer is a fixed 48 octets whatever it carries, so
+/// this length does not move once the sidecar's own segment is in the input.
+fn encoded_descriptor_bytes(
+    width: usize,
+    height: usize,
+    record_profile: &str,
+    main_b_value: f64,
+    descriptor: &record_cut::descriptor::RecordDescriptorInput,
+) -> Result<Vec<u8>> {
+    let lead_in_indices =
+        record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
+    let lead_in_capacity =
+        record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
+    let trailer_capacity = match band_clock_for_descriptor(
+        descriptor.run_out_tone,
+        descriptor.tone_clock.as_ref(),
+    )? {
+        Some(clock) => {
+            let indices = record_core::build_run_out_spiral_indices(
+                width,
+                height,
+                record_profile,
+                match descriptor.cut_inner_radius {
+                    0 => None,
+                    radius => Some(i32::from(radius)),
+                },
+            )?;
+            record_descriptor::band_byte_capacity(indices.len(), &clock)
+        }
+        None => 0,
+    };
+    record_cut::descriptor::encode_record_descriptor_stream(
+        main_b_value,
+        descriptor,
+        lead_in_capacity + trailer_capacity,
+    )
 }
 
 fn paint_descriptor_spiral(
@@ -3573,23 +3638,84 @@ pub fn rewrite_record_png(
         }
     }
 
-    let carrier_pairs = build_sidecar_carrier_region_pairs(
+    // The descriptor is painted after the sidecar, and the sidecar's groove
+    // runs begin past it, so its length is settled first. Its own BSC1 pointer
+    // is part of that length.
+    let descriptor_input =
+        descriptor_input_with_rewrite_options(&context.descriptor, &render_options, &sidecar)?;
+    let descriptor_byte_length = encoded_descriptor_bytes(
         context.width,
         context.height,
-        context.descriptor.b_value(),
-        &context.descriptor.spiral_family,
         &context.record_profile,
-        sidecar_cut_inner_radius(&context.descriptor),
-        SidecarCarrierRegions {
-            label: sidecar.carriers.contains(&SidecarCarrier::Label),
-            intergroove: sidecar.carriers.contains(&SidecarCarrier::Intergroove),
-        },
+        context.descriptor.b_value(),
+        &descriptor_input,
+    )?
+    .len();
+
+    let plan = build_sidecar_plan(
+        context.width,
+        context.height,
+        &context.descriptor,
+        descriptor_byte_length,
+        &sidecar.carriers,
         sidecar.seed,
         text_avoid.as_ref(),
     )?;
-    let summary = paint_sidecar_bytes_into_pairs(&mut context.rgba, &carrier_pairs, &sidecar)?;
-    let descriptor_input =
-        descriptor_input_with_rewrite_options(&context.descriptor, &render_options, &sidecar)?;
+    let capacity_bytes = sidecar_plan_capacity(&plan, &sidecar.scheme, &context.rgba)?;
+    if sidecar.bytes.len() > capacity_bytes {
+        bail!(
+            "sidecar stream is {} bytes but the selected carriers fit {} bytes",
+            sidecar.bytes.len(),
+            capacity_bytes
+        );
+    }
+    // What the stream took of each run, for the summary the caller reports.
+    let spans = sidecar_plan_capacities(&plan, &sidecar.scheme, &context.rgba)?;
+    let mut carrier_pixels = 0usize;
+    let mut carrier_pairs = 0usize;
+    let mut used_pairs = 0usize;
+    let mut remaining = sidecar.bytes.len();
+    for (run, (_, capacity)) in plan.iter().zip(spans) {
+        let take = capacity.min(remaining);
+        remaining -= take;
+        match run {
+            SidecarRun::Groove { indices, .. } => carrier_pixels += indices.len(),
+            SidecarRun::Steg { pairs, .. } => {
+                carrier_pairs += pairs.len();
+                carrier_pixels += pairs.len() * 2;
+                if capacity > 0 {
+                    used_pairs += pairs.len() * take / capacity;
+                }
+            }
+        }
+    }
+
+    paint_sidecar_bytes_into_plan(
+        &mut context.rgba,
+        context.width,
+        context.height,
+        &plan,
+        &sidecar.scheme,
+        &sidecar.bytes,
+    )?;
+    let summary = SidecarRenderSummary {
+        container: "BSC1".to_string(),
+        scheme: sidecar.scheme.clone(),
+        carriers: sidecar
+            .carriers
+            .iter()
+            .map(|carrier| sidecar_carrier_name(*carrier).to_string())
+            .collect(),
+        seed: sidecar.seed,
+        bsc1_bytes: sidecar.bytes.len(),
+        sha256: sidecar.sha256.clone(),
+        capacity_bytes,
+        carrier_pixels,
+        carrier_pairs,
+        used_pairs,
+        unused_pairs: carrier_pairs.saturating_sub(used_pairs),
+    };
+
     paint_descriptor_spiral(
         &mut context.rgba,
         context.width,
@@ -4262,6 +4388,45 @@ pub fn paint_sidecar_bytes_into_pairs(
         capacity_bytes,
         used_pairs: pair_index,
         unused_pairs: carrier_pair_count.saturating_sub(pair_index),
+    })
+}
+
+/// The decode result of a sidecar already read off a carrier plan.
+///
+/// The pixel and pair counts cover the plan's runs: a groove run holds
+/// pixels and no pairs, and a pair run holds two pixels for each pair.
+pub fn describe_sidecar_from_plan(
+    bsc1: &[u8],
+    scheme: &str,
+    plan: &[SidecarRun],
+    capacity_bytes: usize,
+) -> Result<SidecarDecodeResult> {
+    let validation = validate_sidecar_container(bsc1)?;
+    let sha256 = sha256_base64url(bsc1);
+    let mut carrier_pairs = 0usize;
+    let mut carrier_pixels = 0usize;
+    for run in plan {
+        match run {
+            SidecarRun::Groove { indices, .. } => carrier_pixels += indices.len(),
+            SidecarRun::Steg { pairs, .. } => {
+                carrier_pairs += pairs.len();
+                carrier_pixels += pairs.len() * 2;
+            }
+        }
+    }
+    Ok(SidecarDecodeResult {
+        ok: true,
+        descriptor: serde_json::json!({
+            "container": "BSC1",
+            "scheme": normalize_sidecar_scheme(Some(scheme))?,
+            "length": bsc1.len(),
+        }),
+        validation,
+        bsc1_byte_length: bsc1.len(),
+        sha256,
+        carrier_pixels,
+        carrier_pairs,
+        capacity_bytes,
     })
 }
 
