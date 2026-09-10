@@ -3,12 +3,27 @@
 Bitneedle is the public reference implementation for Bitneedle picture records.
 A Bitneedle picture record is an image that contains recoverable audio data.
 
+## Record anatomy
+
+![Plate I — anatomy of a picture record: pixel radii for a 12 in lp](docs/plates/plate-01-anatomy.svg)
+
+*Fig. 1 shows pixel radii for a 12 in lp. Every profile uses the 287 px edge.*
+
+Bitneedle picture records take their dimensions from the RIAA standard.
+Every profile uses one image size: 287 px from edge to centre in a 576² image.
+The label share differs by profile: 52.7% on a 7 in record, 39.9% on a
+10 in record, and 33.2% on a 12 in record.
+
 ## Record geometry
 
 Every profile takes its dimensions from the RIAA standard. The three sizes have
 three outer diameters, and each size starts its recorded band at its own
 diameter. A 10 in and a 12 in share one inner recording diameter. All three
 sizes share one centre hole.
+
+![Plate II — three profiles at one image size](docs/plates/plate-02-geometry.svg)
+
+*Fig. 2 shows three profiles at one image size. The table gives the exact figures.*
 
 | | 7 in `single45` | 7 in `single45vintage` | 10 in `ten` | 12 in `lp` |
 | --- | --- | --- | --- | --- |
@@ -48,13 +63,21 @@ record as a customer option, and 100 mm stays the default.
 and each profile places it proportionally within the gap between the outermost
 groove and the disc edge.
 
-### The groove, rim to label
+### The groove, edge to label
 
-The cut is one continuous groove from the rim to the label. The stylus travels
+The cut is one continuous groove from the edge to the label. The stylus travels
 left to right through every band below. The deadwax takes the groove up at the
 exact angle at which the programme leaves it, so a reader passes from the
 payload into the deadwax in one move. The groove ends in a closed ring, which is
 the locked groove.
+
+![Plate III — edge to label: one continuous groove through six bands](docs/plates/plate-03-groove.png)
+
+*Fig. 3 shows a real 16-slot toned lp with the six bands marked. The insets
+show programme and lead-in pixels at ×4.*
+
+<details>
+<summary>The same section as text</summary>
 
 ```
    travel of the stylus  ──────────────────────────────────────────────────▶
@@ -63,7 +86,7 @@ the locked groove.
       │           │              │              │          │         │
       ▼           ▼              ▼              ▼          ▼         ▼
    ┌──────┬────────────┬───────────────┬─────────────┬──────────┬─────────┐
-   │ rim  │  LEAD-IN   │   PROGRAMME   │   DEADWAX   │ RUN-OUT  │  LOCK   │
+   │ edge │  LEAD-IN   │   PROGRAMME   │   DEADWAX   │ RUN-OUT  │  LOCK   │
    │      │            │               │             │          │         │
    │ flat │ 2 turns    │ pitch = b     │ 1.00 mm/trn │ fills the│ 1 turn  │
    │ no   │ fixed      │ from the fit  │ true physical│ room     │ closed  │
@@ -77,7 +100,9 @@ the locked groove.
                             the run-out claims what it can reach of the rest
 ```
 
-**Lead-in** — two fixed turns at the rim. This band carries the whole BRD1
+</details>
+
+**Lead-in** — two fixed turns at the edge. This band carries the whole BRD1
 descriptor, including the 29-byte prefix that a decoder reads first. A decoder
 must read the prefix before it knows any palette, so this band is painted in
 plain grey: 64 consecutive rungs, 96 to 159, at six bits to a pixel. The window
@@ -103,7 +128,7 @@ version this change, because the descriptor is the unreadable part. Re-cut a
 record of that vintage.
 
 **Programme** — the audio, at the pitch the fit solved for. It is laid out
-from the rim against a nominal span and stops at `cut_inner_radius`, which
+from the edge against a nominal span and stops at `cut_inner_radius`, which
 the prefix carries.
 
 **Deadwax** — from the end of the programme in to the outermost ring of the
@@ -178,7 +203,7 @@ The exact radii, in rendered pixels on the 576 x 576 canvas:
 | | `single45` | `single45vintage` | `ten` | `lp` |
 | --- | --- | --- | --- | --- |
 | Disc edge | 287 | 287 | 287 | 287 |
-| Outer rim thickness | 4 | 4 | 4 | 4 |
+| Outer edge thickness | 4 | 4 | 4 | 4 |
 | Lead-in band thickness | 6 | 6 | 7 | 5 |
 | Payload outer radius | 280 | 280 | 279 | 281 |
 | Payload inner radius | 177 | 177 | 138 | 115 |

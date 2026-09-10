@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" font-family="Georgia, 'Times New Roman', serif">
+  <defs>
+    <pattern id="gridA" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24,0 H0 V24" fill="none" stroke="#201A15" stroke-width="0.5" opacity="0.07"/>
+    </pattern>
+    <marker id="arrA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#201A15"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="560" fill="#F7F2E7"/>
+  <rect x="0" y="0" width="960" height="560" fill="url(#gridA)"/>
+  <rect x="8" y="8" width="944" height="544" fill="none" stroke="#201A15" stroke-width="2"/>
+  <rect x="16" y="16" width="928" height="528" fill="none" stroke="#201A15" stroke-width="0.75"/>
+
+  <text x="40" y="54" font-family="'Courier New', monospace" font-size="12" letter-spacing="4" fill="#201A15">PLATE I</text>
+  <text x="40" y="82" font-size="26" fill="#201A15">ANATOMY OF A PICTURE RECORD</text>
+  <text x="920" y="54" text-anchor="end" font-family="'Courier New', monospace" font-size="11" fill="#201A15">LP · 12″ · 576² IMAGE</text>
+  <line x1="40" y1="94" x2="920" y2="94" stroke="#201A15" stroke-width="0.75"/>
+  <text x="40" y="114" font-size="14" font-style="italic" fill="#201A15">All radii are pixel values in the 576² image.</text>
+
+  <!-- centre lines -->
+  <line x1="70" y1="310" x2="530" y2="310" stroke="#201A15" stroke-width="0.75" stroke-dasharray="10 5 2 5" opacity="0.6"/>
+  <line x1="300" y1="80" x2="300" y2="520" stroke="#201A15" stroke-width="0.75" stroke-dasharray="10 5 2 5" opacity="0.6"/>
+
+  <!-- programme groove: concentric turns, payload outer 196 to payload inner 80 -->
+  <g fill="none" stroke="#201A15" stroke-width="0.75" opacity="0.55">
+    <circle cx="300" cy="310" r="196"/><circle cx="300" cy="310" r="191"/>
+    <circle cx="300" cy="310" r="186"/><circle cx="300" cy="310" r="181"/>
+    <circle cx="300" cy="310" r="176"/><circle cx="300" cy="310" r="171"/>
+    <circle cx="300" cy="310" r="166"/><circle cx="300" cy="310" r="161"/>
+    <circle cx="300" cy="310" r="156"/><circle cx="300" cy="310" r="151"/>
+    <circle cx="300" cy="310" r="146"/><circle cx="300" cy="310" r="141"/>
+    <circle cx="300" cy="310" r="136"/><circle cx="300" cy="310" r="131"/>
+    <circle cx="300" cy="310" r="126"/><circle cx="300" cy="310" r="121"/>
+    <circle cx="300" cy="310" r="116"/><circle cx="300" cy="310" r="111"/>
+    <circle cx="300" cy="310" r="106"/><circle cx="300" cy="310" r="101"/>
+    <circle cx="300" cy="310" r="96"/><circle cx="300" cy="310" r="91"/>
+    <circle cx="300" cy="310" r="86"/><circle cx="300" cy="310" r="82"/>
+  </g>
+  <!-- lead-in ring -->
+  <circle cx="300" cy="310" r="198" fill="none" stroke="#8F8F8F" stroke-width="4"/>
+  <!-- edge -->
+  <circle cx="300" cy="310" r="200" fill="none" stroke="#201A15" stroke-width="2"/>
+  <!-- run-out + lock -->
+  <g fill="none" stroke="#201A15" stroke-width="1">
+    <circle cx="300" cy="310" r="78"/><circle cx="300" cy="310" r="76"/><circle cx="300" cy="310" r="74"/>
+  </g>
+  <circle cx="300" cy="310" r="71" fill="none" stroke="#201A15" stroke-width="2"/>
+  <!-- label -->
+  <circle cx="300" cy="310" r="66" fill="#201A15"/>
+  <text x="300" y="305" text-anchor="middle" font-size="11" letter-spacing="2" fill="#F7F2E7">BITNEEDLE</text>
+  <text x="300" y="319" text-anchor="middle" font-family="'Courier New', monospace" font-size="8" fill="#F7F2E7">PICTURE RECORD</text>
+  <text x="300" y="331" text-anchor="middle" font-family="'Courier New', monospace" font-size="8" fill="#F7F2E7">SIDE A · 33⅓</text>
+  <circle cx="300" cy="310" r="5" fill="#F7F2E7" stroke="#F7F2E7" stroke-width="1.5"/>
+
+  <!-- leaders + callouts -->
+  <g font-family="'Courier New', monospace" font-size="10.5" fill="#201A15">
+    <line x1="600" y1="190" x2="458" y2="187" stroke="#201A15" stroke-width="1"/>
+    <circle cx="458" cy="187" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="186" font-family="Georgia, serif" font-size="14">Edge</text>
+    <text x="610" y="202">outer_radius · 287 px</text>
+
+    <line x1="600" y1="230" x2="484" y2="236" stroke="#201A15" stroke-width="1"/>
+    <circle cx="484" cy="236" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="226" font-family="Georgia, serif" font-size="14">Lead-in</text>
+    <text x="610" y="242">2 turns · grey ladder</text>
+
+    <line x1="600" y1="270" x2="437" y2="291" stroke="#201A15" stroke-width="1"/>
+    <circle cx="437" cy="291" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="266" font-family="Georgia, serif" font-size="14">Programme</text>
+    <text x="610" y="282">payload 281 → 115 px · pitch = b</text>
+
+    <line x1="600" y1="310" x2="378" y2="327" stroke="#201A15" stroke-width="1"/>
+    <circle cx="378" cy="327" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="306" font-family="Georgia, serif" font-size="14">Payload inner</text>
+    <text x="610" y="322">programme limit · 115 px</text>
+
+    <line x1="600" y1="350" x2="364" y2="341" stroke="#201A15" stroke-width="1"/>
+    <circle cx="364" cy="341" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="346" font-family="Georgia, serif" font-size="14">Lock</text>
+    <text x="610" y="362">closed ring · 101.7 px</text>
+
+    <line x1="600" y1="390" x2="351" y2="352" stroke="#201A15" stroke-width="1"/>
+    <circle cx="351" cy="352" r="2.5" fill="#F7F2E7" stroke="#201A15" stroke-width="1"/>
+    <text x="610" y="386" font-family="Georgia, serif" font-size="14">Label + spindle</text>
+    <text x="610" y="402">95 px · Ø 100 mm · hole 7 px</text>
+  </g>
+
+  <text x="40" y="528" font-family="'Courier New', monospace" font-size="10" fill="#201A15">Ø 301.6 mm · 12 in lp · 576² image.</text>
+  <text x="920" y="528" text-anchor="end" font-family="'Courier New', monospace" font-size="10" fill="#201A15">№ BN–I</text>
+</svg>
