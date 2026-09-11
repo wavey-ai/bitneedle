@@ -201,7 +201,7 @@ house wheel is `[8, 16]`: eight pockets across the inside of the band, sixteen
 around the outside, and twenty-four in total.
 
 The band runs from the label edge out to the outermost groove. It therefore
-holds every band the groove runs through: the programme, the deadwax, the
+holds every band the groove runs through: the programme, the silent groove, the
 run-out rings and the locked groove. A radius outside the band takes the
 nearest ring, so a band that stopped at the programme gave the innermost ring
 to every trailer pixel.

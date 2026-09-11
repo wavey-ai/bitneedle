@@ -10,8 +10,7 @@ use base64::{engine::general_purpose, Engine as _};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 use record_core::{
-    describe_record_profile, normalize_record_profile_name, vari_pitch_params,
-    RecordProfileGeometry, SpiralFamily, VariPitchParams,
+    describe_record_profile, normalize_record_profile_name, RecordProfileGeometry, SpiralFamily,
 };
 use record_groove::{
     adaptive_gap_tone_lightness, lighten_base_oklch, oklch_lightness, square_side_for_pixel_count,
@@ -181,11 +180,16 @@ pub struct RenderOptions {
     pub run_out_tone_color: Option<String>,
     #[serde(default)]
     pub guide_outlines: bool,
+    /// Paint the label disc as a flat reference area. Off for a record that
+    /// will be pressed; on for a golden, so the lead-out and lock read against
+    /// a visible centre rather than an empty hole.
+    #[serde(default)]
+    pub label_reference: bool,
     /// How much of the payload band this cut lays its programme across,
     /// measured outward-in from the rim, `0 < fraction <= 1`. Defaults to
     /// `record_core::DEFAULT_GROOVE_SPAN_FRACTION`. The pitch is fitted so
     /// the nominal fills exactly this much of the band; whatever is left
-    /// inside it stays deadwax, the way a lathe leaves a side it did not
+    /// inside it stays silent groove the way a lathe leaves a side it did not
     /// fill. `1.0` is the historical cut that always ran to the label.
     pub groove_span_fraction: Option<f64>,
     /// The pitch to cut at, centre to centre between turns, in rendered
@@ -211,7 +215,7 @@ pub struct RenderOptions {
     /// the cutting point — the cut walks away from the head at twice the
     /// rate instead of standing still under it.
     ///
-    /// Only the programme takes it. The lead-in, the run-out and the deadwax
+    /// Only the programme takes it. The lead-in, the run-out and the silent groove
     /// stay clockwise always: a reader rides those bands to find the
     /// descriptor, so it must be able to trace them before it knows anything
     /// this option could have changed.
@@ -387,11 +391,11 @@ pub struct RenderPayload {
     /// in over its nominal runs past this, inward, toward
     /// `payloadInnerRadius`.
     pub cut_inner_radius: i32,
-    /// Turns of deadwax the cut left behind, at the lathe's spiral feed.
-    pub deadwax_turns: f64,
-    /// Addressable pixels in the deadwax carrier. The carrier holds no bytes
+    /// Turns of silent groove the cut left behind, at the lathe's spiral feed.
+    pub silent_groove_turns: f64,
+    /// Addressable pixels in the silent groove carrier. The carrier holds no bytes
     /// at present, and it stays addressable.
-    pub deadwax_pixel_capacity: usize,
+    pub silent_groove_pixel_capacity: usize,
     pub source_width: usize,
     pub source_height: usize,
     pub source_pixel_count: usize,
@@ -458,14 +462,14 @@ struct TransparentRender {
     pixels_remaining: isize,
     unused_spiral_pixels: usize,
     overflow_track_pixels: usize,
-    /// Addressable pixels in the deadwax. It carries nothing today, but it
+    /// Addressable pixels in the silent groove It carries nothing today, but it
     /// is a carrier: the indices are ordered, continuous with the programme
     /// groove, and reproducible from the same figures a decoder already
     /// has, so anything that wants to write there can.
-    deadwax_pixel_capacity: usize,
-    /// The deadwax's first and last pixel, so a traversal can be checked
+    silent_groove_pixel_capacity: usize,
+    /// The silent groove s first and last pixel, so a traversal can be checked
     /// to join the programme rather than restart inside it.
-    deadwax_bounds: Option<(usize, usize)>,
+    silent_groove_bounds: Option<(usize, usize)>,
     descriptor: RecordDescriptor,
 }
 
@@ -501,7 +505,7 @@ struct TransparentRenderResult {
     b_value: f64,
     groove_span_fraction: f64,
     cut_inner_radius: i32,
-    deadwax_turns: f64,
+    silent_groove_turns: f64,
     source_width: usize,
     source_height: usize,
     source_pixel_count: usize,
@@ -577,7 +581,7 @@ pub fn render_payload_codes_to_png_with_progress(
     progress: &dyn Fn(&str),
 ) -> Result<RenderOutput> {
     let render_options = parse_render_options(render_options_json)?;
-    let result = render_payload_codes_to_transparent_spiral(
+    let mut result = render_payload_codes_to_transparent_spiral(
         codes,
         code_format,
         record_profile,
@@ -624,6 +628,15 @@ pub fn render_payload_codes_to_png_with_progress(
         );
     }
     progress("pressing…");
+    if render_options.label_reference {
+        let geometry = describe_record_profile(record_profile)?;
+        paint_label_reference(
+            &mut result.rendered.data,
+            result.rendered.width,
+            result.rendered.height,
+            &geometry,
+        );
+    }
     let png_bytes = write_rgba_png(
         result.rendered.width,
         result.rendered.height,
@@ -655,14 +668,14 @@ pub fn render_payload_codes_to_png_with_progress(
         status,
         record_profile: normalized_profile,
         duration_seconds,
-        spiral_clockwise: render_options.spiral_clockwise.unwrap_or(true),
+        spiral_clockwise: render_options.spiral_clockwise.unwrap_or(false),
         spiral_fit_mode: None,
         exact: result.exact,
         b_value: result.b_value,
         groove_span_fraction: result.groove_span_fraction,
         cut_inner_radius: result.cut_inner_radius,
-        deadwax_turns: result.deadwax_turns,
-        deadwax_pixel_capacity: result.rendered.deadwax_pixel_capacity,
+        silent_groove_turns: result.silent_groove_turns,
+        silent_groove_pixel_capacity: result.rendered.silent_groove_pixel_capacity,
         source_width: result.source_width,
         source_height: result.source_height,
         source_pixel_count: result.source_pixel_count,
@@ -933,16 +946,8 @@ fn filter_track_pixels(rgba: &[u8], ignore_transparent: bool, ignore_black: bool
     }
 }
 
-fn js_round(value: f64) -> i32 {
-    (value + 0.5).floor() as i32
-}
-
 fn payload_outer_radius(geometry: &RecordProfileGeometry) -> i32 {
     geometry.payload_outer_radius
-}
-
-fn payload_inner_radius(geometry: &RecordProfileGeometry) -> i32 {
-    geometry.payload_inner_radius
 }
 
 /// The radius the programme's groove may not cut below, for a resolved
@@ -969,16 +974,6 @@ fn lead_in_spiral_pitch_for_geometry(geometry: &RecordProfileGeometry) -> f64 {
     radial_travel / (2.0 * PI * LEAD_IN_TURNS.max(0.01))
 }
 
-fn resolve_pitch(b_value: f64, pitch: Option<f64>) -> Result<f64> {
-    let resolved = pitch.unwrap_or(b_value);
-
-    if resolved <= 0.0 {
-        bail!("A positive spiral pitch is required.");
-    }
-
-    Ok(resolved)
-}
-
 fn trace_record_spiral(
     width: usize,
     height: usize,
@@ -991,66 +986,21 @@ fn trace_record_spiral(
     trace_outer_radius: f64,
     trace_inner_radius: f64,
 ) -> Result<(Vec<u8>, Vec<usize>, f64, f64)> {
-    family.validate()?;
-
-    let center_x = width as f64 / 2.0;
-    let center_y = height as f64 / 2.0;
-    let record_radius = width.min(height) as f64 / 2.0;
-    let resolved_pitch = resolve_pitch(b_value, pitch)?;
-    let bounded_outer_radius = trace_outer_radius.min(record_radius - 1.0);
-    let bounded_inner_radius = trace_inner_radius.max(0.0);
-    let mut occupied = vec![0_u8; width * height];
-    let mut ordered_pixel_indices = Vec::new();
-
-    let vari: Option<VariPitchParams> = vari_pitch_params(
+    // One tracer for the whole record. This was a second copy of the walk,
+    // which is exactly how the payload kept its 2x2 corner pixels after the
+    // bands had lost theirs: the two implementations drifted.
+    record_core::trace_record_spiral_with_family(
+        width,
+        height,
+        b_value,
         family,
-        ((bounded_outer_radius - bounded_inner_radius) / resolved_pitch).max(0.0),
-    );
-
-    let mut swept_theta = 0.0_f64;
-    let mut theta_effective = 0.0_f64;
-    let mut angle = start_angle;
-    let mut radius = bounded_outer_radius;
-
-    while radius >= bounded_inner_radius {
-        let draw_radius = match &vari {
-            None => radius,
-            Some(params) => radius + params.dither(swept_theta),
-        };
-        let x = js_round(center_x + draw_radius * angle.cos());
-        let y = js_round(center_y - draw_radius * angle.sin());
-
-        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-            let pixel_index = y as usize * width + x as usize;
-
-            if occupied[pixel_index] == 0 {
-                occupied[pixel_index] = 1;
-                ordered_pixel_indices.push(pixel_index);
-            }
-        }
-
-        let (local_pitch, factor) = match &vari {
-            None => (resolved_pitch, 1.0),
-            Some(params) => {
-                let factor = params.pitch_factor(swept_theta);
-                (resolved_pitch * factor, factor)
-            }
-        };
-        let theta_step = pixel_gap
-            / (radius * radius + local_pitch * local_pitch)
-                .sqrt()
-                .max(1e-6);
-
-        swept_theta += theta_step;
-        theta_effective += factor * theta_step;
-        angle = start_angle + if clockwise { -swept_theta } else { swept_theta };
-        radius = match &vari {
-            None => bounded_outer_radius - resolved_pitch * swept_theta,
-            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
-        };
-    }
-
-    Ok((occupied, ordered_pixel_indices, center_x, center_y))
+        pitch,
+        start_angle,
+        pixel_gap,
+        clockwise,
+        trace_outer_radius,
+        trace_inner_radius,
+    )
 }
 
 fn build_band_spiral_indices(
@@ -1061,7 +1011,7 @@ fn build_band_spiral_indices(
     band_pitch: f64,
     start_angle: f64,
     // The lead-in and run-out sit *inside* their bands, so their outer edge is
-    // exclusive. The deadwax instead begins exactly on its outer edge — it
+    // exclusive. The silent groove instead begins exactly on its outer edge — it
     // is the same groove continuing — and dropping that first turn would put
     // its first addressable pixel most of a revolution away from the
     // programme's last.
@@ -1104,58 +1054,65 @@ fn build_lead_in_spiral_indices(
 fn build_run_out_spiral_indices(
     width: usize,
     height: usize,
-    record_profile: &str,
-    cut_inner_radius: Option<i32>,
-) -> Result<Vec<usize>> {
-    record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)
-}
-
-/// Where the deadwax has to stop: the outermost turn of the lead-out, plus
-/// the daylight two bands need not to round onto each other's pixels.
-///
-/// The wide extents use this space. The deadwax is cut at the millimetre feed
-/// of the lathe, so a side that stops early fills the whole descent with a turn
-/// every millimetre. An album cut to a third of its band draws seventeen such
-/// turns across the artwork. A lead-out that widens into the same space
-/// replaces that ladder with three or four separate rings, and those rings
-/// carry bytes. The lead-out takes the space that the deadwax would otherwise
-/// cross.
-fn deadwax_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
-    let lead_out = record_core::lead_out_geometry_with_extent(
-        record_profile,
-        cut_inner_radius,
-        record_core::LeadOutExtent::Fill,
-    )?;
-
-    Ok(lead_out.entry_radius + record_core::MIN_TURN_SEPARATION_PX)
-}
-
-fn build_deadwax_spiral_indices(
-    width: usize,
-    height: usize,
     b_value: f64,
     family: &SpiralFamily,
     record_profile: &str,
-    cut_inner_radius: i32,
+    cut_inner_radius: Option<i32>,
+    clockwise: bool,
 ) -> Result<Vec<usize>> {
-    record_core::build_deadwax_spiral_indices(
+    record_core::build_run_out_spiral_indices(
         width,
         height,
         b_value,
         family,
         record_profile,
         cut_inner_radius,
+        clockwise,
     )
 }
 
-/// How many turns of deadwax a cut that stopped at `cut_inner_radius`
+/// Where the silent groove has to stop: the outermost turn of the lead-out, plus
+/// the daylight two bands need not to round onto each other's pixels.
+///
+/// The wide extents use this space. The silent groove is cut at the millimetre feed
+/// of the lathe, so a side that stops early fills the whole descent with a turn
+/// every millimetre. An album cut to a third of its band draws seventeen such
+/// turns across the artwork. A lead-out that widens into the same space
+/// replaces that ladder with three or four separate rings, and those rings
+/// carry bytes. The lead-out takes the space that the silent groove would otherwise
+/// cross.
+fn silent_groove_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
+    record_core::silent_groove_inner_radius(record_profile, cut_inner_radius)
+}
+
+fn build_silent_groove_spiral_indices(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: i32,
+    clockwise: bool,
+) -> Result<Vec<usize>> {
+    record_core::build_silent_groove_spiral_indices(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+    )
+}
+
+/// How many turns of silent groove a cut that stopped at `cut_inner_radius`
 /// leaves behind, at the lathe's spiral feed.
-fn deadwax_turns(record_profile: &str, cut_inner_radius: i32) -> Result<f64> {
+fn silent_groove_turns(record_profile: &str, cut_inner_radius: i32) -> Result<f64> {
     let travel = (cut_inner_radius as f64
-        - deadwax_inner_radius(record_profile, Some(cut_inner_radius))?)
+        - silent_groove_inner_radius(record_profile, Some(cut_inner_radius))?)
     .max(0.0);
 
-    Ok(travel / record_core::deadwax_turn_separation_px(record_profile)?)
+    Ok(travel / record_core::silent_groove_turn_separation_px(record_profile)?)
 }
 
 fn build_spiral_mask(
@@ -1186,7 +1143,7 @@ fn build_spiral_mask(
     let mut addressable_pixel_count = 0usize;
     let mut ordered_pixel_indices = Vec::with_capacity(traced_pixel_indices.len());
 
-    for pixel_index in traced_pixel_indices {
+    for &pixel_index in &traced_pixel_indices {
         if occupied[pixel_index] == 0 {
             continue;
         }
@@ -1232,60 +1189,34 @@ fn count_spiral_mask_pixels(
     let payload_inner = cut_inner_radius(&geometry, span_fraction)?;
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
-    let record_radius = width.min(height) as f64 / 2.0;
-    let resolved_pitch = resolve_pitch(b_value, None)?;
-    let bounded_outer_radius = (payload_outer as f64).min(record_radius - 1.0);
-    // The mask trace runs to the centre, so the sweep the banding is scaled
-    // to is the bounded outer span — identical to the figure the core trace
-    // derives for the same bounds.
-    let vari: Option<VariPitchParams> =
-        vari_pitch_params(family, (bounded_outer_radius / resolved_pitch).max(0.0));
-    let mut occupied = vec![0_u8; width * height];
+
+    // The same walk the mask is painted from, thinned the same way, so the fit
+    // counts exactly the pixels the cut can address. Every pixel thinning saves
+    // is a pixel the fit can spend on another turn.
+    let (_, mut ordered, _, _) = trace_record_spiral(
+        width,
+        height,
+        b_value,
+        family,
+        None,
+        DEFAULT_START_ANGLE,
+        1.0,
+        false,
+        payload_outer as f64,
+        0.0,
+    )?;
+
     let mut addressable_pixel_count = 0usize;
-    let mut swept_theta = 0.0_f64;
-    let mut theta_effective = 0.0_f64;
-    let mut angle = DEFAULT_START_ANGLE;
-    let mut radius = bounded_outer_radius;
+    for &pixel_index in &ordered {
+        let x = (pixel_index % width) as f64;
+        let y = (pixel_index / width) as f64;
+        let dx = x - center_x;
+        let dy = y - center_y;
+        let distance = (dx * dx + dy * dy).sqrt();
 
-    while radius >= 0.0 {
-        let draw_radius = match &vari {
-            None => radius,
-            Some(params) => radius + params.dither(swept_theta),
-        };
-        let x = js_round(center_x + draw_radius * angle.cos());
-        let y = js_round(center_y - draw_radius * angle.sin());
-
-        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-            let pixel_index = y as usize * width + x as usize;
-            if occupied[pixel_index] == 0 {
-                occupied[pixel_index] = 1;
-                let dx = x as f64 - center_x;
-                let dy = y as f64 - center_y;
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance > payload_inner as f64 && distance < payload_outer as f64 {
-                    addressable_pixel_count += 1;
-                }
-            }
+        if distance > payload_inner as f64 && distance < payload_outer as f64 {
+            addressable_pixel_count += 1;
         }
-
-        let (local_pitch, factor) = match &vari {
-            None => (resolved_pitch, 1.0),
-            Some(params) => {
-                let factor = params.pitch_factor(swept_theta);
-                (resolved_pitch * factor, factor)
-            }
-        };
-        let theta_step = 1.0
-            / (radius * radius + local_pitch * local_pitch)
-                .sqrt()
-                .max(1e-6);
-        swept_theta += theta_step;
-        theta_effective += factor * theta_step;
-        angle = DEFAULT_START_ANGLE - swept_theta;
-        radius = match &vari {
-            None => bounded_outer_radius - resolved_pitch * swept_theta,
-            Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
-        };
     }
 
     Ok(addressable_pixel_count)
@@ -1704,37 +1635,6 @@ fn find_exact_fit_b(
     })
 }
 
-/// How much wider the cut reaches each time the density floor turns it
-/// back. The search starts from a closed-form estimate of where the floor
-/// bites, so this only has to walk off the few percent the estimate loses to
-/// diagonal steps — small steps, and few of them.
-const CUT_SPAN_WIDEN_FACTOR: f64 = 1.08;
-
-/// The narrowest span whose turns could clear [`MIN_TURN_SEPARATION_PX`],
-/// in closed form.
-///
-/// A spiral of pitch `p` running from `R_out` in to `R_end` has an arc
-/// length of about `PI * (R_out^2 - R_end^2) / p`, so the radius at which a
-/// given pixel count runs out at the floor pitch falls straight out of it.
-/// The traced groove loses a few percent to diagonal steps and duplicate
-/// pixels, so this is a floor to start the search from, not the answer.
-/// Seeding with it keeps `solve_cut` monotone in the requested span: without
-/// it a geometric ladder can overshoot a narrower request past a wider one
-/// that would have fitted.
-fn span_fraction_floor_estimate(track_pixel_count: usize, geometry: &RecordProfileGeometry) -> f64 {
-    let outer = payload_outer_radius(geometry) as f64;
-    let inner = programme_inner_radius(geometry).unwrap_or_else(|_| payload_inner_radius(geometry))
-        as f64;
-    let band = (outer - inner).max(1.0);
-    let swept = outer * outer - track_pixel_count as f64 * record_core::MIN_TURN_SEPARATION_PX / PI;
-
-    if swept <= inner * inner {
-        return 1.0;
-    }
-
-    ((outer - swept.sqrt()) / band).clamp(0.0, 1.0)
-}
-
 /// The span `track_pixel_count` occupies at a named pitch.
 ///
 /// A spiral's arc between two radii is `(r_out^2 - r_in^2) / 2b`, so the
@@ -1748,8 +1648,7 @@ fn span_for_turn_separation(
     separation_px: f64,
 ) -> f64 {
     let outer = payload_outer_radius(geometry) as f64;
-    let inner = programme_inner_radius(geometry).unwrap_or_else(|_| payload_inner_radius(geometry))
-        as f64;
+    let inner = programme_inner_radius(geometry).unwrap_or(0) as f64;
     let band = (outer - inner).max(1.0);
     let b = separation_px / (2.0 * PI);
     let reached_squared = outer * outer - 2.0 * b * track_pixel_count as f64;
@@ -1763,6 +1662,49 @@ fn span_for_turn_separation(
 struct CutFit {
     span_fraction: f64,
     fit: FitResult,
+}
+
+/// The smallest fraction of the ceiling pitch a varied cut may take.
+///
+/// A programme that would spread past the density ceiling is held at the
+/// ceiling; walking its pitch down by a seeded factor turns some of its spare
+/// room into a different pitch, so two releases of the same length do not cut
+/// the exact same spiral. The pitch stays *uniform* through each record — this
+/// is one scalar for the whole cut, not a dither of the groove — so the
+/// programme remains a clean spiral and the artwork beneath it stays as
+/// visible as it was. The walk is one-sided (down), so it can never exceed the
+/// ceiling or pack below the floor. A programme that reaches the reserve is not
+/// walked: its pitch is the one that puts it on the reserve, and moving it
+/// would move the end of the programme.
+const PITCH_VARIATION_MIN_FACTOR: f64 = 0.96;
+
+/// A stable value in `[0, 1)` from a seed, by SplitMix64.
+fn seeded_unit(seed: u64) -> f64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The pitch-variation seed: the release id where there is one, so a re-press
+/// is identical, else the caller's spiral seed, else zero.
+fn pitch_variation_seed_from_options(render_options: &RenderOptions) -> u64 {
+    let Some(id) = render_options
+        .header_release_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    else {
+        return render_options.spiral_seed.unwrap_or(0);
+    };
+
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    hash
 }
 
 /// Lay out the cut: the pitch that puts `track_pixel_count` across
@@ -1786,8 +1728,9 @@ fn solve_cut(
     track_pixel_count: usize,
     family: &SpiralFamily,
     record_profile: &str,
-    requested_span_fraction: f64,
+    _requested_span_fraction: f64,
     requested_separation_px: Option<f64>,
+    pitch_seed: u64,
 ) -> Result<CutFit> {
     let geometry = describe_record_profile(record_profile)?;
 
@@ -1805,30 +1748,92 @@ fn solve_cut(
             return Ok(CutFit { span_fraction: span, fit });
         }
     }
-    let mut span_fraction = record_core::validate_groove_span_fraction(requested_span_fraction)?
-        .max(span_fraction_floor_estimate(track_pixel_count, &geometry))
-        .min(1.0);
 
-    loop {
-        let fit = find_exact_fit_with_coverage(
+    // Fit the pitch to the band, not the band to the pitch.
+    //
+    // The programme runs from the rim down to the point that still leaves the
+    // run-out its room and the silent-groove turns the carriers need; that
+    // reserve is the inner edge here. A spiral's arc is `(R_out^2 - R_in^2) /
+    // 2b`, so the pitch that just reaches the reserve is solved, not searched.
+    // It is then clamped hard: a short programme may not spread past
+    // `MAX_PROGRAMME_TURN_SEPARATION_PX` — the band it does not use becomes
+    // silent groove — and a long one may not pack below
+    // `MIN_TURN_SEPARATION_PX`, where the side simply cannot hold it and the
+    // renderer says so.
+    let outer = payload_outer_radius(&geometry) as f64;
+    // The reserve is the lead-out a filled side keeps: the lock, a quarter turn
+    // of run-out, and the two silent-groove turns the sidecar carriers need. It
+    // follows from the profile alone, so the fit and the painted lead-out
+    // cannot disagree about where the programme may stop.
+    let reserve_inner = record_core::programme_floor_radius(record_profile)?.min(outer - 1.0);
+
+    let pixels = track_pixel_count.max(1) as f64;
+    let b_natural =
+        ((outer * outer - reserve_inner * reserve_inner) / (2.0 * pixels)).max(record_core::MIN_B_VALUE);
+    let b_floor = record_core::MIN_PROGRAMME_TURN_SEPARATION_PX / (2.0 * PI);
+    let b_cap = record_core::MAX_PROGRAMME_TURN_SEPARATION_PX / (2.0 * PI);
+    let mut b = b_natural.clamp(b_floor, b_cap);
+
+    // Pitch variation: a programme that would spread past the ceiling is held
+    // at the ceiling, and the pitch it is actually cut at is walked down by a
+    // seeded fraction. Two releases of the same length would otherwise cut an
+    // identical spiral, pixel for pixel. The walk is a single scalar for the
+    // whole record, so the groove stays uniform and the artwork under it stays
+    // visible. A programme that reaches the reserve is left alone: its pitch is
+    // what puts it on the reserve, and moving it would move the end of the
+    // programme. The reader reads `b` back from the prefix, so it retraces
+    // whatever this chose without needing the seed; a re-press with the same
+    // release id seeds identically.
+    if b_natural >= b_cap {
+        let factor =
+            PITCH_VARIATION_MIN_FACTOR + (1.0 - PITCH_VARIATION_MIN_FACTOR) * seeded_unit(pitch_seed);
+        b = (b * factor).clamp(b_floor, b_cap);
+    }
+
+    // If even the whole band at this pitch cannot hold the programme, the pitch
+    // must be finer — which packs more pixels into the same band. Take the
+    // coarsest pitch that still holds it, so the programme breathes as much as
+    // it can; if even the floor cannot, the side is too small.
+    let capacity = |b: f64| -> Result<usize> {
+        Ok(evaluate_spiral_fit(
             width,
             height,
             track_pixel_count,
             family,
             record_profile,
-            span_fraction,
-            None,
-        )?;
-
-        let cleared =
-            record_core::turn_separation_px(fit.b_value) >= record_core::MIN_TURN_SEPARATION_PX;
-
-        if cleared || span_fraction >= 1.0 {
-            return Ok(CutFit { span_fraction, fit });
+            1.0,
+            b,
+        )?
+        .addressable_pixel_count)
+    };
+    if capacity(b)? < track_pixel_count {
+        if capacity(b_floor)? < track_pixel_count {
+            bail!("the programme does not fit this record profile at the minimum pitch");
         }
-
-        span_fraction = (span_fraction * CUT_SPAN_WIDEN_FACTOR).min(1.0);
+        let mut lo = b_floor;
+        let mut hi = b;
+        for _ in 0..48 {
+            let mid = 0.5 * (lo + hi);
+            if capacity(mid)? >= track_pixel_count {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        b = lo;
     }
+
+    // The pitch is the promise and is now held fixed; the depth is what moves.
+    let (span_fraction, fit) = fit_span_at_pitch(
+        width,
+        height,
+        track_pixel_count,
+        family,
+        record_profile,
+        b,
+    )?;
+
+    Ok(CutFit { span_fraction, fit })
 }
 
 fn resolve_groove_span_fraction(render_options: &RenderOptions) -> Result<f64> {
@@ -1861,6 +1866,74 @@ fn find_exact_fit_with_coverage(
         64,
         1024,
     )
+}
+
+/// Fit the span at a fixed pitch, so the pitch clamp is a hard bound.
+///
+/// The density floor and ceiling are promises about the picture; a search that
+/// is allowed to move `b` will quietly break them to make the arithmetic come
+/// out. Here `b` is fixed — the caller has already solved and clamped it — and
+/// only the depth is searched, to the first span whose addressable count
+/// reaches the programme. A programme that cannot reach it even at the full
+/// band does not fit this side, and that is returned as an error rather than
+/// packed below the floor.
+fn fit_span_at_pitch(
+    width: usize,
+    height: usize,
+    track_pixel_count: usize,
+    family: &SpiralFamily,
+    record_profile: &str,
+    b_value: f64,
+) -> Result<(f64, FitResult)> {
+    let at_full = evaluate_spiral_fit(
+        width,
+        height,
+        track_pixel_count,
+        family,
+        record_profile,
+        1.0,
+        b_value,
+    )?;
+    if at_full.addressable_pixel_count < track_pixel_count {
+        bail!(
+            "the programme does not fit this record profile at the fixed pitch: \
+             b={b_value:.5} ({:.2} px/turn) holds {} of {} px over the whole band",
+            2.0 * PI * b_value,
+            at_full.addressable_pixel_count,
+            track_pixel_count
+        );
+    }
+
+    let mut low = 1e-6_f64;
+    let mut high = 1.0_f64;
+    let mut best = at_full;
+    for _ in 0..48 {
+        let mid = 0.5 * (low + high);
+        let candidate = evaluate_spiral_fit(
+            width,
+            height,
+            track_pixel_count,
+            family,
+            record_profile,
+            mid,
+            b_value,
+        )?;
+        if candidate.addressable_pixel_count >= track_pixel_count {
+            high = mid;
+            best = candidate;
+        } else {
+            low = mid;
+        }
+    }
+
+    let exact = best.addressable_pixel_count == track_pixel_count;
+    Ok((
+        high,
+        FitResult {
+            b_value,
+            exact,
+        },
+    ))
 }
 
 /// The trailer's tone, as the caller gave it.
@@ -2027,6 +2100,53 @@ fn paint_guide_ring(
     }
 }
 
+/// Paint the label and centre features as a flat reference area.
+///
+/// This is for a golden, not for a record that will be pressed: it fills the
+/// centre so the lead-out, the lock and the label edge read against a visible
+/// face. It also draws the profile's own centre features — the label, the 45's
+/// dink and its knockout, and the spindle hole — so a 45 reads as a 45. It
+/// paints only inside the label radius, which no carrier band uses.
+fn paint_label_reference(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    geometry: &RecordProfileGeometry,
+) {
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let label = geometry.label_radius as f64;
+    let dink = geometry.dink_radius.map(f64::from);
+    let knockout = geometry.dink_cutout_radius.map(f64::from);
+    let spindle = geometry.spindle_hole_radius as f64;
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f64 - center_x;
+            let dy = y as f64 - center_y;
+            let radius = (dx * dx + dy * dy).sqrt();
+            if radius > label {
+                continue;
+            }
+
+            let at = (y * width + x) * 4;
+            let (rgb, alpha) = if radius <= spindle {
+                ([0x00, 0x00, 0x00], 255)
+            } else if knockout.is_some_and(|value| radius <= value) {
+                ([0x00, 0x00, 0x00], 0)
+            } else if dink.is_some_and(|value| radius <= value) {
+                ([0x1a, 0x18, 0x1c], 255)
+            } else {
+                ([0xd8, 0xd4, 0xcc], 255)
+            };
+            data[at] = rgb[0];
+            data[at + 1] = rgb[1];
+            data[at + 2] = rgb[2];
+            data[at + 3] = alpha;
+        }
+    }
+}
+
 fn paint_record_guides(
     data: &mut [u8],
     width: usize,
@@ -2087,7 +2207,7 @@ fn render_track_scanline_onto_transparent_spiral(
 ) -> Result<TransparentRender> {
     let spiral_mask =
         build_spiral_mask(width, height, b_value, family, record_profile,
-            !descriptor_input.spiral_anticlockwise)?;
+            descriptor_input.spiral_clockwise)?;
     let mut data = vec![0_u8; width * height * 4];
 
     if guide_outlines {
@@ -2095,22 +2215,23 @@ fn render_track_scanline_onto_transparent_spiral(
     }
 
     // Cut before the programme so that a payload which overran its nominal
-    // paints over its own deadwax rather than the other way round — the
+    // paints over its own silent groove rather than the other way round — the
     // groove that carries something always wins the pixel.
-    let deadwax_indices = build_deadwax_spiral_indices(
+    let silent_groove_indices = build_silent_groove_spiral_indices(
         width,
         height,
         b_value,
         family,
         record_profile,
         cut_inner_radius,
+        descriptor_input.spiral_clockwise,
     )?;
-    let deadwax_pixel_capacity = deadwax_indices.len();
-    let deadwax_bounds = deadwax_indices
+    let silent_groove_pixel_capacity = silent_groove_indices.len();
+    let silent_groove_bounds = silent_groove_indices
         .first()
-        .zip(deadwax_indices.last())
+        .zip(silent_groove_indices.last())
         .map(|(first, last)| (*first, *last));
-    // The deadwax is the groove the head kept cutting, so it takes the tone
+    // The silent groove is the groove the head kept cutting, so it takes the tone
     // the groove above it was cut in: the wheel pocket by pocket, or the
     // span's own base where the record carries no wheel.
     let groove_clock = tone_clock.map(|(_, clock)| clock);
@@ -2123,7 +2244,7 @@ fn render_track_scanline_onto_transparent_spiral(
         &mut data,
         width,
         height,
-        &deadwax_indices,
+        &silent_groove_indices,
         groove_clock,
         single_tone,
         53,
@@ -2132,7 +2253,7 @@ fn render_track_scanline_onto_transparent_spiral(
     // What the cut left standing between the programme and the descriptor's
     // inner band, declared so that something other than this renderer can
     // use it. The geometry was already knowable — the prefix carries the
-    // radius the cut stopped at and the feed the deadwax is cut with — but
+    // radius the cut stopped at and the feed the silent groove is cut with — but
     // knowable is not the same as offered: without this a writer has to
     // re-derive the band from the profile's own tables and guess whether
     // anyone else is already in there.
@@ -2141,15 +2262,15 @@ fn render_track_scanline_onto_transparent_spiral(
     // promise about pixels: the band is offered toned where the record has a
     // palette to offer it under, and grey where it has none, and nothing
     // about the segment's shape changes either way.
-    // The deadwax is not a bootstrap band. By the time a reader reaches it the
+    // The silent groove is not a bootstrap band. By the time a reader reaches it the
     // descriptor has been read and the palette is known, so it is offered as
     // the carrier's own encoding rather than as grey, and its capacity follows
     // that encoding's bits per pixel instead of the metadata ladder's. A
-    // band is toned or it is not offered at all: a deadwax quietly downgraded
+    // band is toned or it is not offered at all: a silent groove quietly downgraded
     // to grey is a band whose declared encoding no longer matches the record
     // it sits on, and a sidecar would write the wrong thing into it.
-    let deadwax_encoding = record_descriptor::DEADWAX_ENCODING_TONED;
-    let deadwax_bits_per_pixel = tone_clock
+    let silent_groove_encoding = record_descriptor::SILENT_GROOVE_ENCODING_TONED;
+    let silent_groove_bits_per_pixel = tone_clock
         .map(|(_, clock)| clock.bits_per_pixel)
         .or_else(|| {
             descriptor_input
@@ -2159,8 +2280,8 @@ fn render_track_scanline_onto_transparent_spiral(
         })
         .filter(|bits| *bits > 0);
 
-    let deadwax_extent = {
-        let inner = deadwax_inner_radius(record_profile, Some(cut_inner_radius))?
+    let silent_groove_extent = {
+        let inner = silent_groove_inner_radius(record_profile, Some(cut_inner_radius))?
             .floor()
             .max(0.0) as i32;
         let outer = cut_inner_radius.max(0);
@@ -2168,23 +2289,23 @@ fn render_track_scanline_onto_transparent_spiral(
         // lead-out that carries the needle to the run-out, and a lathe always
         // cuts it — but what the record *says* about it has to be true, and
         // there is no honest thing to say about a toned band on a record that
-        // carries no tone. An untoned record therefore cuts its deadwax and
+        // carries no tone. An untoned record therefore cuts its silent groove and
         // declares nothing, which is what "not offered at all" means: the
         // segment is absent, not wrong, and the record still renders.
-        match deadwax_bits_per_pixel {
-            Some(bits_per_pixel) if deadwax_pixel_capacity > 0 && outer > inner => {
-                let pixel_capacity = u32::try_from(deadwax_pixel_capacity)
-                    .context("deadwax pixel capacity exceeds u32")?;
-                Some(record_descriptor::DeadwaxExtent {
+        match silent_groove_bits_per_pixel {
+            Some(bits_per_pixel) if silent_groove_pixel_capacity > 0 && outer > inner => {
+                let pixel_capacity = u32::try_from(silent_groove_pixel_capacity)
+                    .context("silent_groove pixel capacity exceeds u32")?;
+                Some(record_descriptor::SilentGrooveExtent {
                     outer_radius: u16::try_from(outer)
-                        .context("deadwax outer radius exceeds u16")?,
+                        .context("silent_groove outer radius exceeds u16")?,
                     inner_radius: u16::try_from(inner)
-                        .context("deadwax inner radius exceeds u16")?,
+                        .context("silent_groove inner radius exceeds u16")?,
                     pixel_capacity,
-                    encoding: deadwax_encoding,
+                    encoding: silent_groove_encoding,
                     byte_capacity: (u64::from(pixel_capacity) * u64::from(bits_per_pixel) / 8)
                         as u32,
-                    claim: record_descriptor::DEADWAX_CLAIM_FREE,
+                    claim: record_descriptor::SILENT_GROOVE_CLAIM_FREE,
                     claimed_byte_length: 0,
                 })
             }
@@ -2309,15 +2430,22 @@ fn render_track_scanline_onto_transparent_spiral(
     // at which the groove stopped. That radius is known after the cut is laid
     // down, so the caller supplies no extent.
     let mut descriptor_input = descriptor_input.clone();
-    descriptor_input.deadwax = deadwax_extent;
+    descriptor_input.silent_groove = silent_groove_extent;
 
     // The trailer is matte when the caller names a tone for it, and it takes
     // the wheel of the record otherwise. In both cases it carries at the rate
     // of the clock, and the descriptor writes into it after the lead-in fills.
     // Paint it first, so the part that the header leaves keeps the colour of
     // the band.
-    let trailer_indices =
-        build_run_out_spiral_indices(width, height, record_profile, Some(cut_inner_radius))?;
+    let trailer_indices = build_run_out_spiral_indices(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        Some(cut_inner_radius),
+        descriptor_input.spiral_clockwise,
+    )?;
     let trailer_tone = trailer_tone.or(single_tone);
     // The tone that the band is cut in, which the descriptor reports to a
     // reader. It is the colour of the caller when the caller gives one, and the
@@ -2366,8 +2494,8 @@ fn render_track_scanline_onto_transparent_spiral(
             .saturating_sub(track_pixel_count),
         overflow_track_pixels: track_pixel_count
             .saturating_sub(spiral_mask.addressable_pixel_count),
-        deadwax_pixel_capacity,
-        deadwax_bounds,
+        silent_groove_pixel_capacity,
+        silent_groove_bounds,
         descriptor,
     })
 }
@@ -2717,6 +2845,7 @@ fn render_payload_codes_to_transparent_spiral(
     };
 
     let spiral_family = resolve_spiral_family(render_options)?;
+    let pitch_seed = pitch_variation_seed_from_options(render_options);
     let cut = solve_cut(
         RECORD_WIDTH,
         RECORD_HEIGHT,
@@ -2725,6 +2854,7 @@ fn render_payload_codes_to_transparent_spiral(
         &normalized_profile,
         resolve_groove_span_fraction(render_options)?,
         render_options.turn_separation_px,
+        pitch_seed,
     )?;
     let CutFit {
         span_fraction: groove_span_fraction,
@@ -2741,24 +2871,25 @@ fn render_payload_codes_to_transparent_spiral(
         .map(record_descriptor::CacheEncryptionDescriptor::from_secret_base64url)
         .transpose()?;
 
-    // A cut that reaches the label declares no deadwax. A shorter cut declares
-    // the radius at which its groove stops, and the feed that the rest is cut
-    // at, so a reader with the PNG alone walks the whole spiral.
-    let declares_deadwax =
-        cut_inner_radius > payload_inner_radius(&describe_record_profile(&normalized_profile)?);
+    // The programme never reaches the label: the fit keeps a reserve of the
+    // lock, a quarter turn of run-out and two silent-groove turns, so every
+    // cut leaves a silent groove and declares the radius its groove stops at,
+    // and the feed the rest is cut at. A reader with the PNG alone walks the
+    // whole spiral.
+    let declares_silent_groove = true;
     let descriptor_input = RecordDescriptorInput {
         // The hand that the programme is cut with. The descriptor carries it,
         // so a reader retraces the cut of this record rather than the house
         // hand. An absent value from the caller selects the house hand, and the
         // descriptor then writes no segment.
-        spiral_anticlockwise: !render_options.spiral_clockwise.unwrap_or(true),
-        cut_inner_radius: if declares_deadwax {
+        spiral_clockwise: render_options.spiral_clockwise.unwrap_or(false),
+        cut_inner_radius: if declares_silent_groove {
             u16::try_from(cut_inner_radius).context("cut inner radius does not fit u16")?
         } else {
             0
         },
-        deadwax_b_value: if declares_deadwax {
-            record_core::deadwax_spiral_pitch(&normalized_profile)?
+        silent_groove_b_value: if declares_silent_groove {
+            record_core::silent_groove_spiral_pitch(&normalized_profile)?
         } else {
             0.0
         },
@@ -2786,10 +2917,10 @@ fn render_payload_codes_to_transparent_spiral(
         upc: None,
         deferred_attestation: None,
         spiral_family,
-        // Filled in by the cut: see `deadwax_extent` in
+        // Filled in by the cut: see `silent_groove_extent` in
         // `render_track_scanline_onto_transparent_spiral`. Nothing above the
         // lathe knows where the groove stopped.
-        deadwax: None,
+        silent_groove: None,
         run_out_tone: run_out_tone(render_options),
     };
 
@@ -2829,7 +2960,7 @@ fn render_payload_codes_to_transparent_spiral(
         b_value: fit.b_value,
         groove_span_fraction,
         cut_inner_radius,
-        deadwax_turns: deadwax_turns(&normalized_profile, cut_inner_radius)?,
+        silent_groove_turns: silent_groove_turns(&normalized_profile, cut_inner_radius)?,
         source_width: source_dimensions.0,
         source_height: source_dimensions.1,
         source_pixel_count: source_dimensions.2,
@@ -3036,7 +3167,7 @@ fn groove_clock_track(
     // the innermost ring would be under the label, toning nothing.
     //
     // The band reaches the label and not the programme's inner radius,
-    // because the deadwax, the run-out rings and the locked groove are cut
+    // because the silent groove the run-out rings and the locked groove are cut
     // between the two. A band that started at the programme left those
     // bands outside it, and [`ToneClock::ring_index`] clamps a radius
     // outside the band to the nearest ring — so every trailer pixel took
@@ -3464,145 +3595,185 @@ mod tests {
         }
     }
 
-    /// Without a nominal the fit has only what has arrived to go on, so each
-    /// partial render is a complete small record at its own pitch. This is
-    /// the behaviour the nominal exists to replace; pin it so the two paths
-    /// cannot quietly converge.
+    /// Without a nominal the fit has only what has arrived to go on. A payload
+    /// that fits inside the density ceiling sits at or just under the ceiling
+    /// and does not spread wider; a payload that needs more room packs finer,
+    /// down to the raster floor. There is no nominal to hold it at the finished
+    /// pitch, so each partial render is a complete small record at its own
+    /// pitch.
     #[test]
     fn without_a_nominal_the_pitch_tracks_whatever_has_arrived() {
-        let options = r#"{"grooveSpanFraction":0.33}"#;
-        let small = render_lp(&rgb_code_block(30_000), options);
-        let large = render_lp(&rgb_code_block(90_000), options);
+        let ceiling = record_core::MAX_PROGRAMME_TURN_SEPARATION_PX;
+        let small = render_lp(&rgb_code_block(30_000), "{}");
+        let large = render_lp(&rgb_code_block(250_000), "{}");
 
         assert!(
+            record_core::turn_separation_px(small.b_value) <= ceiling + 1e-9,
+            "a payload that fits must not spread past the ceiling, got {:.3} px/turn",
+            record_core::turn_separation_px(small.b_value),
+        );
+        assert!(
             small.b_value > large.b_value,
-            "a shorter payload should cut a looser groove, got {} then {}",
+            "a longer payload should pack finer, got {} then {}",
             small.b_value,
             large.b_value,
         );
+        assert!(
+            record_core::turn_separation_px(large.b_value)
+                >= record_core::MIN_TURN_SEPARATION_PX,
+            "the fit never packs below the raster floor",
+        );
     }
 
-    /// The span is honoured when the payload fits inside it, and widened —
-    /// never packed tighter — when it does not.
+    /// The pitch is the promise, at both ends. A short payload is not spread
+    /// past the density ceiling, and a long one is not packed below the
+    /// raster floor; the requested span no longer moves either bound.
     #[test]
-    fn the_density_floor_widens_the_span_rather_than_packing_tighter() {
-        for requested in [0.25_f64, 0.33, 0.5] {
+    fn the_density_bounds_clamp_the_pitch_at_both_ends() {
+        for requested in [0.25_f64, 0.5, 1.0] {
             let options = format!(r#"{{"grooveSpanFraction":{requested}}}"#);
 
-            let roomy = render_lp(&rgb_code_block(60_000), &options);
-            assert!(
-                (roomy.groove_span_fraction - requested).abs() < 1e-9,
-                "a payload that fits should get the span it asked for, got {}",
-                roomy.groove_span_fraction,
-            );
+            let roomy = render_lp(&rgb_code_block(30_000), &options);
             assert!(
                 record_core::turn_separation_px(roomy.b_value)
-                    >= record_core::MIN_TURN_SEPARATION_PX,
+                    <= record_core::MAX_PROGRAMME_TURN_SEPARATION_PX + 1e-9,
+                "a short payload spread past the ceiling",
             );
 
-            let crowded = render_lp(&rgb_code_block(240_000), &options);
-            assert!(
-                crowded.groove_span_fraction > requested,
-                "a payload that does not fit should widen past {requested}, got {}",
-                crowded.groove_span_fraction,
-            );
+            let crowded = render_lp(&rgb_code_block(250_000), &options);
             assert!(
                 record_core::turn_separation_px(crowded.b_value)
                     >= record_core::MIN_TURN_SEPARATION_PX,
-                "widening should have cleared the density floor",
+                "a long payload packed below the floor",
+            );
+            assert!(
+                crowded.b_value < roomy.b_value,
+                "the longer payload must cut the finer pitch",
             );
         }
     }
 
-    /// A cut below a full band stops short of the label and leaves the rest of
-    /// the band as deadwax. The span sets that stop radius.
+    /// Two releases of the same length must not cut the same pitch, or they are
+    /// the same record. The pitch variation seeds from the release id; the
+    /// reader reads the pitch back, so the release still decodes.
+    #[test]
+    fn two_releases_of_one_length_cut_different_pitches() {
+        let bytes = rgb_code_block(30_000);
+        let render = |release_id: &str| {
+            let options = format!(r#"{{"headerReleaseId":"{release_id}"}}"#);
+            render_payload_codes_to_png(
+                &bytes,
+                PAYLOAD_CODE_FORMAT_RGB,
+                "lp",
+                100.0,
+                Some(options.as_str()),
+            )
+            .expect("render should succeed")
+            .payload
+        };
+
+        let a = render("rel_01010101010101010101010101");
+        let b = render("rel_01010101010101010101010102");
+
+        assert_ne!(
+            a.b_value, b.b_value,
+            "two releases of one length cut the identical pitch"
+        );
+        assert!(
+            record_core::turn_separation_px(a.b_value)
+                <= record_core::MAX_PROGRAMME_TURN_SEPARATION_PX + 1e-9,
+            "pitch variation must not spread past the ceiling",
+        );
+    }
+
+    /// A short payload stops well above the label; a long one reaches the
+    /// programme floor, which sits below the registered band edge because the
+    /// lead-out shrinks to let the programme take the room. Neither reaches
+    /// the label itself.
     #[test]
     fn a_short_cut_stops_short_of_the_label() {
         let geometry = describe_record_profile("lp").unwrap();
-        let short = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
-        let full = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":1.0}"#);
+        let floor = record_core::programme_floor_radius("lp").unwrap();
+        let short = render_lp(&rgb_code_block(30_000), "{}");
+        let full = render_lp(&rgb_code_block(250_000), "{}");
 
         assert!(
-            short.cut_inner_radius > geometry.payload_inner_radius,
-            "a 0.33 cut should leave deadwax, but ended on {}",
+            f64::from(short.cut_inner_radius) > floor + 1.0,
+            "a short cut should stop well above the lead-out, ended on {}",
             short.cut_inner_radius,
         );
-        assert_eq!(
-            full.cut_inner_radius, geometry.payload_inner_radius,
-            "a 1.0 cut is the historical fit-to-fill and must still reach the label",
+        assert!(
+            (f64::from(full.cut_inner_radius) - floor).abs() <= 1.0,
+            "a long cut should reach the programme floor at {floor:.1}, ended on {}",
+            full.cut_inner_radius,
         );
         assert!(
-            short.b_value < full.b_value,
-            "packing the same payload into less band must tighten the pitch",
+            full.cut_inner_radius < geometry.payload_inner_radius,
+            "the programme may reach past the registered edge, into the lead-out",
+        );
+        assert!(
+            short.groove_span_fraction < full.groove_span_fraction,
+            "a longer payload lays across more of the band",
         );
     }
 
-    /// The deadwax is a feed rate, not a turn count. A lathe's spiral lever
-    /// does not know how far it has to travel, so a programme that stops
-    /// early leaves more turns at the same spacing — never the same turns
-    /// spread thinner. Pin the count to the physical pitch so it can only
-    /// move if the feed does.
+    /// The silent groove is a flat two-pixel feed — one pixel of groove and one
+    /// of daylight — on every profile and at every programme pitch. The lathe's
+    /// physical feed is under two pixels on an album, which would merge the
+    /// turns, so the gap is stated in pixels rather than millimetres.
     #[test]
-    fn the_deadwax_is_cut_at_the_lathes_spiral_feed() {
-        let px_per_mm = record_core::pixels_per_mm("lp").unwrap();
-        let separation = record_core::DEADWAX_PITCH_MM * px_per_mm;
-        assert!(
-            (record_core::deadwax_turn_separation_px("lp").unwrap() - separation).abs() < 1e-9,
-        );
-
-        // The deadwax hands over to the run-out, not to the payload inner
-        // radius: the lead-out now begins above it.
-        let hand_over = |cut: i32| deadwax_inner_radius("lp", Some(cut)).unwrap();
-        let mut previous = f64::INFINITY;
-
-        for span in [0.25_f64, 0.33, 0.50, 0.67, 1.0] {
-            let cut = render_lp(
-                &rgb_code_block(60_000),
-                &format!(r#"{{"grooveSpanFraction":{span}}}"#),
-            );
-            let travel =
-                (cut.cut_inner_radius as f64 - hand_over(cut.cut_inner_radius)).max(0.0);
-
+    fn the_silent_groove_keeps_a_one_pixel_gap() {
+        for profile in ["single45", "lp", "ten", "single45vintage"] {
             assert!(
-                (cut.deadwax_turns - travel / separation).abs() < 1e-6,
-                "span {span} reported {} turns over {travel} px of travel",
-                cut.deadwax_turns,
+                (record_core::silent_groove_turn_separation_px(profile).unwrap() - 2.0).abs()
+                    < 1e-9,
+                "{profile} does not cut its silent groove at a one-pixel gap",
             );
-            // The deadwax is no longer monotonic in the span, and that is the
-            // point of the wide extents: a cut that stops early leaves room,
-            // the lead-out claims it a whole turn at a time, and the deadwax
-            // gets what is left over. A shorter cut can therefore leave less
-            // deadwax than a longer one, because it crossed a rung.
-            let _ = previous;
-            previous = cut.deadwax_turns;
         }
 
-        // The run-out begins below the programme's edge, so a side cut to the
-        // last usable radius still has a little fine groove between the two.
-        // A record has that too; what it does not have is a ladder.
-        assert!(
-            previous < 4.0,
-            "a cut that reaches the label should leave a sliver of deadwax, got {previous} turns"
-        );
+        let separation = record_core::silent_groove_turn_separation_px("lp").unwrap();
+        let hand_over = |cut: i32| silent_groove_inner_radius("lp", Some(cut)).unwrap();
+
+        for bytes in [60_000usize, 200_000, 250_000] {
+            let cut = render_lp(&rgb_code_block(bytes), "{}");
+            let travel = (f64::from(cut.cut_inner_radius) - hand_over(cut.cut_inner_radius)).max(0.0);
+
+            assert!(
+                (cut.silent_groove_turns - travel / separation).abs() < 1e-6,
+                "{bytes} bytes reported {} turns over {travel} px of travel",
+                cut.silent_groove_turns,
+            );
+            assert!(
+                (2.0..=3.0).contains(&cut.silent_groove_turns),
+                "the silent groove is flat at two or three turns, got {}",
+                cut.silent_groove_turns,
+            );
+        }
     }
 
-    /// The deadwax of a dubplate holds tens of turns. One four-minute track
-    /// leaves about 66 mm of travel on a 12", which is about sixty turns at the
-    /// spiral feed. A physical dubplate shows that broad ladder. A count in
-    /// single figures means that the run-out has taken the band and left three
-    /// rings near the label.
+    /// A side that carries one short track stops well short of the label. The
+    /// run-out is elastic and takes the room; the silent groove stays at two or
+    /// three turns, because the sidecar carriers need a band, not a ladder.
     #[test]
-    fn a_dubplate_sized_cut_leaves_a_deadwax_of_the_right_order() {
-        let cut = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
+    fn a_short_cut_spends_its_room_on_the_run_out_not_the_silent_groove() {
+        let cut = render_lp(&rgb_code_block(30_000), "{}");
 
-        // The deadwax of a dubplate held forty to ninety turns, because the
-        // head cut at a millimetre a turn up to the trailer. The lead-out now
-        // widens into that space first, and the deadwax takes the remainder,
-        // so the count is lower. The wide extents produce this result.
         assert!(
-            (5.0..40.0).contains(&cut.deadwax_turns),
-            "expected a dubplate's deadwax after the lead-out took its share, got {} turns",
-            cut.deadwax_turns,
+            (2.0..=3.0).contains(&cut.silent_groove_turns),
+            "the silent groove should stay at two or three turns, got {}",
+            cut.silent_groove_turns,
+        );
+
+        let geometry = record_core::lead_out_geometry_with_extent(
+            "lp",
+            Some(cut.cut_inner_radius),
+            record_core::LeadOutExtent::Fill,
+        )
+        .unwrap();
+        assert!(
+            geometry.turns > record_core::RUN_OUT_MIN_TURNS,
+            "a short cut should open the run-out past its floor, got {} turns",
+            geometry.turns,
         );
     }
 
@@ -3635,10 +3806,10 @@ mod tests {
         }
     }
 
-    /// One groove, rim to label. The deadwax picks the head up exactly
+    /// One groove, rim to label. The silent groove picks the head up exactly
     /// where the programme put it down — same radius, same angle, new feed —
     /// so a traversal walks straight out of the payload and into the
-    /// deadwax. Without the phase carried across it restarts at the top of
+    /// silent groove Without the phase carried across it restarts at the top of
     /// the disc and the join is most of a revolution.
     ///
     /// The test measures against the analytic crossing rather than against a
@@ -3646,7 +3817,7 @@ mod tests {
     /// last pixel above the transition can sit a fifth of a turn from the
     /// crossing of the groove.
     #[test]
-    fn the_deadwax_picks_the_groove_up_where_the_programme_left_it() {
+    fn the_silent_groove_picks_the_groove_up_where_the_programme_left_it() {
         for span in [0.25_f64, 0.33, 0.50] {
             let cut = render_lp(
                 &rgb_code_block(60_000),
@@ -3660,24 +3831,26 @@ mod tests {
                 &SpiralFamily::Archimedean,
                 "lp",
                 cut.cut_inner_radius as f64,
+                false,
             )
             .unwrap();
 
-            let deadwax = build_deadwax_spiral_indices(
+            let silent_groove = build_silent_groove_spiral_indices(
                 RECORD_WIDTH,
                 RECORD_HEIGHT,
                 cut.b_value,
                 &SpiralFamily::Archimedean,
                 "lp",
                 cut.cut_inner_radius,
+                false,
             )
             .unwrap();
-            let first = *deadwax.first().expect("a short cut has a deadwax");
+            let first = *silent_groove.first().expect("a short cut has a silent_groove");
 
             let radius = radius_of(first);
             assert!(
                 (radius - cut.cut_inner_radius as f64).abs() <= 1.5,
-                "span {span}: the deadwax starts at r={radius:.1}, not on the transition at {}",
+                "span {span}: the silent_groove starts at r={radius:.1}, not on the transition at {}",
                 cut.cut_inner_radius,
             );
 
@@ -3686,44 +3859,28 @@ mod tests {
             let drift = angle_difference(expected, actual).to_degrees();
             assert!(
                 drift.abs() <= 2.0,
-                "span {span}: the deadwax starts {drift:.1} degrees off the programme's crossing",
+                "span {span}: the silent_groove starts {drift:.1} degrees off the programme's crossing",
             );
         }
     }
 
-    /// Empty is not the same as absent. The deadwax is a carrier whose
-    /// addresses exist whether or not anything has been written into them,
-    /// and its capacity grows as the programme leaves more room.
+    /// Empty is not the same as absent. The silent groove is a carrier whose
+    /// addresses exist whether or not anything has been written into them, and
+    /// a side that stopped early leaves a wider one than a side that filled up.
     #[test]
-    fn the_deadwax_is_an_addressable_carrier_even_while_it_holds_nothing() {
-        let mut previous = 0usize;
+    fn the_silent_groove_is_an_addressable_carrier_even_while_it_holds_nothing() {
+        let full = render_lp(&rgb_code_block(250_000), "{}");
+        let short = render_lp(&rgb_code_block(30_000), "{}");
 
-        for span in [0.67_f64, 0.50, 0.33, 0.25] {
-            let cut = render_lp(
-                &rgb_code_block(60_000),
-                &format!(r#"{{"grooveSpanFraction":{span}}}"#),
-            );
-
-            // Not monotonic any more: the lead-out claims the room a whole
-            // turn at a time, so crossing a rung hands it a block of what the
-            // deadwax would otherwise have had. What must hold is that the
-            // band is addressable whenever there is anything left to address.
-            let _ = previous;
-            previous = cut.deadwax_pixel_capacity;
-        }
-
-        let full = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":1.0}"#);
-        let short = render_lp(&rgb_code_block(60_000), r#"{"grooveSpanFraction":0.33}"#);
-
-        // Not zero any more, and it should not be. The run-out begins below
-        // the programme's edge, so even a side cut to the last usable radius
-        // has a sliver of fine groove between the two — which is what a record
-        // has. What matters is that it stays a sliver.
         assert!(
-            full.deadwax_pixel_capacity * 4 < short.deadwax_pixel_capacity,
-            "a full cut left {} px of deadwax against a short cut's {}",
-            full.deadwax_pixel_capacity,
-            short.deadwax_pixel_capacity,
+            full.silent_groove_pixel_capacity > 0,
+            "a filled side still offers the two turns the carriers need",
+        );
+        assert!(
+            short.silent_groove_pixel_capacity > full.silent_groove_pixel_capacity,
+            "a short cut left {} px of silent groove against a full cut's {}",
+            short.silent_groove_pixel_capacity,
+            full.silent_groove_pixel_capacity,
         );
     }
 
@@ -4823,12 +4980,12 @@ mod tests {
     }
 
     /// The bands below the programme are grooves on a picture record, so
-    /// they carry the picture's colours: the deadwax in the wheel's own
+    /// they carry the picture's colours: the silent groove in the wheel's own
     /// pockets, the trailer in the one matte tone it was cut with. The
     /// lead-in stays grey, because a reader has to read it before it knows
     /// any of this.
     #[test]
-    fn the_deadwax_and_the_trailer_are_cut_in_colour() {
+    fn the_silent_groove_and_the_trailer_are_cut_in_colour() {
         let slots: Vec<String> = (0..24)
             .map(|slot| format!("#{:02X}{:02X}{:02X}", 60 + slot * 8, 120 + slot * 4, 200 - slot * 6))
             .collect();
@@ -4853,9 +5010,16 @@ mod tests {
         let is_grey = |pixel: [u8; 4]| pixel[0] == pixel[1] && pixel[1] == pixel[2];
 
         let cut = i32::from(output.payload.cut_inner_radius);
-        let trailer =
-            record_core::build_run_out_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp", Some(cut))
-                .unwrap();
+        let trailer = record_core::build_run_out_spiral_indices(
+            RECORD_WIDTH,
+            RECORD_HEIGHT,
+            output.payload.b_value,
+            &record_core::SpiralFamily::Archimedean,
+            "lp",
+            Some(cut),
+            output.descriptor.spiral_clockwise,
+        )
+        .unwrap();
         assert!(!trailer.is_empty(), "the record has no trailer to look at");
         let matte = [0x7A, 0x4B, 0x2A];
         for &index in &trailer {
@@ -4867,26 +5031,27 @@ mod tests {
             );
         }
 
-        // The deadwax takes the wheel, so it is not one colour — but no part
+        // The silent groove takes the wheel, so it is not one colour — but no part
         // of it is the grey ladder either.
-        let deadwax = build_deadwax_spiral_indices(
+        let silent_groove = build_silent_groove_spiral_indices(
             RECORD_WIDTH,
             RECORD_HEIGHT,
             f64::from_bits(output.descriptor.b_value_bits),
             &output.descriptor.spiral_family,
             "lp",
             cut,
+            output.descriptor.spiral_clockwise,
         )
         .unwrap();
-        assert!(!deadwax.is_empty(), "the record has no deadwax to look at");
-        let toned = deadwax
+        assert!(!silent_groove.is_empty(), "the record has no silent_groove to look at");
+        let toned = silent_groove
             .iter()
             .filter(|&&index| !is_grey(read(index)))
             .count();
         assert!(
-            toned * 10 > deadwax.len() * 9,
-            "only {toned} of {} deadwax pixels carry a colour",
-            deadwax.len()
+            toned * 10 > silent_groove.len() * 9,
+            "only {toned} of {} silent_groove pixels carry a colour",
+            silent_groove.len()
         );
 
         // And the bootstrap band is untouched.
@@ -4957,8 +5122,11 @@ mod tests {
         let trailer = record_core::build_run_out_spiral_indices(
             RECORD_WIDTH,
             RECORD_HEIGHT,
+            output.payload.b_value,
+            &record_core::SpiralFamily::Archimedean,
             "lp",
             Some(i32::from(output.payload.cut_inner_radius)),
+            output.descriptor.spiral_clockwise,
         )
         .unwrap();
         let clock = record_descriptor::trailer_clock([0x7A, 0x4B, 0x2A]).unwrap();
@@ -5075,8 +5243,11 @@ mod tests {
         let trailer = record_core::build_run_out_spiral_indices(
             RECORD_WIDTH,
             RECORD_HEIGHT,
+            output.payload.b_value,
+            &record_core::SpiralFamily::Archimedean,
             "lp",
             Some(i32::from(output.payload.cut_inner_radius)),
+            output.descriptor.spiral_clockwise,
         )
         .unwrap();
         let band = record_descriptor::band_clock(&record_descriptor::tone_clock_from_map(clock));
@@ -5482,7 +5653,7 @@ mod tests {
                 &stream,
                 golden.profile,
                 WESTSIDE_DURATION_SECONDS,
-                None,
+                Some(r#"{"labelReference":true}"#),
             )
             .unwrap();
 

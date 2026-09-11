@@ -1079,6 +1079,7 @@ fn build_sidecar_protected_metadata_pixels(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     cut_inner_radius: Option<i32>,
+    clockwise: bool,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -1086,21 +1087,28 @@ fn build_sidecar_protected_metadata_pixels(
     {
         protected[pixel_index] = true;
     }
-    for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?
-    {
+    for pixel_index in record_core::build_run_out_spiral_indices(
+        width,
+        height,
+        b_value,
+        spiral_family,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+    )? {
         protected[pixel_index] = true;
     }
-    // The deadwax carries bytes and is traced apart from the programme's
+    // The silent groove carries bytes and is traced apart from the programme's
     // groove. See the same function in `record_sidecar`.
     if let Some(radius) = cut_inner_radius {
-        for pixel_index in record_core::build_deadwax_spiral_indices(
+        for pixel_index in record_core::build_silent_groove_spiral_indices(
             width,
             height,
             b_value,
             spiral_family,
             record_profile,
             radius,
+            clockwise,
         )? {
             protected[pixel_index] = true;
         }
@@ -1133,7 +1141,7 @@ fn sidecar_pixel_in_carrier_regions(
         && distance > sidecar_label_inner_radius(geometry) as f64
         && distance < label_outer_radius;
     // Every pixel between the grooves: the outer rim, the payload band, the
-    // deadwax, and the clearance above the label. See the same predicate in
+    // silent groove and the clearance above the label. See the same predicate in
     // `record_sidecar`.
     let in_intergroove = regions.intergroove
         && off_groove
@@ -1196,6 +1204,7 @@ fn build_sidecar_carrier_region_pairs(
         b_value,
         spiral_family,
         cut_inner_radius,
+        false,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
@@ -1510,12 +1519,12 @@ struct SilenceSpan {
 /// object-by-object: it reads an `ECDC` header, consumes that object's frame(s)
 /// up to the next `ECDC` magic, advances the global sample offset by the
 /// header's `audio_length`, and repeats. So every entry must be wrapped in its
-/// *own* standalone ECDC header (`al == block_samples`, the per-frame sample
-/// count) and the resulting objects concatenated in programme order. Handing the
-/// decoder a single header followed by raw frames collapses all but the first
-/// frame to zero samples. Header reconstruction is delegated to
-/// `record_core::ecdc::payload_to_standalone_ecdc`; no ECDC framing is rebuilt
-/// here.
+/// *own* standalone ECDC header (its `al` is the entry's logical output length,
+/// the descriptor's `output_samples`) and the resulting objects concatenated in
+/// programme order. Handing the decoder a single header followed by raw frames
+/// collapses all but the first frame to zero samples. Header reconstruction is
+/// delegated to `record_core::ecdc::payload_to_standalone_ecdc`; no ECDC framing
+/// is rebuilt here.
 ///
 /// Returns the concatenated standalone-ECDC payload plus an ordered list of
 /// silence spans describing where, in the decodable (GAP-excluded) ECDC entry

@@ -51,9 +51,9 @@ groove and the disc edge.
 ### The groove, rim to label
 
 The cut is one continuous groove from the rim to the label. The stylus travels
-left to right through every band below. The deadwax takes the groove up at the
+left to right through every band below. The silent groove takes the groove up at the
 exact angle at which the programme leaves it, so a reader passes from the
-payload into the deadwax in one move. The groove ends in a closed ring, which is
+payload into the silent groove in one move. The groove ends in a closed ring, which is
 the locked groove.
 
 ```
@@ -63,7 +63,7 @@ the locked groove.
       │           │              │              │          │         │
       ▼           ▼              ▼              ▼          ▼         ▼
    ┌──────┬────────────┬───────────────┬─────────────┬──────────┬─────────┐
-   │ rim  │  LEAD-IN   │   PROGRAMME   │   DEADWAX   │ RUN-OUT  │  LOCK   │
+   │ rim  │  LEAD-IN   │   PROGRAMME   │   SILENT_GROOVE   │ RUN-OUT  │  LOCK   │
    │      │            │               │             │          │         │
    │ flat │ 2 turns    │ pitch = b     │ 1.00 mm/trn │ fills the│ 1 turn  │
    │ no   │ fixed      │ from the fit  │ true physical│ room     │ closed  │
@@ -89,7 +89,7 @@ exact rung. The path from cutter to reader is lossless, so a pixel off the
 ladder is a corrupted pixel, and the decoder refuses it.
 
 The lead-in is the one grey band. The ladder is the encoding of the bootstrap.
-The deadwax and the trailer are grooves on a picture record, and they are cut in
+The silent groove and the trailer are grooves on a picture record, and they are cut in
 the colours of the picture. The stream fills the lead-in first, to its capacity
 of 2 428 bytes on an LP. A toned record with its wheel, title, artist, label,
 catalogue number and URL weighs 282 bytes. The stream crosses into the trailer
@@ -106,22 +106,22 @@ record of that vintage.
 from the rim against a nominal span and stops at `cut_inner_radius`, which
 the prefix carries.
 
-**Deadwax** — from the end of the programme in to the outermost ring of the
-run-out. The deadwax is cut at a true physical 1 mm per turn, so it is the one
+**Silent groove** — from the end of the programme in to the outermost ring of the
+run-out. The silent groove is cut at a true physical 1 mm per turn, so it is the one
 band rendered at life size. It is a header of at most **6 turns**. The head
 feeds at the spiral rate of the lathe, and the extent of the band is unknown to
 it, so this limit keeps a short side from filling the annulus with a
 one-millimetre ladder. The run-out takes the space below the header.
 
-The deadwax is a carrier: an ordered, addressable pixel sequence, reproducible
+The silent groove is a carrier: an ordered, addressable pixel sequence, reproducible
 from the prefix alone. It is cut in the tone of the record. Each pixel takes the
 colour of the wheel pocket it passes through, which is the colour that the
 programme above it is cut in. The change of feed is therefore a change of pitch
-at one colour. `SEGMENT_DEADWAX_EXTENT` (33) declares the band, and the format
+at one colour. `SEGMENT_SILENT_GROOVE_EXTENT` (33) declares the band, and the format
 offers it to sidecars, which write it as a groove. A record that offers no
 palette for the band declares no extent.
 
-**Run-out** — widely spaced rings from the lock up to the deadwax header. The
+**Run-out** — widely spaced rings from the lock up to the silent groove header. The
 gaps open outward from a fixed 3.2 mm at the inside, each ring standing 1.5
 times further out than the one within, until they reach the lathe's own coarse
 feed of 5 mm. Every ring above that sits at the feed. Unclamped the taper is
@@ -136,7 +136,7 @@ one ring. The encoder and the decoder compute the same band from
 two sides compute one answer.
 
 The gaps absorb the remainder that a whole number of rings leaves. The band
-begins at the ceiling, and the ladder spans the whole descent. Deadwax at the
+begins at the ceiling, and the ladder spans the whole descent. Silent groove at the
 fine feed fills the space above the band, so a band that stops one gap short
 costs five more turns of ladder.
 
@@ -188,14 +188,14 @@ The exact radii, in rendered pixels on the 576 x 576 canvas:
 | Dink knockout radius | 58 | 58 | none | none |
 | Lead-in turns | 2 | 2 | 2 | 2 |
 | Locked groove radius | 162.5 | 149.5 | 122.0 | 101.7 |
-| Deadwax pitch, px/turn | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
+| Silent groove pitch, px/turn | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
 | Pixels per mm | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
 
-The deadwax pitch equals the pixels-per-mm figure, because the band is cut at
+The silent groove pitch equals the pixels-per-mm figure, because the band is cut at
 1.00 mm per turn by definition. The run-out gaps are also physical: 3.2 mm at
 the inside and 5 mm at the feed on every profile. The four profiles render to
 one canvas at four scales, so a gap fixed in pixels would give four distances.
-The deadwax header is 6 turns, which is 6 mm on every profile for the same
+The silent groove header is 6 turns, which is 6 mm on every profile for the same
 reason.
 
 ### Canvas mapping

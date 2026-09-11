@@ -57,9 +57,12 @@ fn main() -> Result<()> {
     let (indices, lock_start) = record_core::build_lead_out_indices_with_extent(
         CANVAS,
         CANVAS,
+        record_core::silent_groove_spiral_pitch(&profile)?,
+        &record_core::SpiralFamily::Archimedean,
         &profile,
         cut_inner_radius,
         extent,
+        false,
     )?;
 
     let mut data = vec![0_u8; CANVAS * CANVAS * 4];
@@ -90,10 +93,10 @@ fn main() -> Result<()> {
 
     if std::env::var("RUNIN").as_deref() == Ok("1") {
         // The lead-out does not start, it continues: above the entry radius
-        // the deadwax has been running at the lathe's own feed since the
+        // the silent groove has been running at the lathe's own feed since the
         // programme stopped. Drawn here for half a turn so the outermost line
         // arrives from somewhere instead of terminating in mid-air.
-        let feed = record_core::deadwax_spiral_pitch(&profile)?;
+        let feed = record_core::silent_groove_spiral_pitch(&profile)?;
         let mut back = 0.0_f64;
         while back < PI {
             let radius = geometry.entry_radius + feed * back;

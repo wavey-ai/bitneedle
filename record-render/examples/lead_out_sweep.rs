@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     );
     println!(
         "{:>6} {:>9} {:>9} {:>7} {:>11} {:>9} {:>9}",
-        "span", "cut at", "lead-out", "turns", "extent", "entry", "deadwax"
+        "span", "cut at", "lead-out", "turns", "extent", "entry", "silent_groove"
     );
 
     for span in [1.0_f64, 0.67, 0.5, 0.33, 0.25, 0.15] {
@@ -94,7 +94,7 @@ fn main() -> Result<()> {
             (lead_out.entry_radius - geometry.label_radius as f64) / scale,
             lead_out.turns,
             lead_out.entry_radius,
-            rendered.payload.deadwax_turns,
+            rendered.payload.silent_groove_turns,
         );
     }
 

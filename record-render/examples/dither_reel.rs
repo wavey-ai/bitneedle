@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             _ => rng.bits() & 0x001F_FFFF_FFFF_FFFF,
         };
         // The control: a strict Archimedean spiral and nothing else. No
-        // banding, no dither, no lead-in or run-out spiral, no deadwax, no
+        // banding, no dither, no lead-in or run-out spiral, no silent groove no
         // label — just the groove at one pitch, identical on every frame.
         // If frames of this differ, the difference is in the pipeline rather
         // than in the cut, and every other reel is measuring noise.
@@ -222,7 +222,7 @@ fn main() -> Result<()> {
             )?;
 
         // Clip to the end of the programme. The mask covers the whole band,
-        // and a real cut stops and leaves the rest as deadwax.
+        // and a real cut stops and leaves the rest as silent groove
         let centre = SIDE as f64 / 2.0;
         let mut rgba = vec![0u8; SIDE * SIDE * 4];
         let mut ink = 0usize;

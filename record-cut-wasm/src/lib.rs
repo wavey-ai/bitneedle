@@ -3172,12 +3172,14 @@ mod tests {
         // Two ECDC objects, one per frame.
         assert_eq!(&expected[..4], b"ECDC");
         assert_eq!(expected.windows(4).filter(|w| *w == b"ECDC").count(), 2);
-        // Each object's per-frame audio length is the descriptor's block_samples.
+        // Each object's `al` is the descriptor's logical output length, not the
+        // model block length: one entry is one independently decodable block,
+        // and the decoder reads the chunk count back from `al`.
         let (header_json, _body) = record_core::ecdc::split_standalone_ecdc(&expected).unwrap();
         let header: serde_json::Value = serde_json::from_slice(header_json).unwrap();
         assert_eq!(
             header.get("al").and_then(serde_json::Value::as_u64),
-            Some(64_960)
+            Some(64_000)
         );
     }
 }

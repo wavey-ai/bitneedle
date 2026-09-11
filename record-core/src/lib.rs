@@ -43,9 +43,35 @@ pub const LEAD_IN_TURNS: f64 = 2.0;
 /// [`MIN_LABEL_CLEARANCE_PX`] is the one use of this constant.
 pub const RUN_OUT_TURNS: f64 = 2.0;
 
+/// How many rings the run-out lays across the descent it resolves.
+///
+/// The geometry picks the descent from the room the cut left; this factor
+/// decides how many wide rings are drawn across it. Two doubles the ring count
+/// without moving the entry or the lock, so the run-out keeps its band and the
+/// rings sit closer together. The inner gap still clears
+/// [`MIN_TURN_SEPARATION_PX`], so the ladder stays legible.
+pub const RUN_OUT_RING_FACTOR: f64 = 2.0;
+
+/// The widest a programme turn may sit, centre to centre, in pixels.
+///
+/// The floor ([`MIN_TURN_SEPARATION_PX`]) is where turns start to merge; this is
+/// the other end, where a short programme would otherwise be spread so thin
+/// that it reads as a handful of rings rather than a groove. A programme that
+/// would exceed it stops at this pitch and leaves the room it did not use to
+/// the silent groove and the run-out, so the cut keeps a realistic look instead of
+/// ballooning to fill the side.
+pub const MAX_PROGRAMME_TURN_SEPARATION_PX: f64 = 2.7;
+
+/// The closest the programme's turns may sit, centre to centre, in pixels.
+///
+/// One pixel: the thin groove is allowed to abut the turn beside it. The raster
+/// cannot resolve two turns closer than this, so it is the hard floor of the
+/// fit — a programme that cannot be held above it does not fit the side.
+pub const MIN_PROGRAMME_TURN_SEPARATION_PX: f64 = 1.0;
+
 /// How much of the payload band a cut may use, measured inward from
 /// `payload_outer_radius`. A lathe cuts at a set pitch from the rim and stops
-/// at the end of the programme. The band below that point stays deadwax. `1.0`
+/// at the end of the programme. The band below that point stays silent groove `1.0`
 /// restores the historical fit-to-fill cut, whose spiral terminated on
 /// `payload_inner_radius` at every payload size.
 pub const DEFAULT_GROOVE_SPAN_FRACTION: f64 = 0.33;
@@ -69,14 +95,13 @@ pub const MIN_TURN_SEPARATION_PX: f64 = 2.0;
 /// The radial distance at which the run-out's descent has merged into the
 /// locked groove, in pixels.
 ///
-/// The descent ends above the lock radius. A groove that keeps travelling
-/// once it is inside this distance draws a second row against the lock
-/// circle, and the two rows read as one groove two pixels wide. The distance
-/// is [`MIN_TURN_SEPARATION_PX`] for the reason given there: two pixels is
-/// what the raster resolves, and a descent that closes to less than that
-/// lands on the pixels the lock groove draws. The locked groove closes the
-/// ring from this radius.
-pub const LOCK_MERGE_PX: f64 = MIN_TURN_SEPARATION_PX;
+/// The descent ends one pixel above the lock radius, so its last row and the
+/// lock ring share an edge or a corner: the groove is continuous into the lock
+/// rather than arriving a pixel short of it. The distance is one pixel because
+/// that is what keeps the two rows touching on the grid while still leaving the
+/// lock as its own ring; a larger distance opens a gap the eye reads as a break
+/// in the groove.
+pub const LOCK_MERGE_PX: f64 = 1.0;
 
 /// The narrowest label clearance that still cuts a readable run-out, in
 /// pixels: [`RUN_OUT_TURNS`] turns at [`MIN_TURN_SEPARATION_PX`] apart.
@@ -95,22 +120,13 @@ pub const LOCK_MERGE_PX: f64 = MIN_TURN_SEPARATION_PX;
 pub const MIN_LABEL_CLEARANCE_PX: i32 = (RUN_OUT_TURNS * MIN_TURN_SEPARATION_PX) as i32;
 
 
-/// The pitch a cutting lathe feeds the head at through the deadwax, in
-/// millimetres per turn.
+/// The lathe's fine feed through the silent groove, in millimetres per turn.
 ///
-/// This value is the feed *rate* of the spiral lever. The travel distance is
-/// unknown to the head, so a programme that ends early gives more turns at the
-/// same spacing. Music sits at about 0.1 mm to 0.2 mm per turn, and the spiral
-/// feed sits at about 1 mm. A deadwax is therefore five to ten times coarser
-/// than the programme above it.
-///
-/// The turn counts that follow match a physical disc. A 12" LP whose programme
-/// ends near 127 mm diameter, with its lock groove at 107 mm, has 10 mm of
-/// travel left, which is about ten turns. A dubplate that carries one
-/// four-minute track ends near 239 mm and has 66 mm left, which is about sixty
-/// turns. Sixty turns is the broad ladder of concentric lines that a spinning
-/// dubplate shows.
-pub const DEADWAX_PITCH_MM: f64 = 1.0;
+/// The rendered band does not use this value. The silent groove is cut to a
+/// flat one-pixel gap on every profile (`silent_groove_turn_separation_px`),
+/// because a physical feed is under two pixels on a 12" and would merge the
+/// turns. The value stays as the physical reference the band approximates.
+pub const SILENT_GROOVE_PITCH_MM: f64 = 1.0;
 /// The width of the perforated ring that holds a 45's knockout centre in
 /// place, in millimetres, measured radially.
 ///
@@ -124,21 +140,23 @@ pub const DINK_PERFORATION_MM: f64 = 1.5;
 
 /// The label edge to the locked groove, in millimetres.
 ///
-/// A 12" LP carries its label at 100 mm and its lock groove at 107 mm, so the
-/// band between them is 3.5 mm. That band holds the matrix marks and the
-/// stamper marks of a pressed record, and it keeps the last groove clear of the
-/// paper.
-pub const LOCK_GROOVE_CLEARANCE_MM: f64 = 3.5;
+/// One millimetre: the lock sits just outside the label, close enough to read
+/// as the end of the groove and far enough to leave a hair of vinyl. The
+/// plant's matrix and stamper marks live in the run-out land itself, between
+/// its turns, so they need no reserved band here — this is only the clearance
+/// that keeps the groove off the paper.
+pub const LOCK_GROOVE_CLEARANCE_MM: f64 = 1.0;
 
-/// Centre to centre between run-out turns, in millimetres.
+/// Centre to centre between run-out turns, in rendered pixels.
 ///
-/// This value is five millimetres, against the one millimetre that the spiral
-/// lever of a lathe feeds at ([`DEADWAX_PITCH_MM`]). A physical deadwax is a
-/// dense ladder, because the head cuts the whole way in. A picture record
-/// carries artwork under that band, and every turn across it draws a line over
-/// the picture. Five millimetres draws the few coarse rings that a short single
-/// shows, and it leaves the rest of the annulus clear.
-pub const RUN_OUT_TURN_SEPARATION_MM: f64 = 5.0;
+/// Stated in pixels rather than millimetres so every profile draws the same
+/// ring pattern. The 7", the 10" and the 12" render to one canvas at three
+/// scales, and a physical feed draws the 12" rings at about 60% of the 7" ring
+/// spacing — a dense band that reads as fat deadwax rather than as a lead-out.
+/// The run-out is the elastic band: it opens toward this spacing when the
+/// programme stops early, and closes toward [`MIN_TURN_SEPARATION_PX`] when the
+/// side is full.
+pub const RUN_OUT_TURN_SEPARATION_PX: f64 = 16.0;
 
 /// How much wider each run-out turn sits than the one inside it.
 ///
@@ -147,13 +165,13 @@ pub const RUN_OUT_TURN_SEPARATION_MM: f64 = 5.0;
 /// inside it, so the band opens outward.
 ///
 /// One and a half, not two. The run-out is the last few wide rings before the
-/// lock, and above it the deadwax is still cutting fine at
-/// [`DEADWAX_PITCH_MM`] — four bands, rim to label: programme, deadwax,
+/// lock, and above it the silent groove is still cutting fine at
+/// [`SILENT_GROOVE_PITCH_MM`] — four bands, rim to label: programme, silent groove
 /// run-out, lock. At two the fourth ring alone is 25 mm and the run-out eats
-/// the deadwax whole, leaving an album with one and a half turns of fine
+/// the silent groove whole, leaving an album with one and a half turns of fine
 /// groove where it should have twenty. At one and a half a four-ring band
 /// spans 26 mm rather than 48, the rings still open out visibly, and the
-/// deadwax keeps the room it is supposed to have.
+/// silent groove keeps the room it is supposed to have.
 ///
 /// This format is a picture record. A wide outer turn draws a lead-out of a few
 /// separate rings. A constant feed draws a ladder across the artwork. The taper
@@ -168,38 +186,41 @@ pub const RUN_OUT_TURN_SEPARATION_MM: f64 = 5.0;
 /// at pitch up to the lock groove, and then it switches the feed off.
 pub const RUN_OUT_TAPER: f64 = 1.5;
 
-/// The most turns of fine deadwax a cut leaves behind it.
+/// The most turns of fine silent groove a cut leaves behind it.
 ///
-/// [`DEADWAX_PITCH_MM`] is a feed rate, so the turn count follows from the
+/// [`SILENT_GROOVE_PITCH_MM`] is a feed rate, so the turn count follows from the
 /// remaining travel. A side that carries one short track left forty turns at one
 /// millimetre apart across the artwork. The run-out takes the rest of the travel
-/// at [`RUN_OUT_TURN_SEPARATION_MM`].
+/// at [`RUN_OUT_TURN_SEPARATION_PX`].
 ///
 /// This constant is a turn count. Six turns is 6 mm on every profile.
-pub const DEADWAX_MAX_TURNS: f64 = 6.0;
+pub const SILENT_GROOVE_MAX_TURNS: f64 = 6.0;
 
-/// The gap between the innermost run-out turn and the lock groove, in
-/// millimetres.
+/// How many turns of silent groove a filled lead-out keeps for the sidecar carriers.
 ///
-/// The unit is millimetres. The three profiles render to one canvas at three
-/// scales, at 3.29 px/mm on a 7" and 1.90 px/mm on a 12". A gap fixed in pixels
-/// is therefore a different distance on each record: six pixels is 1.8 mm on a
-/// single and 3.2 mm on an album, which draws the lead-out of the 7" tighter
-/// than the lead-out of the 12". A groove spacing is a physical measurement, and
-/// the format states it as one.
+/// The count is flat at every programme pitch. A record that fills its side
+/// still leaves two turns behind the programme: the silent groove is a carrier, and a
+/// cut with none has nowhere for sidecar bytes. A cut that stopped early has
+/// room for a third turn; [`FILL_SILENT_GROOVE_MAX_TURNS`] is that ceiling, and the
+/// programme pitch does not choose between the two.
+pub const FILL_SILENT_GROOVE_MIN_TURNS: f64 = 2.0;
+
+/// The most silent groove a filled lead-out keeps.
 ///
-/// The value converts the six pixels that the coarsest profile needs, which is
-/// three times [`MIN_TURN_SEPARATION_PX`] at `lp` scale. Below that floor, two
-/// turns merge on the grid. This gap is the tightest gap in the band, so it sets
-/// the legibility of the band.
+/// A cut that stopped well short of the label has room to spare, and a third
+/// turn of fine groove costs the picture almost nothing. The count never rises
+/// above this: every further turn is a line across the artwork, and the run-out
+/// is the band that is meant to spend the surplus.
+pub const FILL_SILENT_GROOVE_MAX_TURNS: f64 = 3.0;
+
+/// The gap between the innermost run-out turn and the lock groove, in pixels.
 ///
-/// A fixed inner gap makes a wider extent wider. The band divided a fixed
-/// descent among its turns, so each added turn narrowed the turns below it. Four
-/// turns closed the last gap to 1.3 mm, and the extents traded legibility for
-/// ring count. The innermost gap now holds its value, and each turn outside it
-/// is [`RUN_OUT_TAPER`] times wider than the turn within it. A wider extent
-/// therefore grows outward into the space that the programme leaves.
-pub const RUN_OUT_INNER_GAP_MM: f64 = 3.2;
+/// Stated in pixels so the run-out is the same band on every profile. The
+/// value holds the innermost turn clear of the lock; each turn outside it is
+/// [`RUN_OUT_TAPER`] times wider, up to [`RUN_OUT_TURN_SEPARATION_PX`], so a
+/// wider extent grows outward into the space the programme leaves rather than
+/// squeezing the turns below it.
+pub const RUN_OUT_INNER_GAP_PX: f64 = 10.0;
 
 /// What the lead-out carries, in bytes, on every record ever pressed.
 ///
@@ -215,7 +236,7 @@ pub const RUN_OUT_INNER_GAP_MM: f64 = 3.2;
 /// The format therefore declares the capacity as 512 bytes. Every profile clears
 /// that figure, and the tightest profile, `lp`, holds 746 bytes. Each profile
 /// cuts the space beyond 512 bytes and leaves it unaddressed, as a lathe cuts a
-/// wider deadwax than the programme needs. A writer can therefore use 512 bytes
+/// wider silent groove than the programme needs. A writer can therefore use 512 bytes
 /// on every profile.
 ///
 /// The margin is deliberate. Pixel counts follow from rounding a spiral onto an
@@ -985,7 +1006,7 @@ fn record_profile_def(record_profile: &str) -> Result<RecordProfileDef> {
         /// A 45's lead-out is cranked to reach the lock in two or three
         /// revolutions however much room it has, so it is stated as a count
         /// and the gap falls out of the room. An album's is left running at
-        /// [`DEADWAX_PITCH_MM`] and comes out as dozens of fine turns, which
+        /// [`SILENT_GROOVE_PITCH_MM`] and comes out as dozens of fine turns, which
         /// is the same band arrived at from the other end.
         /// The width of the perforated ring holding the knockout centre in,
         /// measured radially from the cutout's edge to the dink's. `None`
@@ -1200,17 +1221,38 @@ fn payload_inner_radius(g: &RecordGeometry) -> i32 {
     g.label_radius + g.label_clearance
 }
 
+/// The radius of the locked groove: the label edge plus the clearance.
+///
+/// The one place the lock radius is derived. The lead-out geometry and the
+/// programme floor both measure from it, so a reader that has read the prefix
+/// reproduces the same circle.
+pub fn lock_radius_px(record_profile: &str) -> Result<f64> {
+    let g = resolve_record_geometry(record_profile, None, None, None)?;
+    Ok(g.label_radius as f64 + LOCK_GROOVE_CLEARANCE_MM * pixels_per_mm(record_profile)?)
+}
+
 /// The radius the programme's groove may not cut below.
 ///
-/// The payload inner radius is the band edge the format registers and it
-/// stays what it is. The programme stops above it, because the run-out now
-/// begins above it: the lead-out's outermost turn is the first pixel the cut
-/// is not allowed to take, and two grooves cannot share pixels.
-pub fn programme_inner_radius(record_profile: &str) -> Result<i32> {
-    let g = resolve_record_geometry(record_profile, None, None, None)?;
-    let entry = lead_out_geometry(record_profile, None)?.entry_radius;
+/// This is the top of the lead-out a filled side keeps when the programme needs
+/// the whole side: the lock, [`RUN_OUT_MIN_TURNS`] turns of run-out before it,
+/// and the two silent-groove turns the sidecar carriers need. A side that
+/// reaches this floor has left exactly that lead-out and no more, so the
+/// run-out has closed to its two tightest rings and the silent groove is two
+/// turns. The reserve follows from the profile's own scale, so a reader derives
+/// the same floor from the descriptor without the fit's pitch.
+pub fn programme_floor_radius(record_profile: &str) -> Result<f64> {
+    let lock = lock_radius_px(record_profile)?;
+    let run_out_min = fill_run_out_min_descent();
 
-    Ok(payload_inner_radius(&g).max(entry.ceil() as i32))
+    Ok(lock
+        + run_out_min
+        + FILL_SILENT_GROOVE_MIN_TURNS * silent_groove_turn_separation_px(record_profile)?)
+}
+
+/// The radius the programme's groove may not cut below, for a resolved
+/// geometry. See [`programme_floor_radius`].
+pub fn programme_inner_radius(record_profile: &str) -> Result<i32> {
+    Ok(programme_floor_radius(record_profile)?.ceil() as i32)
 }
 
 pub fn payload_outer_radius_from_geometry(g: &RecordProfileGeometry) -> i32 {
@@ -1281,20 +1323,18 @@ pub fn pixels_per_mm(record_profile: &str) -> Result<f64> {
     Ok(record_profile_def(record_profile)?.pixels_per_mm)
 }
 
-/// Centre-to-centre distance between deadwax turns, in rendered pixels.
+/// Centre-to-centre distance between silent groove turns, in rendered pixels.
 ///
-/// Derived from [`DEADWAX_PITCH_MM`] and the profile's own scale, so the
-/// deadwax is cut at true physical pitch even though the programme groove
-/// cannot be — a real music groove is a third of a pixel at this raster, and
-/// the payload spiral is some fifteen times coarser than one. The deadwax
-/// is the one band of the record rendered at life size.
-pub fn deadwax_turn_separation_px(record_profile: &str) -> Result<f64> {
-    Ok(DEADWAX_PITCH_MM * pixels_per_mm(record_profile)?)
+/// Two pixels: one pixel of groove and one pixel of daylight between turns, so
+/// the fine band reads as separate rings rather than one grey wall. One pixel
+/// centre-to-centre would put the turns on shared pixels and merge them.
+pub fn silent_groove_turn_separation_px(_record_profile: &str) -> Result<f64> {
+    Ok(2.0)
 }
 
-/// The deadwax's pitch as a spiral `b`, for [`trace_record_spiral`].
-pub fn deadwax_spiral_pitch(record_profile: &str) -> Result<f64> {
-    Ok((deadwax_turn_separation_px(record_profile)? / (2.0 * PI)).max(MIN_B_VALUE))
+/// The silent groove's pitch as a spiral `b`, for [`trace_record_spiral`].
+pub fn silent_groove_spiral_pitch(record_profile: &str) -> Result<f64> {
+    Ok((silent_groove_turn_separation_px(record_profile)? / (2.0 * PI)).max(MIN_B_VALUE))
 }
 
 pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {
@@ -1312,15 +1352,23 @@ pub fn validate_groove_span_fraction(span_fraction: f64) -> Result<f64> {
 /// A decoder that rebuilds the full-band mask from the `b_value` of the
 /// descriptor therefore reads an identical prefix. A cut whose payload exceeds
 /// its nominal span runs on inward, as a long side runs into the run-out.
+///
+/// The inner end is the programme floor, not the registered payload inner
+/// radius: a side that needs the whole band is allowed to reach down to the
+/// lead-out it keeps, and the run-out shrinks to a sliver rather than the
+/// programme stopping a band-width short of the label.
 pub fn cut_inner_radius_from_geometry(
     g: &RecordProfileGeometry,
     span_fraction: f64,
 ) -> Result<i32> {
     let fraction = validate_groove_span_fraction(span_fraction)?;
     let outer = g.payload_outer_radius as f64;
-    let span = (outer - g.payload_inner_radius as f64).max(0.0);
+    let inner = programme_floor_radius(&g.record_profile)?
+        .min(g.payload_inner_radius as f64)
+        .max(1.0);
+    let span = (outer - inner).max(0.0);
 
-    Ok(js_round(outer - span * fraction).max(g.payload_inner_radius))
+    Ok(js_round(outer - span * fraction).max(inner.ceil() as i32))
 }
 
 /// Centre-to-centre distance between adjacent turns of an Archimedean cut,
@@ -1398,9 +1446,8 @@ pub fn lead_in_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
 
 /// The run-out's spiral `b`, which is now the lead-out's feed rather than a
 /// clearance divided by a turn count.
-pub fn run_out_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
-    Ok((RUN_OUT_TURN_SEPARATION_MM * pixels_per_mm(record_profile)? / (2.0 * PI))
-        .max(MIN_B_VALUE))
+pub fn run_out_spiral_pitch_for_profile(_record_profile: &str) -> Result<f64> {
+    Ok((RUN_OUT_TURN_SEPARATION_PX / (2.0 * PI)).max(MIN_B_VALUE))
 }
 
 #[allow(dead_code)]
@@ -1468,56 +1515,206 @@ pub fn trace_record_spiral_with_family(
     let inner = trace_inner_radius.max(0.0);
     let mut occupied = vec![0u8; width * height];
     let mut ordered = Vec::new();
-    let mut theta = 0.0;
-    let mut angle = start_angle;
-    let mut radius = outer;
 
     let vari = vari_pitch_params(family, ((outer - inner) / resolved_pitch).max(0.0));
 
     // The vari-pitch radius is the running integral of the local pitch —
     // shaped waves have no closed form — accumulated with the same steps
-    // on encode and decode, so the two integrate identically.
-    let mut theta_effective = 0.0_f64;
-
-    while radius >= inner {
-        let draw_radius = match &vari {
-            None => radius,
-            Some(params) => radius + params.dither(theta),
-        };
-        let x = js_round(center_x + draw_radius * angle.cos());
-        let y = js_round(center_y - draw_radius * angle.sin());
-
-        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-            let i = y as usize * width + x as usize;
-
-            if occupied[i] == 0 {
-                occupied[i] = 1;
-                ordered.push(i);
-            }
-        }
-
-        let (local_pitch, factor) = match &vari {
-            None => (resolved_pitch, 1.0),
+    // on encode and decode, so the two integrate identically. A constant
+    // profile is the Archimedean arm, preserved bit for bit.
+    trace_groove_into(
+        &mut occupied,
+        &mut ordered,
+        width,
+        height,
+        center_x,
+        center_y,
+        start_angle,
+        clockwise,
+        outer,
+        inner,
+        pixel_gap,
+        resolved_pitch,
+        |theta, _radius| match &vari {
+            None => GrooveStep {
+                draw_offset: 0.0,
+                local_pitch: resolved_pitch,
+                factor: 1.0,
+            },
             Some(params) => {
                 let factor = params.pitch_factor(theta);
-                (resolved_pitch * factor, factor)
+                GrooveStep {
+                    draw_offset: params.dither(theta),
+                    local_pitch: resolved_pitch * factor,
+                    factor,
+                }
             }
-        };
+        },
+    );
+
+    Ok((occupied, ordered, center_x, center_y))
+}
+
+/// One step of a groove walk, as the profile at `(theta, radius)` describes it.
+struct GrooveStep {
+    /// Added to the drawn radius only, never to the descent. The vari-pitch
+    /// arm uses it for its shaped wave.
+    draw_offset: f64,
+    /// Local pitch in pixels per radian, used to size the step.
+    local_pitch: f64,
+    /// Local pitch relative to the walk's base pitch. The descent integrates
+    /// this, so `radius = start_radius - base_pitch * integral(factor)`.
+    factor: f64,
+}
+
+/// Emit one pixel of a groove walk, first occurrence winning.
+///
+/// The walk emits every pixel its samples round to; [`join_groove_chain`]
+/// closes the staircase afterwards, once the neighbours on both sides are
+/// known, so the path can never be left broken.
+fn emit_groove_pixel(
+    occupied: &mut [u8],
+    ordered: &mut Vec<usize>,
+    width: usize,
+    height: usize,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    angle: f64,
+) {
+    let x = js_round(center_x + radius * angle.cos());
+    let y = js_round(center_y - radius * angle.sin());
+
+    if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+        let index = y as usize * width + x as usize;
+        if occupied[index] == 0 {
+            occupied[index] = 1;
+            ordered.push(index);
+        }
+    }
+}
+
+/// Join a groove chain: remove a pixel only when the pixels on both sides of it
+/// already touch.
+///
+/// The walk emits every pixel its samples round to, which along a turn draws a
+/// staircase — `(x,y) → (x+1,y) → (x+1,y+1)`. The middle pixel is width the
+/// groove does not need: the two it sits between are diagonal neighbours, which
+/// count as a continuous path, so it is dropped and its place becomes the next
+/// step along the groove. This is not a mode; it is the shape of the groove.
+///
+/// The test is local to the chain — a pixel is only removed when its neighbours
+/// are already adjacent — so it can never open a gap. Only `ordered[start..]` is
+/// touched, so a caller's earlier boundaries stay valid.
+fn join_groove_chain(ordered: &mut Vec<usize>, width: usize, start: usize) {
+    fn adjacent(left: usize, right: usize, width: usize) -> bool {
+        let lx = (left % width) as i64;
+        let ly = (left / width) as i64;
+        let rx = (right % width) as i64;
+        let ry = (right / width) as i64;
+        (lx - rx).abs() <= 1 && (ly - ry).abs() <= 1
+    }
+
+    let mut kept: Vec<usize> = Vec::with_capacity(ordered.len() - start + 1);
+    let protect = if start > 0 {
+        kept.push(ordered[start - 1]);
+        1
+    } else {
+        0
+    };
+
+    for &pixel in &ordered[start..] {
+        kept.push(pixel);
+        loop {
+            let count = kept.len();
+            if count < 3 {
+                break;
+            }
+            let middle = count - 2;
+            if middle < protect {
+                break;
+            }
+            if adjacent(kept[count - 3], kept[count - 1], width) {
+                kept.remove(middle);
+            } else {
+                break;
+            }
+        }
+    }
+
+    ordered.truncate(start - protect);
+    ordered.extend_from_slice(&kept);
+}
+
+/// The one groove walk every spiral and band is traced by.
+///
+/// The walk carries an accumulated angle `theta`, its pitch integral
+/// `theta_effective`, a radius and an angle. At each step it asks `profile`
+/// for the local pitch at the current `(theta, radius)`, emits the pixel, and
+/// advances by the common step of Section 6.1. The radius is always
+/// `start_radius - base_pitch * theta_effective`, so a constant profile gives
+/// the Archimedean spiral bit for bit and a varying one gives the local pitch
+/// it asks for without a second stepping rule.
+///
+/// The caller owns `occupied` and `ordered`, so consecutive bands continue one
+/// another: a programme, a silent groove and a run-out are one groove seen at three
+/// pitches.
+#[allow(clippy::too_many_arguments)]
+fn trace_groove_into<P>(
+    occupied: &mut [u8],
+    ordered: &mut Vec<usize>,
+    width: usize,
+    height: usize,
+    center_x: f64,
+    center_y: f64,
+    start_angle: f64,
+    clockwise: bool,
+    start_radius: f64,
+    stop_radius: f64,
+    pixel_gap: f64,
+    base_pitch: f64,
+    mut profile: P,
+) -> (f64, f64)
+where
+    P: FnMut(f64, f64) -> GrooveStep,
+{
+    let mut theta = 0.0_f64;
+    let mut theta_effective = 0.0_f64;
+    let mut radius = start_radius;
+    let mut angle = start_angle;
+    let start = ordered.len();
+
+    while radius >= stop_radius {
+        let GrooveStep {
+            draw_offset,
+            local_pitch,
+            factor,
+        } = profile(theta, radius);
+        let draw_radius = radius + draw_offset;
+
+        emit_groove_pixel(
+            occupied,
+            ordered,
+            width,
+            height,
+            center_x,
+            center_y,
+            draw_radius,
+            angle,
+        );
+
         let step = pixel_gap
             / (radius * radius + local_pitch * local_pitch)
                 .sqrt()
                 .max(1e-6);
-
         theta += step;
         theta_effective += factor * step;
         angle = start_angle + if clockwise { -theta } else { theta };
-        radius = match &vari {
-            None => outer - resolved_pitch * theta,
-            Some(_) => outer - resolved_pitch * theta_effective,
-        };
+        radius = start_radius - base_pitch * theta_effective;
     }
 
-    Ok((occupied, ordered, center_x, center_y))
+    join_groove_chain(ordered, width, start);
+    (angle, radius)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1534,39 +1731,34 @@ pub fn build_band_spiral_indices(
 ) -> Result<Vec<usize>> {
     let _ = resolve_record_geometry(record_profile, label_radius, label_clearance, outer_radius)?;
 
-    let (occupied, traced, cx, cy) = trace_record_spiral(
+    let (_, traced, cx, cy) = trace_record_spiral(
         width,
         height,
         band_pitch,
         None,
         DEFAULT_START_ANGLE,
         1.0,
-        true,
+        false,
         band_outer_radius,
         band_inner_radius,
     )?;
 
-    Ok(traced
-        .into_iter()
-        .filter(|&i| {
-            if occupied[i] == 0 {
-                return false;
-            }
-
-            let x = i % width;
-            let y = i / width;
-            let distance = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
-
-            distance > band_inner_radius && distance < band_outer_radius
-        })
-        .collect())
+    Ok(band_window(
+        &traced,
+        width,
+        cx,
+        cy,
+        band_outer_radius,
+        band_inner_radius,
+        false,
+    ))
 }
 
 /// A band traced from a given start angle, with the outer edge included or
 /// excluded.
 ///
 /// [`build_band_spiral_indices`] starts every band at [`DEFAULT_START_ANGLE`]
-/// and drops the outer edge. The deadwax needs neither. It begins where the
+/// and drops the outer edge. The silent groove needs neither. It begins where the
 /// programme left the groove, so it takes its start angle from that radius,
 /// and it begins exactly on its outer edge because it is the same groove
 /// continuing. Dropping that first turn would put its first addressable pixel
@@ -1583,7 +1775,7 @@ pub fn build_band_spiral_indices_at_angle(
     start_angle: f64,
     include_outer_edge: bool,
 ) -> Result<Vec<usize>> {
-    let (occupied, traced, center_x, center_y) = trace_record_spiral_with_family(
+    let (_, traced, center_x, center_y) = trace_record_spiral_with_family(
         width,
         height,
         band_pitch,
@@ -1591,32 +1783,66 @@ pub fn build_band_spiral_indices_at_angle(
         None,
         start_angle,
         1.0,
-        true,
+        false,
         band_outer_radius,
         band_inner_radius,
     )?;
 
-    let mut ordered = Vec::with_capacity(traced.len());
-    for pixel_index in traced {
-        if occupied[pixel_index] == 0 {
-            continue;
-        }
-        let x = pixel_index % width;
-        let y = pixel_index / width;
-        let dx = x as f64 - center_x;
-        let dy = y as f64 - center_y;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let within_outer = include_outer_edge || distance < band_outer_radius;
-        if distance > band_inner_radius && within_outer {
-            ordered.push(pixel_index);
-        }
-    }
-    Ok(ordered)
+    Ok(band_window(
+        &traced,
+        width,
+        center_x,
+        center_y,
+        band_outer_radius,
+        band_inner_radius,
+        include_outer_edge,
+    ))
+}
+
+/// The contiguous window of a traced band that lies between its two radii.
+///
+/// The trace walks a continuous spiral, so its pixel list is itself continuous:
+/// consecutive pixels touch. Trimming it by a *window* keeps that continuity.
+/// Testing each pixel against its rounded radius instead punctures the outer
+/// turn, because samples on either side of the radius round to either side of
+/// it, and the band paints as dashes. The radius falls monotonically across the
+/// walk, so the pixels outside the inner radius are a prefix and those outside
+/// the outer radius are a suffix, and one slice takes the band between them.
+fn band_window(
+    traced: &[usize],
+    width: usize,
+    center_x: f64,
+    center_y: f64,
+    band_outer_radius: f64,
+    band_inner_radius: f64,
+    include_outer_edge: bool,
+) -> Vec<usize> {
+    let distance = |index: usize| {
+        let x = (index % width) as f64 - center_x;
+        let y = (index / width) as f64 - center_y;
+        (x * x + y * y).sqrt()
+    };
+
+    let first = if include_outer_edge {
+        0
+    } else {
+        traced
+            .iter()
+            .position(|&i| distance(i) < band_outer_radius)
+            .unwrap_or(traced.len())
+    };
+    let last = traced
+        .iter()
+        .rposition(|&i| distance(i) > band_inner_radius)
+        .map_or(first, |i| i + 1)
+        .max(first);
+
+    traced[first..last].to_vec()
 }
 
 /// The angle at which the programme's groove passes `target_radius`.
 ///
-/// The deadwax takes the groove up where the programme leaves it, so the two
+/// The silent groove takes the groove up where the programme leaves it, so the two
 /// bands join into one groove. A band started at a fixed angle is a second
 /// spiral inside the first.
 pub fn groove_angle_at_radius(
@@ -1626,6 +1852,7 @@ pub fn groove_angle_at_radius(
     family: &SpiralFamily,
     record_profile: &str,
     target_radius: f64,
+    clockwise: bool,
 ) -> Result<f64> {
     let geometry = describe_record_profile(record_profile)?;
     let record_radius = width.min(height) as f64 / 2.0;
@@ -1652,7 +1879,7 @@ pub fn groove_angle_at_radius(
                 .max(1e-6);
         swept_theta += theta_step;
         theta_effective += factor * theta_step;
-        angle = DEFAULT_START_ANGLE - swept_theta;
+        angle = DEFAULT_START_ANGLE + if clockwise { -swept_theta } else { swept_theta };
         radius = match &vari {
             None => bounded_outer_radius - resolved_pitch * swept_theta,
             Some(_) => bounded_outer_radius - resolved_pitch * theta_effective,
@@ -1662,46 +1889,55 @@ pub fn groove_angle_at_radius(
     Ok(angle)
 }
 
-/// Where the deadwax stops: the outermost turn of the lead-out, plus the
-/// daylight two bands need not to round onto each other's pixels.
-pub fn deadwax_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
+/// Where the silent groove hands the groove to the run-out.
+///
+/// The silent groove is cut at the lathe's own fine feed from the radius the
+/// programme stopped at. It runs until it reaches the nominal run-out entry, or
+/// until it has spent [`SILENT_GROOVE_MAX_TURNS`] turns, whichever is nearer the
+/// programme. When the cap wins, the run-out begins higher up the side than the
+/// profile's nominal entry and fills the extra room itself: the run-out is a
+/// consequence of the silent groove not the other way round, so the two bands always
+/// meet on the same groove.
+pub fn silent_groove_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
     let lead_out =
         lead_out_geometry_with_extent(record_profile, cut_inner_radius, LeadOutExtent::Fill)?;
-    Ok(lead_out.entry_radius + MIN_TURN_SEPARATION_PX)
+    let entry = lead_out.entry_radius;
+    Ok(match cut_inner_radius.filter(|radius| *radius > 0) {
+        Some(cut) => {
+            let travel = SILENT_GROOVE_MAX_TURNS * silent_groove_turn_separation_px(record_profile)?;
+            let cut = f64::from(cut);
+            (cut - travel).max(entry).min(cut)
+        }
+        None => entry,
+    })
 }
 
-/// The deadwax band, as pixels in trace order.
+/// The silent groove band, as pixels in trace order.
 ///
-/// Empty where the cut left no room for a turn. The band is traced from the
-/// one place that knows its geometry, so a writer and a reader cannot compute
-/// it from two sets of constants that agree only by inspection.
-pub fn build_deadwax_spiral_indices(
+/// Empty where the cut left no room for a turn. The band is the head of the
+/// lead-out's one continuous groove, so its last pixel sits next to the first
+/// pixel of the run-out.
+pub fn build_silent_groove_spiral_indices(
     width: usize,
     height: usize,
     b_value: f64,
     family: &SpiralFamily,
     record_profile: &str,
     cut_inner_radius: i32,
+    clockwise: bool,
 ) -> Result<Vec<usize>> {
-    let band_inner = deadwax_inner_radius(record_profile, Some(cut_inner_radius))?;
-    let band_outer = cut_inner_radius as f64;
-
-    if band_outer <= band_inner + 1.0 {
-        return Ok(Vec::new());
-    }
-
-    let start_angle =
-        groove_angle_at_radius(width, height, b_value, family, record_profile, band_outer)?;
-
-    build_band_spiral_indices_at_angle(
+    let trace = build_lead_out_trace(
         width,
         height,
-        band_outer,
-        band_inner,
-        deadwax_spiral_pitch(record_profile)?,
-        start_angle,
-        true,
-    )
+        b_value,
+        family,
+        record_profile,
+        Some(cut_inner_radius),
+        LeadOutExtent::Fill,
+        clockwise,
+    )?;
+    let indices = trace.indices[..trace.silent_groove_end].to_vec();
+    Ok(indices)
 }
 
 pub fn build_lead_in_spiral_indices(
@@ -1727,33 +1963,39 @@ pub fn build_lead_in_spiral_indices(
     )
 }
 
-/// The descriptor's inner carrier: the lead-out, as pixels.
+/// The run-out and the lock, as pixels in trace order.
 ///
-/// The extent is derived, never declared. Asking for the widest band and
-/// letting it drop back a rung whenever a turn will not fit gives the widest
-/// band that does fit, and that is a function of `cut_inner_radius` alone —
-/// which sits in the BRD1 prefix, in the lead-in, where a decoder reads it
-/// before it walks this band. So nothing new goes on the wire and the two
-/// sides cannot disagree: a record that stopped early gets a wide lead-out
-/// and a record that ran the whole side gets a compact one, and both are
-/// reproducible from what the record already says about itself.
+/// This is the tail of the lead-out's one continuous groove: it starts on the
+/// first pixel past the silent groove so the needle enters it from the silent groove
+/// without a jump. The extent is derived, never declared: asking for the widest
+/// band and letting it drop back a rung whenever a turn will not fit gives the
+/// widest band that does fit, and that is a function of `cut_inner_radius`
+/// alone — which sits in the BRD1 prefix, in the lead-in, where a decoder reads
+/// it before it walks this band. So nothing new goes on the wire and the two
+/// sides cannot disagree.
 ///
 /// `None` is a record whose programme reached the label and declares no cut,
 /// and gets the compact band.
 pub fn build_run_out_spiral_indices(
     width: usize,
     height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
     cut_inner_radius: Option<i32>,
+    clockwise: bool,
 ) -> Result<Vec<usize>> {
-    let (indices, _) = build_lead_out_indices_with_extent(
+    let trace = build_lead_out_trace(
         width,
         height,
+        b_value,
+        family,
         record_profile,
         cut_inner_radius,
         LeadOutExtent::Fill,
+        clockwise,
     )?;
-
+    let indices = trace.indices[trace.silent_groove_end..].to_vec();
     Ok(indices)
 }
 
@@ -1795,8 +2037,8 @@ impl LeadOutGeometry {
 /// The gap above run-out turn `turn`, counting outward from the lock.
 ///
 /// Each turn is [`RUN_OUT_TAPER`] times the one inside it up to
-/// [`RUN_OUT_TURN_SEPARATION_MM`], and every turn above that sits at the
-/// feed. The taper is exponential: unclamped, a sixth turn is 24 mm.
+/// [`RUN_OUT_TURN_SEPARATION_PX`], and every turn above that sits at the
+/// spacing. The taper is exponential: unclamped, a sixth turn is 24 px.
 fn lead_out_gap(turn: usize, inner_gap: f64, coarse_gap: f64) -> f64 {
     (inner_gap * RUN_OUT_TAPER.max(1.0).powi(turn as i32)).min(coarse_gap.max(inner_gap))
 }
@@ -1806,7 +2048,7 @@ fn lead_out_gap(turn: usize, inner_gap: f64, coarse_gap: f64) -> f64 {
 ///
 /// The band begins at the ceiling, and the count is the ladder nearest the
 /// room rather than the largest that fits under it. Anything the run-out does
-/// not reach is deadwax at the fine feed, which costs five turns of ladder
+/// not reach is silent groove at the fine feed, which costs five turns of ladder
 /// per gap; the tracer spreads an overshoot across every gap instead.
 ///
 /// A count that closes the tightest gap below [`MIN_TURN_SEPARATION_PX`] is
@@ -1837,6 +2079,23 @@ fn fill_run_out(lock_radius: f64, ceiling: f64, inner_gap: f64, coarse_gap: f64)
     (turns, ceiling.max(lock_radius))
 }
 
+/// The least run-out a filled side keeps before the locked groove, in turns.
+///
+/// The run-out is elastic: a side that stopped early opens it into many wide
+/// rings, and a side that needs the whole band closes it toward this floor. It
+/// never closes further. A run-out shorter than two turns is not a lead-in to
+/// the lock, it is a seam between the silent groove and the lock, and the
+/// needle arrives at the lock without the band that a real side has.
+pub const RUN_OUT_MIN_TURNS: f64 = 2.0;
+
+/// The tightest the run-out may close, centre to centre, in pixels.
+///
+/// The run-out is elastic: it opens toward [`RUN_OUT_TURN_SEPARATION_PX`] when
+/// the programme stops early, and closes toward this when the side is full.
+/// Two and a half pixels keeps a pixel of groove and a pixel of daylight with a
+/// margin, so the two rings of the shortest run-out still resolve apart.
+pub const RUN_OUT_MIN_TURN_SEPARATION_PX: f64 = 2.5;
+
 /// How far a band of `turns` turns descends, from the lock outward.
 fn lead_out_descent(turns: f64, inner_gap: f64, coarse_gap: f64) -> f64 {
     let count = turns.max(0.0) as usize;
@@ -1844,6 +2103,16 @@ fn lead_out_descent(turns: f64, inner_gap: f64, coarse_gap: f64) -> f64 {
     (0..count)
         .map(|turn| lead_out_gap(turn, inner_gap, coarse_gap))
         .sum()
+}
+
+/// The descent of the shortest run-out a filled side keeps, from the lock to
+/// the run-out entry.
+///
+/// [`RUN_OUT_MIN_TURNS`] turns at the tightest separation the run-out may
+/// close to. The trace distributes the descent across the rings by the taper,
+/// so the innermost ring lands just above [`MIN_TURN_SEPARATION_PX`].
+fn fill_run_out_min_descent() -> f64 {
+    RUN_OUT_MIN_TURNS * RUN_OUT_MIN_TURN_SEPARATION_PX
 }
 
 /// How much room the lead-out is allowed to claim.
@@ -1874,7 +2143,7 @@ pub enum LeadOutExtent {
     ExtraWide,
     /// Every turn the cut left room for: the band a record is cut with.
     ///
-    /// The deadwax takes [`DEADWAX_MAX_TURNS`] and the run-out takes the rest
+    /// The silent groove takes [`SILENT_GROOVE_MAX_TURNS`] and the run-out takes the rest
     /// at the coarse feed. A 12" cut a third of the way down has 60 mm
     /// between the programme and the label: twelve rings across it, against
     /// the four rings and forty turns of fine ladder the fixed rungs gave.
@@ -1930,11 +2199,11 @@ pub fn lead_out_geometry_with_extent(
     let label_radius = g.label_radius as f64;
 
     let lock_radius = label_radius + LOCK_GROOVE_CLEARANCE_MM * scale;
-    let turn_separation = RUN_OUT_TURN_SEPARATION_MM * scale;
+    let turn_separation = RUN_OUT_TURN_SEPARATION_PX;
 
-    // The run-out stops a deadwax header short of the cut rather than at a
-    // fixed distance from the label. See [`DEADWAX_MAX_TURNS`].
-    let deadwax_header = DEADWAX_MAX_TURNS * DEADWAX_PITCH_MM * scale;
+    // The run-out stops a silent groove header short of the cut rather than at a
+    // fixed distance from the label. See [`SILENT_GROOVE_MAX_TURNS`].
+    let silent_groove_step = silent_groove_turn_separation_px(record_profile)?;
 
     // Two caps apply, and the tighter cap holds. The turn count bounds the
     // groove that the carrier holds. The band of the programme bounds it
@@ -1969,24 +2238,41 @@ pub fn lead_out_geometry_with_extent(
         cut_ceiling.map_or(compact_ceiling, |cut| compact_ceiling.min(cut))
     };
 
-    let inner_gap = RUN_OUT_INNER_GAP_MM * scale;
+    let inner_gap = RUN_OUT_INNER_GAP_PX;
 
     // The rungs stop at the cut. The filled band stops one header short of it.
     // A record that declares no cut ran its programme to the label, and it
-    // leaves the deadwax with no room.
+    // leaves the silent groove with no room.
     //
     // The header leaves the first turn of the band in place. A side that ran to
     // the label has 3.5 mm between its last groove and the lock. A six-turn
     // header taken out of that distance puts the run-out on the lock groove.
     let ceiling = match (extent, cut_ceiling) {
         (LeadOutExtent::Fill, Some(cut)) => {
-            let single_turn = lock_radius + lead_out_descent(1.0, inner_gap, turn_separation);
-            (cut - deadwax_header).max(single_turn.min(cut))
+            // `cut` is the programme's edge less the raster clearance; the
+            // silent groove hangs from the programme's edge itself. The
+            // silent groove is flat at two turns whatever the pitch — the
+            // sidecar carriers need it — and a cut that stopped well short of
+            // the label has room for a third. Everything below is the run-out,
+            // shrinking to a sliver before the lock as the programme takes the
+            // side.
+            let programme_edge = cut + MIN_TURN_SEPARATION_PX;
+    let run_out_min = fill_run_out_min_descent();
+            let room_turns =
+                (programme_edge - lock_radius - run_out_min).max(0.0) / silent_groove_step.max(1.0);
+            let silent_groove_turns = if room_turns >= FILL_SILENT_GROOVE_MAX_TURNS {
+                FILL_SILENT_GROOVE_MAX_TURNS
+            } else {
+                FILL_SILENT_GROOVE_MIN_TURNS
+            };
+            (programme_edge - silent_groove_turns * silent_groove_step)
+                .max(lock_radius + run_out_min)
+                .min(programme_edge)
         }
         _ => ceiling,
     };
 
-    let (turns, entry_radius) = if extent == LeadOutExtent::Fill {
+    let (base_turns, entry_radius) = if extent == LeadOutExtent::Fill {
         fill_run_out(lock_radius, ceiling, inner_gap, turn_separation)
     } else {
         // The innermost gap is fixed and each turn outside it is wider, so
@@ -2014,6 +2300,11 @@ pub fn lead_out_geometry_with_extent(
         (turns, (lock_radius + descent).min(ceiling).max(lock_radius))
     };
 
+    // Twice the wide rings over the same descent: the run-out keeps its band
+    // and its entry, and each turn sits closer to the one inside it. The inner
+    // gap still clears the raster floor, so the ladder stays legible.
+    let turns = base_turns * RUN_OUT_RING_FACTOR;
+
     Ok(LeadOutGeometry {
         lock_radius,
         entry_radius,
@@ -2034,18 +2325,39 @@ pub fn lead_out_traced_byte_capacity(
     height: usize,
     record_profile: &str,
 ) -> Result<u32> {
-    let (indices, _) = build_lead_out_indices(width, height, record_profile, None)?;
+    let trace = trace_lead_out(
+        width,
+        height,
+        record_profile,
+        None,
+        LeadOutExtent::Compact,
+        DEFAULT_START_ANGLE,
+        false,
+    )?;
 
-    Ok(u32::try_from(indices.len() / 2).unwrap_or(u32::MAX))
+    Ok(u32::try_from(trace.indices.len() / 2).unwrap_or(u32::MAX))
+}
+
+/// The lead-out as one continuous groove, in trace order.
+#[derive(Debug, Clone)]
+pub struct LeadOutTrace {
+    /// Every pixel of the lead-out, in the order the needle walks them.
+    pub indices: Vec<usize>,
+    /// Where the silent groove ends and the run-out begins in [`Self::indices`].
+    pub silent_groove_end: usize,
+    /// Where the run-out ends and the lock begins in [`Self::indices`]. The
+    /// sequence wraps here: a reader that walks off the end returns to this
+    /// pixel, so the run-out is walked once and the lock forever.
+    pub lock_start: usize,
 }
 
 /// The lead-out as one ordered pixel sequence, and the index the lock starts
 /// at.
 ///
-/// The band is one groove. The head feeds in at
-/// [`RUN_OUT_TURN_SEPARATION_MM`] after the programme ends. Part way through
-/// the last revolution the feed switches off, the groove stops descending,
-/// becomes a circle, and returns to the point at which the feed stopped.
+/// The band is one groove. The silent groove continues from the pixel after the
+/// programme at the lathe's fine feed, the run-out takes over the moment the
+/// silent groove reaches its entry, and the lock is the last revolution. The head
+/// feeds down as a lathe cuts; the needle never jumps between bands.
 ///
 /// The returned index is the boundary between the run-out and the lock, and the
 /// sequence wraps at that index. A reader that passes the end of the sequence
@@ -2054,15 +2366,21 @@ pub fn lead_out_traced_byte_capacity(
 pub fn build_lead_out_indices(
     width: usize,
     height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
     cut_inner_radius: Option<i32>,
+    clockwise: bool,
 ) -> Result<(Vec<usize>, usize)> {
     build_lead_out_indices_with_extent(
         width,
         height,
+        b_value,
+        family,
         record_profile,
         cut_inner_radius,
         LeadOutExtent::Compact,
+        clockwise,
     )
 }
 
@@ -2070,100 +2388,212 @@ pub fn build_lead_out_indices(
 pub fn build_lead_out_indices_with_extent(
     width: usize,
     height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
     record_profile: &str,
     cut_inner_radius: Option<i32>,
     extent: LeadOutExtent,
+    clockwise: bool,
 ) -> Result<(Vec<usize>, usize)> {
+    let trace = build_lead_out_trace(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        extent,
+        clockwise,
+    )?;
+    Ok((trace.indices, trace.lock_start))
+}
+
+/// Trace the whole lead-out, starting from the pixel after the programme.
+///
+/// The start angle is the angle at which the programme's groove passes
+/// `cut_inner_radius`; it is read off the record's own `b_value` and spiral
+/// family, so a reader retraces the join the writer cut.
+pub fn build_lead_out_trace(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+    clockwise: bool,
+) -> Result<LeadOutTrace> {
+    let start_angle = match cut_inner_radius.filter(|radius| *radius > 0) {
+        Some(radius) => groove_angle_at_radius(
+            width,
+            height,
+            b_value,
+            family,
+            record_profile,
+            f64::from(radius),
+            clockwise,
+        )?,
+        None => DEFAULT_START_ANGLE,
+    };
+
+    trace_lead_out(
+        width,
+        height,
+        record_profile,
+        cut_inner_radius,
+        extent,
+        start_angle,
+        clockwise,
+    )
+}
+
+fn trace_lead_out(
+    width: usize,
+    height: usize,
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+    start_angle: f64,
+    clockwise: bool,
+) -> Result<LeadOutTrace> {
     let geometry = lead_out_geometry_with_extent(record_profile, cut_inner_radius, extent)?;
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let mut occupied = vec![0_u8; width * height];
     let mut ordered: Vec<usize> = Vec::new();
 
-    let mut put = |radius: f64, angle: f64, occupied: &mut Vec<u8>, ordered: &mut Vec<usize>| {
-        let x = js_round(center_x + radius * angle.cos());
-        let y = js_round(center_y - radius * angle.sin());
+    let handoff = silent_groove_inner_radius(record_profile, cut_inner_radius)?;
+    let mut angle = start_angle;
 
-        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-            let index = y as usize * width + x as usize;
-            if occupied[index] == 0 {
-                occupied[index] = 1;
-                ordered.push(index);
-            }
+    // The silent groove: the programme's groove continued at the lathe's own fine
+    // feed, from the cut to the run-out entry. It is the same walk with a
+    // constant pitch, so its first pixel is the programme's next and its last
+    // is the run-out's first.
+    if let Some(cut) = cut_inner_radius.filter(|radius| *radius > 0) {
+        let cut = f64::from(cut);
+        if cut > handoff + 0.5 {
+            let pitch = silent_groove_spiral_pitch(record_profile)?;
+            let (end_angle, _) = trace_groove_into(
+                &mut occupied,
+                &mut ordered,
+                width,
+                height,
+                center_x,
+                center_y,
+                angle,
+                clockwise,
+                cut,
+                handoff,
+                1.0,
+                pitch,
+                |_theta, _radius| GrooveStep {
+                    draw_offset: 0.0,
+                    local_pitch: pitch,
+                    factor: 1.0,
+                },
+            );
+            angle = end_angle;
         }
-    };
+    }
+    let silent_groove_end = ordered.len();
 
-    // The run-out. Two things make it propagate smoothly, and both are
-    // visible on a 7", where the band is under a turn at the lathe's nominal
-    // feed and every irregularity has nowhere to hide.
-    //
-    // The sweep is rounded to whole revolutions, so the descent finishes on
-    // the azimuth it began rather than wherever the travel ran out. And the
-    // descent is eased rather than linear: a constant feed meets the lock
-    // circle at an angle and leaves a kink at the junction, while an eased
-    // one arrives with `dr/dtheta` at zero and merges into the circle
-    // tangentially. It leaves the entry radius the same way, so the band's
-    // first turn runs parallel to a circle instead of diving off its start.
-    let descent = (geometry.entry_radius - geometry.lock_radius).max(0.0);
-    let turn_count = (geometry.turns.max(1.0)) as usize;
-    let total_sweep = turn_count as f64 * 2.0 * PI;
-
-    // The gaps that the geometry resolved, outermost first, scaled to the
-    // descent that the ceiling left. Each turn falls at its own constant pitch,
-    // because the taper applies between turns. The groove therefore descends at
-    // full rate when it reaches the lock, and the lock groove alone draws the
-    // lock ring. An eased arrival flattens onto that radius part way through
-    // its last revolution and draws the ring itself. The lock groove then lands
-    // on taken pixels and disappears. A lathe also cuts at pitch up to the lock
-    // groove, and then it switches the feed off.
+    // The run-out. Its feed opens from the lock outward: each turn sits
+    // [`RUN_OUT_TAPER`] times wider than the one inside it, so the groove is
+    // still descending at full rate when it meets the lock and the lock ring
+    // alone draws the ring. The whole descent is one integral of that feed, so
+    // it continues the silent groove with no seam.
+    let base_pitch = silent_groove_spiral_pitch(record_profile)?;
+    let descent = (handoff - geometry.lock_radius).max(0.0);
     let gaps = geometry.gaps();
     let gap_total: f64 = gaps.iter().sum::<f64>().max(1e-9);
 
-    let mut boundaries = Vec::with_capacity(turn_count + 1);
-    boundaries.push(geometry.entry_radius);
+    // The radius each turn begins at, outermost first. Within a turn the feed
+    // is constant, so the pitch at a radius is that turn's gap over a
+    // revolution.
+    let mut boundaries = Vec::with_capacity(gaps.len() + 1);
+    boundaries.push(handoff);
     let mut taken = 0.0_f64;
     for gap in &gaps {
         taken += gap;
-        boundaries.push(geometry.entry_radius - descent * taken / gap_total);
+        boundaries.push(handoff - descent * taken / gap_total);
     }
 
-    let mut swept = 0.0_f64;
-    while swept < total_sweep {
-        let turn = ((swept / (2.0 * PI)).floor() as usize).min(turn_count - 1);
-        let within = swept / (2.0 * PI) - turn as f64;
-        let radius = boundaries[turn] + (boundaries[turn + 1] - boundaries[turn]) * within;
-        // The descent ends where it meets the lock. Travel that continues
-        // inside `LOCK_MERGE_PX` lays a second row against the lock circle,
-        // and the two rows read as one band two pixels wide. The lock
-        // closes the ring from this radius.
-        if radius - geometry.lock_radius <= LOCK_MERGE_PX {
-            break;
-        }
-        put(
-            radius,
-            DEFAULT_START_ANGLE - swept,
-            &mut occupied,
-            &mut ordered,
-        );
-        swept += 1.0 / radius.max(1e-6);
-    }
-
+    // Travel that continues inside [`LOCK_MERGE_PX`] lays a second row against
+    // the lock circle, and the two rows read as one band two pixels wide. The
+    // lock closes the ring from this radius.
+    let stop_radius = geometry.lock_radius + LOCK_MERGE_PX;
+    let (end_angle, _) = trace_groove_into(
+        &mut occupied,
+        &mut ordered,
+        width,
+        height,
+        center_x,
+        center_y,
+        angle,
+        clockwise,
+        handoff,
+        stop_radius,
+        1.0,
+        base_pitch,
+        |_theta, radius| {
+            let local_pitch = run_out_gap_at_radius(radius, &boundaries) / (2.0 * PI);
+            GrooveStep {
+                draw_offset: 0.0,
+                local_pitch,
+                factor: local_pitch / base_pitch,
+            }
+        },
+    );
     let lock_start = ordered.len();
 
-    // The lock: the feed is off. One revolution brings the groove back to
-    // where it died, and it merges into itself.
-    let mut locked = 0.0_f64;
-    while locked < 2.0 * PI {
-        put(
-            geometry.lock_radius,
-            DEFAULT_START_ANGLE - (swept + locked),
+    // The lock: the feed is off. It is one revolution stepped at the circle's
+    // own pixel count, so the last pixel of the ring is the neighbour of the
+    // first and the groove closes on itself instead of leaving a seam where the
+    // traversal wraps. It keeps the record's hand, so it continues the run-out
+    // it was handed from.
+    let lock_radius = geometry.lock_radius;
+    let lock_pixels = js_round(2.0 * PI * lock_radius).max(1) as usize;
+    let lock_step = 2.0 * PI / lock_pixels as f64;
+    for index in 0..lock_pixels {
+        let lock_angle = if clockwise {
+            end_angle - lock_step * index as f64
+        } else {
+            end_angle + lock_step * index as f64
+        };
+        emit_groove_pixel(
             &mut occupied,
             &mut ordered,
+            width,
+            height,
+            center_x,
+            center_y,
+            lock_radius,
+            lock_angle,
         );
-        locked += 1.0 / geometry.lock_radius.max(1e-6);
     }
+    join_groove_chain(&mut ordered, width, lock_start);
 
-    Ok((ordered, lock_start))
+    Ok(LeadOutTrace {
+        indices: ordered,
+        silent_groove_end,
+        lock_start,
+    })
+}
+
+/// The radial gap of the run-out turn that `radius` falls in.
+///
+/// `boundaries` descends from the entry (`boundaries[0]`) to the lock
+/// (`boundaries.last()`), one entry per turn, so the turn around a radius is
+/// the last boundary at or above it.
+fn run_out_gap_at_radius(radius: f64, boundaries: &[f64]) -> f64 {
+    let Some(last) = boundaries.len().checked_sub(2) else {
+        return MIN_B_VALUE;
+    };
+    let mut turn = 0usize;
+    while turn < last && radius < boundaries[turn + 1] {
+        turn += 1;
+    }
+    (boundaries[turn] - boundaries[turn + 1]).max(MIN_B_VALUE)
 }
 
 pub fn build_spiral_mask(
@@ -2207,7 +2637,7 @@ pub fn build_spiral_mask_with_family(
         label_radius,
         label_clearance,
         outer_radius,
-        true,
+        false,
     )
 }
 
@@ -2232,7 +2662,11 @@ pub fn build_spiral_mask_with_handedness(
 ) -> Result<SpiralMask> {
     let g = resolve_record_geometry(record_profile, label_radius, label_clearance, outer_radius)?;
     let outer = payload_outer_radius(&g);
-    let inner = payload_inner_radius(&g);
+    // The same inner cut the renderer paints with: the programme may reach the
+    // lead-out reserve, so the mask addresses down to the programme floor, not
+    // the registered payload edge. A renderer and a reader that disagree on
+    // this bound disagree on the last bytes of the stream.
+    let inner = programme_inner_radius(record_profile)?;
 
     let (occupied, traced, cx, cy) = trace_record_spiral_with_family(
         width,
@@ -4904,9 +5338,16 @@ mod lead_out_tests {
     #[test]
     fn the_lock_follows_the_run_out_in_one_sequence() {
         for profile in known_record_profile_names() {
-            let (indices, lock_start) =
-                build_lead_out_indices(DEFAULT_WIDTH, DEFAULT_HEIGHT, profile, None)
-                    .expect("profile traces a lead-out");
+            let (indices, lock_start) = build_lead_out_indices(
+                DEFAULT_WIDTH,
+                DEFAULT_HEIGHT,
+                run_out_spiral_pitch_for_profile(profile).expect("profile has a run-out pitch"),
+                &SpiralFamily::Archimedean,
+                profile,
+                None,
+                false,
+            )
+            .expect("profile traces a lead-out");
             assert!(lock_start > 0, "{profile} has no run-out above its lock");
             assert!(
                 lock_start < indices.len(),
@@ -5032,9 +5473,12 @@ mod lead_out_tests {
                 let (indices, _) = build_lead_out_indices_with_extent(
                     DEFAULT_WIDTH,
                     DEFAULT_HEIGHT,
+                    run_out_spiral_pitch_for_profile(profile).expect("profile has a run-out pitch"),
+                    &SpiralFamily::Archimedean,
                     profile,
                     cut,
                     extent,
+                    false,
                 )
                 .expect("profile traces a lead-out");
                 let held = u32::try_from(indices.len() / 2).unwrap_or(u32::MAX);
@@ -5091,15 +5535,15 @@ mod lead_out_tests {
     }
 
     /// The fine ladder is a header. At every cut radius, the ladder above the
-    /// run-out holds at most [`DEADWAX_MAX_TURNS`] turns at the feed of the
+    /// run-out holds at most [`SILENT_GROOVE_MAX_TURNS`] turns at the feed of the
     /// lathe. The run-out takes the remaining space.
     #[test]
-    fn the_deadwax_never_runs_past_its_header() {
+    fn the_silent_groove_never_runs_past_its_header() {
         for profile in known_record_profile_names() {
             let geometry = describe_record_profile(profile).expect("profile resolves");
             let band =
                 (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
-            let separation = deadwax_turn_separation_px(profile).expect("profile has a feed");
+            let separation = silent_groove_turn_separation_px(profile).expect("profile has a feed");
 
             for fraction in [1.0_f64, 0.67, 0.5, 0.33, 0.25, 0.15] {
                 let cut = geometry.payload_outer_radius - (band * fraction) as i32;
@@ -5112,9 +5556,9 @@ mod lead_out_tests {
                     / separation;
 
                 assert!(
-                    turns <= DEADWAX_MAX_TURNS + 0.001,
-                    "{profile} at {fraction} leaves {turns:.1} turns of deadwax, past the \
-                     {DEADWAX_MAX_TURNS} turn header"
+                    turns <= SILENT_GROOVE_MAX_TURNS + 0.001,
+                    "{profile} at {fraction} leaves {turns:.1} turns of silent_groove, past the \
+                     {SILENT_GROOVE_MAX_TURNS} turn header"
                 );
             }
         }

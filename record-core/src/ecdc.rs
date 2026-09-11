@@ -163,11 +163,18 @@ pub fn standalone_ecdc_to_payload(
     Ok((descriptor, parts.payload.to_vec()))
 }
 
-/// Reconstruct a standalone ECDC stream from a descriptor and opaque payload.
+/// Reconstruct a standalone ECDC stream for one payload entry from a shared
+/// descriptor and its opaque codec body.
 ///
 /// Envelope reconstruction is delegated to
-/// `encodec_rs::binary::prepend_ecdc_header`. The resulting stream may then be
-/// fully validated or decoded by `encodec-rs`.
+/// `encodec_rs::binary::prepend_ecdc_header`. A programme stores the codec
+/// header once, in the descriptor's `codec_metadata`, and that header's `al`
+/// is whatever length was current when the cut wrote it — not the length of
+/// the entry being rebuilt here. Each payload entry is one independently
+/// decodable block, so the reconstructed header carries the descriptor's
+/// logical `output_samples` (the per-entry owned length), falling back to
+/// `block_samples` when no output length is declared. The resulting stream may
+/// then be fully validated or decoded by `encodec-rs`.
 pub fn payload_to_standalone_ecdc(
     descriptor: &PayloadDescriptor,
     payload: &[u8],
@@ -182,19 +189,15 @@ pub fn payload_to_standalone_ecdc(
         .codec_metadata
         .as_deref()
         .context("ECDC descriptor has no codec metadata")?;
-    let block_samples = descriptor
-        .block_samples
-        .context("ECDC descriptor has no block_samples")?;
+    let audio_length = descriptor
+        .output_samples
+        .filter(|samples| *samples > 0)
+        .or_else(|| descriptor.block_samples.filter(|samples| *samples > 0))
+        .context("ECDC descriptor has no positive output or block sample count")?;
 
     let mut object: serde_json::Map<String, Value> = serde_json::from_slice(codec_metadata)
         .context("ECDC codec metadata is not a JSON object")?;
-    match object.get("al") {
-        Some(Value::Number(value)) if value.as_u64().is_some_and(|value| value > 0) => {}
-        Some(_) => bail!("ECDC codec metadata \"al\" must be a positive integer"),
-        None => {
-            object.insert("al".to_owned(), Value::from(block_samples));
-        }
-    }
+    object.insert("al".to_owned(), Value::from(audio_length));
 
     let header_json = serde_json::to_vec(&Value::Object(object))
         .context("failed to serialize reconstructed ECDC header")?;

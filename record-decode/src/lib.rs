@@ -285,8 +285,26 @@ fn record_descriptor_bytes_from_rgba(
         0 => None,
         radius => Some(i32::from(radius)),
     };
-    let trailer_indices =
-        build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?;
+    // The lead-out's start angle is the programme's own, and the prefix carries
+    // the main-groove `b_value` that fixes it. The spiral family lives in a
+    // segment that may not have reached the lead-in yet; a record that spilled
+    // here is read as Archimedean, which is the family every v2 record is and
+    // the only one whose join is a pure function of `b_value`.
+    let main_b_value = f64::from_be_bytes(
+        prefix_bytes[11..19]
+            .try_into()
+            .context("record descriptor prefix has no main-groove b_value")?,
+    );
+    let clockwise = record_descriptor::spiral_clockwise_from_partial_stream(&head).unwrap_or(false);
+    let trailer_indices = build_run_out_spiral_indices(
+        width,
+        height,
+        main_b_value,
+        &record_core::SpiralFamily::Archimedean,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+    )?;
 
     let mut bytes = head;
     bytes.extend_from_slice(&record_descriptor::band_bytes_from_toned_rgba(

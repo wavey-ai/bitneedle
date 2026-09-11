@@ -11,7 +11,7 @@ use record_core::SpiralFamily;
 use record_descriptor::{
     compute_descriptor_crc32, encode_cache_encryption_descriptor, encode_isrc_segment,
     encode_toned_carrier_map, normalize_upc, payload_encoding_code, record_profile_code,
-    release_id_to_bytes, CacheEncryptionDescriptor, DeadwaxExtent, SignedReleaseReference,
+    release_id_to_bytes, CacheEncryptionDescriptor, SilentGrooveExtent, SignedReleaseReference,
     ToneSpanDescriptor,
     TrackIsrc, PAYLOAD_ENCODING_RGB, PAYLOAD_ENCODING_TONED_V1, RECORD_DESCRIPTOR_MAGIC,
     RECORD_DESCRIPTOR_PREFIX_LENGTH, RECORD_DESCRIPTOR_VERSION, RECORD_DESCRIPTOR_VERSION_HOUSE,
@@ -21,7 +21,7 @@ use record_descriptor::{
     SEGMENT_DEFERRED_ATTESTATION, SEGMENT_DESCRIPTOR_CRC32, SEGMENT_ISRC, SEGMENT_LABEL,
     SEGMENT_PAYLOAD_ENCODING, SEGMENT_RECORD_PROFILE, SEGMENT_RELEASE_ID,
     SEGMENT_SIGNED_RELEASE_REFERENCE, SEGMENT_SPIRAL_GEOMETRY, SEGMENT_STREAM_BYTE_LENGTH,
-    SEGMENT_DEADWAX_EXTENT, SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP, SEGMENT_UPC,
+    SEGMENT_SILENT_GROOVE_EXTENT, SEGMENT_TITLE, SEGMENT_TONED_CARRIER_MAP, SEGMENT_UPC,
 };
 
 pub const RECORD_DESCRIPTOR_TEXT_LIMIT: usize = 96;
@@ -30,12 +30,12 @@ pub const RECORD_DESCRIPTOR_CREATOR_TEXT_LIMIT: usize = 1024;
 #[derive(Debug, Clone, Default)]
 pub struct RecordDescriptorInput {
     /// The radius, in rendered pixels, at which the programme's groove stops
-    /// and the deadwax takes over. Zero for a cut that reaches the label.
+    /// and the silent groove takes over. Zero for a cut that reaches the label.
     pub cut_inner_radius: u16,
-    /// The deadwax's spiral `b`. The feed, never the turn count: a lathe's
+    /// The silent groove s spiral `b`. The feed, never the turn count: a lathe's
     /// spiral lever does not know how far it has to travel, and neither does
     /// a reader — both derive the turns from the space that is left.
-    pub deadwax_b_value: f64,
+    pub silent_groove_b_value: f64,
     pub record_profile: String,
     pub stream_byte_length: usize,
     pub payload_encoding: Option<String>,
@@ -63,11 +63,11 @@ pub struct RecordDescriptorInput {
     /// Signatures beyond the first: a pressing may be attested by the
     /// artist, by yl.vin, or by both.
     pub additional_signatures: Vec<SignedReleaseReference>,
-    /// The deadwax that the cut left, and the owner of any claim on it.
+    /// The silent groove that the cut left, and the owner of any claim on it.
     /// `None` when the programme ran to the label and left no band. The
     /// renderer sets this field, because the extent states the radius at which
     /// the groove stopped.
-    pub deadwax: Option<DeadwaxExtent>,
+    pub silent_groove: Option<SilentGrooveExtent>,
     /// The one tone the trailer is cut in, when the cut was given one.
     ///
     /// `None` is a trailer that follows the record's wheel, which a reader
@@ -78,15 +78,14 @@ pub struct RecordDescriptorInput {
     /// vari-pitch writes the house v3 descriptor with a spiral-geometry
     /// segment.
     pub spiral_family: SpiralFamily,
-    /// Whether the programme's groove winds *anti*-clockwise from its start
-    /// angle — the hand a lathe cuts, since the platter turns clockwise
-    /// under a head that does not travel.
+    /// Whether the programme's groove winds clockwise from its start angle.
     ///
-    /// Named for the departure rather than the state, because this struct
-    /// derives `Default` and `bool::default()` is `false`: the default has
-    /// to be the hand every record already carries, or a caller that fills
-    /// this struct field by field silently cuts the other way.
-    pub spiral_anticlockwise: bool,
+    /// The house hand is anticlockwise — the hand a lathe cuts, since the
+    /// platter turns clockwise under a head that does not travel — so this
+    /// struct derives `Default` with `false`, and a caller that fills it field
+    /// by field cuts the way a lathe does. `true` is the mirror, written to
+    /// the wire so a reader retraces it.
+    pub spiral_clockwise: bool,
 }
 
 pub fn encode_signed_release_reference(reference: &SignedReleaseReference) -> Result<Vec<u8>> {
@@ -131,16 +130,16 @@ pub fn encode_record_descriptor_stream(
         bail!("a positive finite b_value is required");
     }
 
-    // A cut that reached the label declares no deadwax, and its feed is
+    // A cut that reached the label declares no silent groove and its feed is
     // meaningless rather than zero — write it as such instead of letting an
     // unset field read as an infinitely fine groove.
-    let deadwax_b_value = if descriptor.cut_inner_radius == 0 {
+    let silent_groove_b_value = if descriptor.cut_inner_radius == 0 {
         0.0
     } else {
-        if !(descriptor.deadwax_b_value.is_finite() && descriptor.deadwax_b_value > 0.0) {
-            bail!("a cut that stops short of the label must declare a positive deadwax feed");
+        if !(descriptor.silent_groove_b_value.is_finite() && descriptor.silent_groove_b_value > 0.0) {
+            bail!("a cut that stops short of the label must declare a positive silent_groove feed");
         }
-        descriptor.deadwax_b_value
+        descriptor.silent_groove_b_value
     };
 
     let (body, segment_count) = encode_segmented_body(descriptor)?;
@@ -169,7 +168,7 @@ pub fn encode_record_descriptor_stream(
     full.extend_from_slice(&(body.len() as u16).to_be_bytes());
     full.extend_from_slice(&b_value.to_bits().to_be_bytes());
     full.extend_from_slice(&descriptor.cut_inner_radius.to_be_bytes());
-    full.extend_from_slice(&deadwax_b_value.to_bits().to_be_bytes());
+    full.extend_from_slice(&silent_groove_b_value.to_bits().to_be_bytes());
     full.extend_from_slice(&body);
 
     let crc32 = compute_descriptor_crc32(&full);
@@ -180,10 +179,10 @@ pub fn encode_record_descriptor_stream(
 }
 
 pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<u8>, u16)> {
-    // Empty for a clockwise cut, so an ordinary record's bytes and segment
-    // count are exactly what they always were.
-    let handedness: Vec<u8> = if descriptor.spiral_anticlockwise {
-        vec![0u8]
+    // Empty for the house anticlockwise cut, so an ordinary record's bytes and
+    // segment count are exactly what they always were.
+    let handedness: Vec<u8> = if descriptor.spiral_clockwise {
+        vec![1u8]
     } else {
         Vec::new()
     };
@@ -385,8 +384,8 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         _ => Vec::new(),
     };
 
-    let deadwax = match descriptor.deadwax.as_ref() {
-        Some(extent) => record_descriptor::encode_deadwax_extent(extent)?,
+    let silent_groove = match descriptor.silent_groove.as_ref() {
+        Some(extent) => record_descriptor::encode_silent_groove_extent(extent)?,
         None => Vec::new(),
     };
 
@@ -430,7 +429,7 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
         (SEGMENT_DEFERRED_ATTESTATION, deferred_attestation),
         (SEGMENT_ADDITIONAL_SIGNATURES, additional_signatures),
         (SEGMENT_SPIRAL_GEOMETRY, spiral_geometry),
-        (SEGMENT_DEADWAX_EXTENT, deadwax),
+        (SEGMENT_SILENT_GROOVE_EXTENT, silent_groove),
         (record_descriptor::SEGMENT_GROOVE_HANDEDNESS, handedness),
     ] {
         if payload.is_empty() {
@@ -498,12 +497,12 @@ mod tests {
         }
     }
 
-    fn deadwax(claim: Option<[u8; 4]>, used: u32) -> DeadwaxExtent {
-        DeadwaxExtent {
+    fn silent_groove(claim: Option<[u8; 4]>, used: u32) -> SilentGrooveExtent {
+        SilentGrooveExtent {
             outer_radius: 700,
             inner_radius: 420,
             pixel_capacity: 96_000,
-            encoding: record_descriptor::DEADWAX_ENCODING_GRAYSCALE_NIBBLE,
+            encoding: record_descriptor::SILENT_GROOVE_ENCODING_GRAYSCALE_NIBBLE,
             byte_capacity: 48_000,
             claim,
             claimed_byte_length: used,
@@ -511,15 +510,15 @@ mod tests {
     }
 
     /// The band survives the stream: a reader that holds nothing but the
-    /// descriptor learns where the deadwax is and that nobody is in it.
+    /// descriptor learns where the silent groove is and that nobody is in it.
     #[test]
-    fn a_free_deadwax_round_trips_through_the_stream() {
+    fn a_free_silent_groove_round_trips_through_the_stream() {
         let mut input = base_input();
-        input.deadwax = Some(deadwax(None, 0));
+        input.silent_groove = Some(silent_groove(None, 0));
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
-        let extent = decoded.deadwax.expect("deadwax segment");
+        let extent = decoded.silent_groove.expect("silent_groove segment");
 
         assert!(extent.is_free());
         assert_eq!(extent.outer_radius, 700);
@@ -529,13 +528,13 @@ mod tests {
 
     /// And a claimed one says who has it and how much of it is left.
     #[test]
-    fn a_claimed_deadwax_carries_its_owner_and_what_is_left() {
+    fn a_claimed_silent_groove_carries_its_owner_and_what_is_left() {
         let mut input = base_input();
-        input.deadwax = Some(deadwax(Some(*b"SIDE"), 12_000));
+        input.silent_groove = Some(silent_groove(Some(*b"SIDE"), 12_000));
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
-        let extent = decoded.deadwax.expect("deadwax segment");
+        let extent = decoded.silent_groove.expect("silent_groove segment");
 
         assert_eq!(extent.claim, Some(*b"SIDE"));
         assert!(!extent.is_free());
@@ -548,7 +547,7 @@ mod tests {
     #[test]
     fn a_claim_cannot_outrun_its_band() {
         let mut input = base_input();
-        input.deadwax = Some(deadwax(Some(*b"SIDE"), 48_001));
+        input.silent_groove = Some(silent_groove(Some(*b"SIDE"), 48_001));
 
         assert!(encode_record_descriptor_stream(1.0, &input, 4096).is_err());
     }
@@ -556,21 +555,21 @@ mod tests {
     /// A record whose programme ran to the label has no band, and writes no
     /// segment: absence is the declaration.
     #[test]
-    fn no_deadwax_writes_no_segment() {
+    fn no_silent_groove_writes_no_segment() {
         let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).expect("stream");
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
 
-        assert!(decoded.deadwax.is_none());
+        assert!(decoded.silent_groove.is_none());
     }
 
     #[test]
-    fn a_clockwise_cut_writes_no_handedness_segment() {
+    fn the_house_anticlockwise_cut_writes_no_handedness_segment() {
         // The hand every record already carries costs nothing to say, so it
         // is not said: an ordinary cut's bytes must not move.
         let bytes = encode_record_descriptor_stream(1.0, &base_input(), 4096).expect("stream");
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
 
-        assert!(decoded.spiral_clockwise);
+        assert!(!decoded.spiral_clockwise);
         assert!(!bytes.contains(&record_descriptor::SEGMENT_GROOVE_HANDEDNESS));
     }
 
@@ -591,18 +590,17 @@ mod tests {
     }
 
     #[test]
-    fn a_lathe_cut_carries_its_hand_to_the_reader() {
-        // A groove cut the way a lathe cuts one — anticlockwise inward,
-        // because the platter turns clockwise under a head that does not
-        // travel — has to say so, or a reader retraces the mirror of it and
-        // lifts the pixels in the wrong order.
+    fn a_mirrored_cut_carries_its_hand_to_the_reader() {
+        // A groove cut clockwise — the mirror of the lathe hand — has to say
+        // so, or a reader retraces the mirror of it and lifts the pixels in
+        // the wrong order.
         let mut input = base_input();
-        input.spiral_anticlockwise = true;
+        input.spiral_clockwise = true;
 
         let bytes = encode_record_descriptor_stream(1.0, &input, 4096).expect("stream");
         let decoded = record_descriptor::decode_record_descriptor_bytes(&bytes).expect("decode");
 
-        assert!(!decoded.spiral_clockwise);
+        assert!(decoded.spiral_clockwise);
     }
 
     #[test]

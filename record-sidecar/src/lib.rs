@@ -20,14 +20,14 @@ pub const SIDECAR_POINTER_SCHEME_PAIRSIGN_SAFE_LUMA_V2: u8 = 1;
 pub const SIDECAR_POINTER_CARRIER_LABEL: u8 = 0x01;
 pub const SIDECAR_POINTER_CARRIER_INTERGROOVE: u8 = 0x02;
 pub const SIDECAR_POINTER_CARRIER_LEAD_IN: u8 = 0x08;
-pub const SIDECAR_POINTER_CARRIER_DEADWAX: u8 = 0x10;
+pub const SIDECAR_POINTER_CARRIER_SILENT_GROOVE: u8 = 0x10;
 pub const SIDECAR_POINTER_CARRIER_TRAILER: u8 = 0x20;
 /// Retired. The flag named a region holding the outer rim band and the
 /// clearance above the label. Those pixels are intergroove, which
 /// [`SIDECAR_POINTER_CARRIER_INTERGROOVE`] names. A pointer carrying this bit
 /// is refused, because the pixels it asks for are addressed by another flag
 /// and a reader that ignored the bit would build a different pair set.
-pub const SIDECAR_POINTER_CARRIER_RETIRED_LEAD_IN_DEADWAX: u8 = 0x04;
+pub const SIDECAR_POINTER_CARRIER_RETIRED_LEAD_IN_SILENT_GROOVE: u8 = 0x04;
 pub const SIDECAR_SCHEME_PAIRSIGN_SAFE_LUMA_V2: &str = "pairsign-safe-luma-v2";
 pub const SIDECAR_DEFAULT_SEED: u32 = 0x4b50_4752;
 pub const SIDECAR_PAIR_SIGN_DELTA: i16 = 4;
@@ -497,8 +497,8 @@ struct RecordRewriteOptions {
 pub enum SidecarCarrier {
     /// The spare space of the lead-in groove, past the descriptor's own bytes.
     LeadIn,
-    /// The deadwax groove, which carries no programme.
-    Deadwax,
+    /// The silent groove groove, which carries no programme.
+    SilentGroove,
     /// The run-out and the locked groove, past the descriptor's spill.
     Trailer,
     /// Every pixel between the grooves, from the label edge out to the rim.
@@ -515,7 +515,7 @@ pub enum SidecarCarrier {
 /// comes last: a writer reaches the label when every other carrier is full.
 pub const SIDECAR_FILL_ORDER: [SidecarCarrier; 5] = [
     SidecarCarrier::LeadIn,
-    SidecarCarrier::Deadwax,
+    SidecarCarrier::SilentGroove,
     SidecarCarrier::Trailer,
     SidecarCarrier::Intergroove,
     SidecarCarrier::Label,
@@ -524,7 +524,7 @@ pub const SIDECAR_FILL_ORDER: [SidecarCarrier; 5] = [
 impl SidecarCarrier {
     /// Whether the carrier holds bytes in groove pixels.
     pub fn is_groove(self) -> bool {
-        matches!(self, Self::LeadIn | Self::Deadwax | Self::Trailer)
+        matches!(self, Self::LeadIn | Self::SilentGroove | Self::Trailer)
     }
 }
 
@@ -2196,13 +2196,13 @@ pub fn parse_sidecar_carrier(raw: &str) -> Result<SidecarCarrier> {
         "label" => Ok(SidecarCarrier::Label),
         "intergroove" | "intragroove" | "groove" => Ok(SidecarCarrier::Intergroove),
         "leadin" => Ok(SidecarCarrier::LeadIn),
-        "deadwax" => Ok(SidecarCarrier::Deadwax),
+        "silent_groove" => Ok(SidecarCarrier::SilentGroove),
         "trailer" | "runout" | "leadout" | "lockedgroove" => Ok(SidecarCarrier::Trailer),
         // The rim band and the clearance above the label are intergroove. This
         // spelling named them when they were a region of their own, and it
         // named the lead-in groove alongside them, which is a carrier in its
         // own right now.
-        "leadindeadwax" | "leaddeadwax" => Ok(SidecarCarrier::Intergroove),
+        "leadinsilent_groove" | "leadsilent_groove" => Ok(SidecarCarrier::Intergroove),
         _ => bail!("unknown sidecar carrier: {raw}"),
     }
 }
@@ -2212,7 +2212,7 @@ pub fn sidecar_carrier_name(carrier: SidecarCarrier) -> &'static str {
         SidecarCarrier::Label => "label",
         SidecarCarrier::Intergroove => "intergroove",
         SidecarCarrier::LeadIn => "leadIn",
-        SidecarCarrier::Deadwax => "deadwax",
+        SidecarCarrier::SilentGroove => "silent_groove",
         SidecarCarrier::Trailer => "trailer",
     }
 }
@@ -2377,7 +2377,7 @@ fn sidecar_descriptor_geometry(
                 "innerRadius": geometry.payload_outer_radius,
                 "outerRadius": sidecar_lead_in_outer_radius(&geometry),
             },
-            "deadwax": {
+            "silent_groove": {
                 "innerRadius": sidecar_label_outer_radius(&geometry),
                 "outerRadius": geometry.payload_inner_radius,
             },
@@ -2416,6 +2416,7 @@ fn build_sidecar_protected_metadata_pixels(
     b_value: f64,
     spiral_family: &record_core::SpiralFamily,
     cut_inner_radius: Option<i32>,
+    clockwise: bool,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -2423,24 +2424,31 @@ fn build_sidecar_protected_metadata_pixels(
     {
         protected[pixel_index] = true;
     }
-    for pixel_index in
-        record_core::build_run_out_spiral_indices(width, height, record_profile, cut_inner_radius)?
-    {
+    for pixel_index in record_core::build_run_out_spiral_indices(
+        width,
+        height,
+        b_value,
+        spiral_family,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+    )? {
         protected[pixel_index] = true;
     }
-    // The deadwax is a band of its own. The spiral mask holds the programme's
-    // groove, and the two bands are traced apart, so a deadwax pixel reads as
+    // The silent groove is a band of its own. The spiral mask holds the programme's
+    // groove, and the two bands are traced apart, so a silent groove pixel reads as
     // off-groove and falls into the intergroove pool. That pool is written by
-    // pair-sign modulation, and the deadwax carries bytes, so a pixel in both
+    // pair-sign modulation, and the silent groove carries bytes, so a pixel in both
     // is written twice.
     if let Some(radius) = cut_inner_radius {
-        for pixel_index in record_core::build_deadwax_spiral_indices(
+        for pixel_index in record_core::build_silent_groove_spiral_indices(
             width,
             height,
             b_value,
             spiral_family,
             record_profile,
             radius,
+            clockwise,
         )? {
             protected[pixel_index] = true;
         }
@@ -2479,6 +2487,7 @@ fn label_sidecar_pixels(
         b_value,
         spiral_family,
         cut_inner_radius,
+        false,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let center_x = width as f64 / 2.0;
@@ -2524,7 +2533,7 @@ fn sidecar_pixel_in_carrier_regions(
         && distance > sidecar_label_inner_radius(geometry) as f64
         && distance < label_outer_radius;
     // The intergroove is every pixel between the grooves: the outer rim, the
-    // payload band, the deadwax, and the clearance above the label. A groove
+    // payload band, the silent groove and the clearance above the label. A groove
     // pixel is excluded by `off_groove`, which the spiral mask decides, and by
     // the protected set, which holds the lead-in and the run-out. What is left
     // is the space the turns do not occupy, wherever it falls on the disc.
@@ -2653,18 +2662,19 @@ pub fn build_sidecar_plan(
                     });
                 }
             }
-            SidecarCarrier::Deadwax => {
-                // The deadwax carries no programme and no descriptor, so the
+            SidecarCarrier::SilentGroove => {
+                // The silent groove carries no programme and no descriptor, so the
                 // whole band is free. A record with no tone offers no band.
                 let Some(clock) = clock.as_ref() else { continue };
                 let Some(radius) = cut_inner_radius else { continue };
-                let indices = record_core::build_deadwax_spiral_indices(
+                let indices = record_core::build_silent_groove_spiral_indices(
                     width,
                     height,
                     descriptor.b_value(),
                     &descriptor.spiral_family,
                     record_profile,
                     radius,
+                    descriptor.spiral_clockwise,
                 )?;
                 if !indices.is_empty() {
                     runs.push(SidecarRun::Groove {
@@ -2679,8 +2689,11 @@ pub fn build_sidecar_plan(
                 let indices = record_core::build_run_out_spiral_indices(
                     width,
                     height,
+                    descriptor.b_value(),
+                    &descriptor.spiral_family,
                     record_profile,
                     cut_inner_radius,
+                    descriptor.spiral_clockwise,
                 )?;
                 // What the descriptor spilled past the lead-in sits at the
                 // front of this band.
@@ -2888,6 +2901,7 @@ fn build_sidecar_carrier_region_pairs(
         b_value,
         spiral_family,
         cut_inner_radius,
+        false,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
@@ -3169,13 +3183,13 @@ fn descriptor_input_with_rewrite_options(
     Ok(record_cut::descriptor::RecordDescriptorInput {
         // Carried through. A descriptor rewrite keeps the hand that the
         // groove in the PNG was cut with.
-        spiral_anticlockwise: !descriptor.spiral_clockwise,
+        spiral_clockwise: descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
         // Carried through for the same reason. The trailer in the PNG is cut
         // already, and a rewritten descriptor keeps naming the
         // colour it was cut in.
         run_out_tone: descriptor.run_out_tone,
-        deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
+        silent_groove_b_value: f64::from_bits(descriptor.silent_groove_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -3207,7 +3221,7 @@ fn descriptor_input_with_rewrite_options(
         spiral_family: descriptor.spiral_family,
         // The extent is the lathe's: the renderer fills it in when the cut
         // tells it where the groove stopped.
-        deadwax: None,
+        silent_groove: None,
     })
 }
 
@@ -3231,13 +3245,13 @@ fn descriptor_input_with_cache_encryption_option(
     record_cut::descriptor::RecordDescriptorInput {
         // Carried through. A descriptor rewrite keeps the hand that the
         // groove in the PNG was cut with.
-        spiral_anticlockwise: !descriptor.spiral_clockwise,
+        spiral_clockwise: descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
         // Carried through for the same reason. The trailer in the PNG is cut
         // already, and a rewritten descriptor keeps naming the colour that it
         // was cut in.
         run_out_tone: descriptor.run_out_tone,
-        deadwax_b_value: f64::from_bits(descriptor.deadwax_b_value_bits),
+        silent_groove_b_value: f64::from_bits(descriptor.silent_groove_b_value_bits),
         record_profile: descriptor.record_profile.clone(),
         stream_byte_length: descriptor.stream_byte_length,
         payload_encoding: Some(descriptor.payload_encoding.clone()),
@@ -3268,7 +3282,7 @@ fn descriptor_input_with_cache_encryption_option(
         spiral_family: descriptor.spiral_family,
         // The extent is the lathe's: the renderer fills it in when the cut
         // tells it where the groove stopped.
-        deadwax: None,
+        silent_groove: None,
     }
 }
 
@@ -3297,11 +3311,14 @@ fn encoded_descriptor_bytes(
             let indices = record_core::build_run_out_spiral_indices(
                 width,
                 height,
+                main_b_value,
+                &descriptor.spiral_family,
                 record_profile,
                 match descriptor.cut_inner_radius {
                     0 => None,
                     radius => Some(i32::from(radius)),
                 },
+                descriptor.spiral_clockwise,
             )?;
             record_descriptor::band_byte_capacity(indices.len(), &clock)
         }
@@ -3338,11 +3355,14 @@ fn paint_descriptor_spiral(
             record_core::build_run_out_spiral_indices(
                 width,
                 height,
+                main_b_value,
+                &descriptor.spiral_family,
                 record_profile,
                 match descriptor.cut_inner_radius {
                     0 => None,
                     radius => Some(i32::from(radius)),
                 },
+                descriptor.spiral_clockwise,
             )?,
             clock,
         )),
@@ -3932,8 +3952,8 @@ pub fn sidecar_pointer_carrier_flags(carriers: &[SidecarCarrier]) -> u8 {
     if carriers.contains(&SidecarCarrier::LeadIn) {
         flags |= SIDECAR_POINTER_CARRIER_LEAD_IN;
     }
-    if carriers.contains(&SidecarCarrier::Deadwax) {
-        flags |= SIDECAR_POINTER_CARRIER_DEADWAX;
+    if carriers.contains(&SidecarCarrier::SilentGroove) {
+        flags |= SIDECAR_POINTER_CARRIER_SILENT_GROOVE;
     }
     if carriers.contains(&SidecarCarrier::Trailer) {
         flags |= SIDECAR_POINTER_CARRIER_TRAILER;
@@ -3946,7 +3966,7 @@ pub fn sidecar_pointer_carriers(flags: u8) -> Result<Vec<SidecarCarrier>> {
         & !(SIDECAR_POINTER_CARRIER_LABEL
             | SIDECAR_POINTER_CARRIER_INTERGROOVE
             | SIDECAR_POINTER_CARRIER_LEAD_IN
-            | SIDECAR_POINTER_CARRIER_DEADWAX
+            | SIDECAR_POINTER_CARRIER_SILENT_GROOVE
             | SIDECAR_POINTER_CARRIER_TRAILER)
         != 0
     {
@@ -3960,7 +3980,7 @@ pub fn sidecar_pointer_carriers(flags: u8) -> Result<Vec<SidecarCarrier>> {
             SidecarCarrier::Label => SIDECAR_POINTER_CARRIER_LABEL,
             SidecarCarrier::Intergroove => SIDECAR_POINTER_CARRIER_INTERGROOVE,
             SidecarCarrier::LeadIn => SIDECAR_POINTER_CARRIER_LEAD_IN,
-            SidecarCarrier::Deadwax => SIDECAR_POINTER_CARRIER_DEADWAX,
+            SidecarCarrier::SilentGroove => SIDECAR_POINTER_CARRIER_SILENT_GROOVE,
             SidecarCarrier::Trailer => SIDECAR_POINTER_CARRIER_TRAILER,
         };
         if flags & bit != 0 {
@@ -4554,8 +4574,8 @@ mod attestation_tests {
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
             cut_inner_radius: 0,
-            deadwax_b_value_bits: 0,
-            deadwax: None,
+            silent_groove_b_value_bits: 0,
+            silent_groove: None,
             lead_out_geometry_revision: record_descriptor::LEAD_OUT_GEOMETRY_REVISION,
             spiral_clockwise: true,
             spiral_family: record_core::SpiralFamily::Archimedean,

@@ -90,7 +90,7 @@ Both 7 in profiles additionally carry a 38.1 mm dink at radius 63, with a
 ```text
 radius 0                                                              radius 287
    │                                                                      │
-   ├─ spindle ─ label ─ lock ─ run-out ─ deadwax ─ payload ─── header ─────┤
+   ├─ spindle ─ label ─ lock ─ run-out ─ silent_groove ─ payload ─── header ─────┤
                         └──── the trailer carrier ────┘
 ```
 
@@ -99,7 +99,7 @@ BRD1 that exceeds the capacity of the lead-in is written across that carrier. It
 uses the same 64-symbol ladder, in iso-luma colours around the matte tone that
 the band is cut in. The ring count follows from the radius at which the
 programme stopped, so a reader computes it. The rings fill the space between the
-lock and the deadwax header, and that header is at most six turns of fine groove
+lock and the silent groove header, and that header is at most six turns of fine groove
 under the programme. Segment 35 gives the revision of that geometry and the tone
 that the band was cut in.
 
@@ -110,7 +110,7 @@ that the band was cut in.
 ```text
 0               4 5      7      9      11             19    21          29
 ┌────────────────┬─┬──────┬──────┬───────┬─────────────┬─────┬───────────┐
-│ "BRD1"         │v│ total│ segs │ seg   │ b_value bits│ cut │ deadwax b │
+│ "BRD1"         │v│ total│ segs │ seg   │ b_value bits│ cut │ silent_groove b │
 │ 4 bytes        │4│ u16be│ u16be│ bytes │ f64be/u64be │u16be│  f64be    │
 └────────────────┴─┴──────┴──────┴───────┴─────────────┴─────┴───────────┘
 ```
@@ -123,8 +123,8 @@ record carrying a spiral-geometry segment; a reader refuses any other.
 
 `cut` is the radius the programme's groove stopped at, zero for a side cut to
 the payload inner radius. It is read from the header spiral **before** the
-trailer is traced, because the run-out's geometry follows from it. `deadwax b`
-is the pitch of the deadwax band, never its turn count.
+trailer is traced, because the run-out's geometry follows from it. `silent_groove b`
+is the pitch of the silent groove band, never its turn count.
 
 ### Segment framing
 
@@ -163,7 +163,7 @@ is the pitch of the deadwax band, never its turn count.
 | 30 | Spiral geometry | binary, see below | 17/25/34/42/90 | with v5 |
 | 31 | Additional signatures | count + length-prefixed envelopes | variable | no |
 | 32 | Tone clock map | versioned binary clockface | variable | with toned-v2 |
-| 33 | Deadwax extent | radii, capacity, encoding, optional claim | 13/21 | no |
+| 33 | Silent groove extent | radii, capacity, encoding, optional claim | 13/21 | no |
 | 34 | Groove handedness | `0` anticlockwise, `1` clockwise | 1 | no |
 | 35 | Lead-out geometry | revision the run-out was drawn by, and its tone | 1/4 | yes |
 
@@ -549,7 +549,7 @@ BRD1 segment 21
    └── SHA-256 digest
           │
           ▼
-selected label / intergroove / deadwax pixel pairs
+selected label / intergroove / silent_groove pixel pairs
           │
           ▼
 deterministic shuffle

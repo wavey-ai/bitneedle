@@ -35,9 +35,9 @@ pub const RECORD_DESCRIPTOR_VERSION: u8 = 4;
 pub const RECORD_DESCRIPTOR_VERSION_HOUSE: u8 = 5;
 /// The prefix holds the magic, the version, the three lengths, the `b` of the
 /// payload spiral, and the cut geometry. The cut geometry gives the radius at
-/// which the groove of the programme stops, and the feed that the deadwax is
+/// which the groove of the programme stops, and the feed that the silent groove is
 /// cut at. Those two values let a reader with the PNG alone traverse the whole
-/// groove, including the deadwax. The prefix is painted in the header spiral at
+/// groove, including the silent groove The prefix is painted in the header spiral at
 /// the rim, so a reader gets it first.
 pub const RECORD_DESCRIPTOR_PREFIX_LENGTH: usize = 29;
 
@@ -203,24 +203,24 @@ pub const SEGMENT_ADDITIONAL_SIGNATURES: u8 = 31;
 /// the wheel itself and nothing per pixel. See [`encode_tone_clock_map`].
 pub const SEGMENT_TONE_CLOCK_MAP: u8 = 32;
 
-/// The deadwax: the groove between where the programme stopped and the
+/// The silent groove: the groove between where the programme stopped and the
 /// descriptor's inner band, and what may be written into it.
 ///
-/// The prefix already carries `cut_inner_radius` and the feed of the deadwax,
+/// The prefix already carries `cut_inner_radius` and the feed of the silent groove
 /// which is what a reader needs to walk the band. This segment adds the claim:
 /// whether the band holds bytes, the owner of those bytes, and the room that a
 /// writer has in an empty band.
 ///
 /// This segment is a declaration. The bytes live in the groove, and this
 /// segment gives their location and their owner. A record whose programme runs
-/// to the label has no deadwax, and it writes no segment.
+/// to the label has no silent groove and it writes no segment.
 ///
 /// Payload: `outer(u16be) || inner(u16be) || pixel_capacity(u32be) ||
 /// encoding(u8) || byte_capacity(u32be)`, 13 bytes, and a claimed band adds
 /// `claim(4) || claimed_byte_length(u32be)` for 21. Sized rather than
 /// versioned, as [`SEGMENT_SPIRAL_GEOMETRY`] is: a longer payload from a
 /// later writer decodes to what these mean.
-pub const SEGMENT_DEADWAX_EXTENT: u8 = 33;
+pub const SEGMENT_SILENT_GROOVE_EXTENT: u8 = 33;
 
 /// Which way round the programme's groove is cut.
 ///
@@ -263,7 +263,7 @@ pub const SEGMENT_GROOVE_HANDEDNESS: u8 = 34;
 ///
 /// Payload: `revision(u8)`, or `revision(u8) || tone(3)` where the trailer was
 /// cut in one of its own. Sized rather than versioned, as
-/// [`SEGMENT_DEADWAX_EXTENT`] is. Absent means
+/// [`SEGMENT_SILENT_GROOVE_EXTENT`] is. Absent means
 /// [`LEAD_OUT_GEOMETRY_REVISION_DRAFT04`], so a record written before this
 /// existed decodes as what it is.
 pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
@@ -278,25 +278,25 @@ pub const SEGMENT_LEAD_OUT_GEOMETRY: u8 = 35;
 /// the BRD1 magic, ahead of segment parsing.
 pub const LEAD_OUT_GEOMETRY_REVISION_DRAFT04: u8 = 0;
 
-/// The first lead-out geometry: a fine deadwax at the lathe's feed, a run-out
+/// The first lead-out geometry: a fine silent groove at the lathe's feed, a run-out
 /// of one to four rings opening outward by [`record_core::RUN_OUT_TAPER`],
 /// and a lock groove closing on itself.
 ///
-/// The deadwax took the space that the four rings left. On a side that carried
+/// The silent groove took the space that the four rings left. On a side that carried
 /// one track, that space was most of the annulus: forty turns at a millimetre
 /// apart, drawn across the artwork. [`LEAD_OUT_GEOMETRY_REVISION_FILLED`] gives
 /// that space to the run-out instead.
 pub const LEAD_OUT_GEOMETRY_REVISION_ORIGINAL: u8 = 1;
 
-/// The filled run-out: a deadwax header of at most
-/// [`record_core::DEADWAX_MAX_TURNS`] turns, and a run-out of as many rings as
+/// The filled run-out: a silent groove header of at most
+/// [`record_core::SILENT_GROOVE_MAX_TURNS`] turns, and a run-out of as many rings as
 /// the room the cut left will hold.
 ///
 /// This revision keeps the same three bands in the same order, and it keeps the
-/// lock groove at its radius. It moves the spare room from the deadwax to the
+/// lock groove at its radius. It moves the spare room from the silent groove to the
 /// run-out. The rings open out of the lock by [`record_core::RUN_OUT_TAPER`]
 /// until they reach the coarse feed of the lathe
-/// ([`record_core::RUN_OUT_TURN_SEPARATION_MM`]). Above that point they run
+/// ([`record_core::RUN_OUT_TURN_SEPARATION_PX`]). Above that point they run
 /// parallel up to the header. A side that stops a third of the way down
 /// therefore carries a dozen widely spaced rings, against four before.
 ///
@@ -332,19 +332,19 @@ pub const LEAD_OUT_GEOMETRY_REVISION_MERGED: u8 = 3;
 /// The revision this build cuts and can read.
 pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_MERGED;
 
-/// The deadwax is an empty groove. A writer and its reader agree on the content
+/// The silent groove is an empty groove. A writer and its reader agree on the content
 /// of that groove between them.
-pub const DEADWAX_ENCODING_UNPAINTED: u8 = 0;
+pub const SILENT_GROOVE_ENCODING_UNPAINTED: u8 = 0;
 /// One nibble per pixel as a grey step, the way the descriptor's own bands
 /// are painted ([`METADATA_GRAYSCALE_BASE`]).
-pub const DEADWAX_ENCODING_GRAYSCALE_NIBBLE: u8 = 1;
+pub const SILENT_GROOVE_ENCODING_GRAYSCALE_NIBBLE: u8 = 1;
 /// The carrier's own encoding: an iso-luma palette around the groove tone,
 /// at the clock's bits per pixel. A band written this way is the record's
 /// colour and carries several times what the grey encoding does.
-pub const DEADWAX_ENCODING_TONED: u8 = 2;
+pub const SILENT_GROOVE_ENCODING_TONED: u8 = 2;
 
 /// The band is free, and a writer may use its whole capacity.
-pub const DEADWAX_CLAIM_FREE: Option<[u8; 4]> = None;
+pub const SILENT_GROOVE_CLAIM_FREE: Option<[u8; 4]> = None;
 
 pub const ISRC_LENGTH: usize = 12;
 
@@ -1517,7 +1517,7 @@ pub fn decode_cache_encryption_descriptor(bytes: &[u8]) -> Result<CacheEncryptio
     Ok(descriptor)
 }
 
-/// The content of the deadwax, and its capacity.
+/// The content of the silent groove and its capacity.
 ///
 /// The radii are in rendered pixels from the centre, and they bound the band as
 /// the cut does. `outer` is the radius at which the groove of the programme
@@ -1535,7 +1535,7 @@ pub fn decode_cache_encryption_descriptor(bytes: &[u8]) -> Result<CacheEncryptio
 /// with zero bytes reserves the band.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeadwaxExtent {
+pub struct SilentGrooveExtent {
     pub outer_radius: u16,
     pub inner_radius: u16,
     pub pixel_capacity: u32,
@@ -1549,7 +1549,7 @@ pub struct DeadwaxExtent {
     pub claimed_byte_length: u32,
 }
 
-impl DeadwaxExtent {
+impl SilentGrooveExtent {
     /// Whether anything has claimed the band.
     pub fn is_free(&self) -> bool {
         self.claim.is_none()
@@ -1562,24 +1562,24 @@ impl DeadwaxExtent {
     }
 }
 
-/// One deadwax extent segment, as written.
+/// One silent groove extent segment, as written.
 ///
 /// Two shapes: 13 bytes for a free band, and 21 bytes for a claimed band. A
 /// longer payload comes from a later writer, and this decoder reads the
 /// leading bytes and ignores the tail, as it does for every other sized
 /// segment.
-pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
+pub fn decode_silent_groove_extent(payload: &[u8]) -> Result<SilentGrooveExtent> {
     const FREE_LENGTH: usize = 13;
     const CLAIMED_LENGTH: usize = 21;
 
     if payload.len() < FREE_LENGTH {
-        bail!("deadwax extent segment is too short");
+        bail!("silent_groove extent segment is too short");
     }
 
     let outer_radius = u16::from_be_bytes(payload[0..2].try_into().expect("slice length"));
     let inner_radius = u16::from_be_bytes(payload[2..4].try_into().expect("slice length"));
     if inner_radius >= outer_radius {
-        bail!("deadwax extent inner radius is not inside its outer radius");
+        bail!("silent_groove extent inner radius is not inside its outer radius");
     }
 
     let pixel_capacity = u32::from_be_bytes(payload[4..8].try_into().expect("slice length"));
@@ -1590,19 +1590,19 @@ pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
         let tag: [u8; 4] = payload[13..17].try_into().expect("slice length");
         let used = u32::from_be_bytes(payload[17..21].try_into().expect("slice length"));
         if used > byte_capacity {
-            bail!("deadwax claim is longer than the band it claims");
+            bail!("silent_groove claim is longer than the band it claims");
         }
         // An all-zero value is outside the tag space. A writer that takes the
         // band and names no owner writes the free shape.
         if tag == [0, 0, 0, 0] {
-            bail!("deadwax claim tag is empty");
+            bail!("silent_groove claim tag is empty");
         }
         (Some(tag), used)
     } else {
         (None, 0)
     };
 
-    Ok(DeadwaxExtent {
+    Ok(SilentGrooveExtent {
         outer_radius,
         inner_radius,
         pixel_capacity,
@@ -1614,12 +1614,12 @@ pub fn decode_deadwax_extent(payload: &[u8]) -> Result<DeadwaxExtent> {
 }
 
 /// The same, as bytes.
-pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
+pub fn encode_silent_groove_extent(extent: &SilentGrooveExtent) -> Result<Vec<u8>> {
     if extent.inner_radius >= extent.outer_radius {
-        bail!("deadwax extent inner radius is not inside its outer radius");
+        bail!("silent_groove extent inner radius is not inside its outer radius");
     }
     if extent.claimed_byte_length > extent.byte_capacity {
-        bail!("deadwax claim is longer than the band it claims");
+        bail!("silent_groove claim is longer than the band it claims");
     }
 
     let mut bytes = Vec::with_capacity(21);
@@ -1631,12 +1631,12 @@ pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
 
     if let Some(tag) = extent.claim {
         if tag == [0, 0, 0, 0] {
-            bail!("deadwax claim tag is empty");
+            bail!("silent_groove claim tag is empty");
         }
         bytes.extend_from_slice(&tag);
         bytes.extend_from_slice(&extent.claimed_byte_length.to_be_bytes());
     } else if extent.claimed_byte_length != 0 {
-        bail!("deadwax extent has claimed bytes but no claim");
+        bail!("silent_groove extent has claimed bytes but no claim");
     }
 
     Ok(bytes)
@@ -1646,10 +1646,12 @@ pub fn encode_deadwax_extent(extent: &DeadwaxExtent) -> Result<Vec<u8>> {
 ///
 /// `record_profile` identifies the canonical Bitneedle carrier profile that
 /// decodes the raster geometry. BRS1 and the codec-specific validation assign
-/// the logical sample counts of the payload entries and hold the programme
-/// timing.
+/// The hand a lathe cuts and a platter plays: anticlockwise inward, because
+/// the platter turns clockwise under a head that does not travel. An absent
+/// segment 34 reads as this hand, which is what every record this build cuts
+/// carries.
 fn clockwise_by_default() -> bool {
-    true
+    false
 }
 
 /// An absent segment 35 selects the geometry that came before revision 1.
@@ -1669,28 +1671,29 @@ pub struct RecordDescriptor {
     pub version: u8,
     pub checksum_protected: bool,
     pub b_value_bits: u64,
-    /// Where the programme's groove stops and the deadwax takes over, in
+    /// Where the programme's groove stops and the silent groove takes over, in
     /// rendered pixels. Zero for a cut that reaches the label.
     #[serde(default)]
     pub cut_inner_radius: u16,
-    /// The deadwax's spiral `b` — the feed, never the turn count.
+    /// The silent groove s spiral `b` — the feed, never the turn count.
     ///
     /// Serialized as `leadOutBValueBits` under the earlier name for the band.
     /// The alias keeps descriptor JSON written under that vocabulary readable.
     /// The wire bytes hold their positions, so this field remains prefix octets
     /// 21..29.
     #[serde(default, alias = "leadOutBValueBits")]
-    pub deadwax_b_value_bits: u64,
+    pub silent_groove_b_value_bits: u64,
     /// The groove geometry family. A v2 record always carries
     /// [`SpiralFamily::Archimedean`]. A v3 record may carry vari-pitch. The
     /// defaults keep every existing serialized form valid.
     #[serde(default)]
     pub spiral_family: SpiralFamily,
     /// Whether the groove of the programme winds clockwise from its start
-    /// angle. Every record written before [`SEGMENT_GROOVE_HANDEDNESS`] existed
-    /// winds clockwise, and that is the default here, so an absent segment
-    /// reads as the original cut. [`SEGMENT_GROOVE_HANDEDNESS`] gives the
-    /// reason for the other hand.
+    /// angle. A lathe cuts anticlockwise inward — the platter turns clockwise
+    /// under a head that does not travel — so the house hand is anticlockwise
+    /// and that is the default here: an absent segment reads as the lathe cut.
+    /// [`SEGMENT_GROOVE_HANDEDNESS`] names the other hand, a clockwise groove,
+    /// which a reader must retrace as the mirror of this one.
     #[serde(default = "clockwise_by_default")]
     pub spiral_clockwise: bool,
     pub record_profile: String,
@@ -1738,11 +1741,11 @@ pub struct RecordDescriptor {
     /// [`SEGMENT_LEAD_OUT_GEOMETRY`].
     #[serde(default)]
     pub run_out_tone: Option<[u8; 3]>,
-    /// The deadwax that the cut left: the groove between the programme and the
+    /// The silent groove that the cut left: the groove between the programme and the
     /// inner band of the descriptor, and the owner of any claim on it. Absent
     /// on a record whose programme ran to the label.
     #[serde(default)]
-    pub deadwax: Option<DeadwaxExtent>,
+    pub silent_groove: Option<SilentGrooveExtent>,
 }
 
 /// One recording's ISRC, against the track it belongs to.
@@ -1778,13 +1781,13 @@ pub struct DescriptorPrefix {
     pub segment_stream_len: usize,
     pub b_value_bits: u64,
     /// The radius, in rendered pixels, at which the groove of the programme
-    /// stops and the deadwax begins. Zero means that the cut ran to the label
-    /// and left no deadwax.
+    /// stops and the silent groove begins. Zero means that the cut ran to the label
+    /// and left no silent groove
     pub cut_inner_radius: u16,
-    /// The spiral `b` of the deadwax. The descriptor declares this feed,
+    /// The spiral `b` of the silent groove The descriptor declares this feed,
     /// because the wire holds no turn count. A reader derives the turn count as
     /// a lathe produces it, from the remaining travel and this feed.
-    pub deadwax_b_value_bits: u64,
+    pub silent_groove_b_value_bits: u64,
 }
 
 pub fn metadata_pixel_count_for_byte_length(byte_length: usize) -> usize {
@@ -2008,6 +2011,17 @@ pub fn tone_clock_map_from_partial_stream(bytes: &[u8]) -> Option<ToneClockDescr
     decode_tone_clock_map(payload, None).ok()
 }
 
+/// The programme's hand, read out of however much of the stream is in hand.
+///
+/// The lead-out starts on the programme's angle, so a reader that has spilled
+/// into the trailer needs the hand before it can trace the silent groove and run-out.
+/// The house hand is anticlockwise; an absent segment means exactly that.
+pub fn spiral_clockwise_from_partial_stream(bytes: &[u8]) -> Option<bool> {
+    let payload = segment_from_partial_stream(bytes, SEGMENT_GROOVE_HANDEDNESS)?;
+
+    payload.first().map(|value| *value != 0)
+}
+
 /// One segment's payload, from as much of the stream as is in hand.
 ///
 /// This scan runs before a reader has the rest of the stream, on the bands that
@@ -2192,7 +2206,7 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         u16::from_be_bytes(bytes[9..11].try_into().expect("slice length")) as usize;
     let b_value_bits = u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
     let cut_inner_radius = u16::from_be_bytes(bytes[19..21].try_into().expect("slice length"));
-    let deadwax_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
+    let silent_groove_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
 
     if payload_len < RECORD_DESCRIPTOR_PREFIX_LENGTH || payload_len > bytes.len() {
         bail!("record descriptor payload length is invalid");
@@ -2205,7 +2219,7 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         segment_stream_len,
         b_value_bits,
         cut_inner_radius,
-        deadwax_b_value_bits,
+        silent_groove_b_value_bits,
     })
 }
 
@@ -2692,7 +2706,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
     let mut isrcs = None;
     let mut upc = None;
     let mut deferred_attestation = None;
-    let mut deadwax = None;
+    let mut silent_groove = None;
     let mut lead_out_geometry = None;
     let mut run_out_tone = None;
     let mut spiral_family = None;
@@ -2958,11 +2972,11 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 family.validate()?;
                 assign_once(&mut spiral_family, family, "spiral geometry")?;
             }
-            SEGMENT_DEADWAX_EXTENT => {
-                if deadwax.is_some() {
-                    bail!("duplicate deadwax extent segment");
+            SEGMENT_SILENT_GROOVE_EXTENT => {
+                if silent_groove.is_some() {
+                    bail!("duplicate silent_groove extent segment");
                 }
-                deadwax = Some(decode_deadwax_extent(payload)?);
+                silent_groove = Some(decode_silent_groove_extent(payload)?);
             }
             SEGMENT_GROOVE_HANDEDNESS => {
                 if payload.len() != 1 {
@@ -2971,7 +2985,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
                 assign_once(&mut spiral_clockwise, payload[0] != 0, "groove handedness")?;
             }
             SEGMENT_LEAD_OUT_GEOMETRY => {
-                // Sized rather than versioned, as the deadwax extent is: one
+                // Sized rather than versioned, as the silent groove extent is: one
                 // byte is the revision alone, four carries the tone the
                 // trailer was cut in, and a longer payload from a later
                 // writer decodes to what these mean.
@@ -3076,9 +3090,9 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         checksum_protected: true,
         b_value_bits: prefix.b_value_bits,
         cut_inner_radius: prefix.cut_inner_radius,
-        deadwax_b_value_bits: prefix.deadwax_b_value_bits,
+        silent_groove_b_value_bits: prefix.silent_groove_b_value_bits,
         spiral_family: spiral_family.unwrap_or_default(),
-        spiral_clockwise: spiral_clockwise.unwrap_or(true),
+        spiral_clockwise: spiral_clockwise.unwrap_or(false),
         record_profile,
         stream_byte_length,
         payload_encoding,
@@ -3102,7 +3116,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         isrcs: isrcs.unwrap_or_default(),
         upc,
         deferred_attestation,
-        deadwax,
+        silent_groove,
         lead_out_geometry_revision: lead_out_geometry
             .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04),
         run_out_tone,
@@ -3293,7 +3307,7 @@ mod tests {
         full.extend_from_slice(&segments.to_be_bytes());
         full.extend_from_slice(&(body.len() as u16).to_be_bytes());
         full.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
-        // A cut that reached the label leaves no deadwax band, and therefore
+        // A cut that reached the label leaves no silent groove band, and therefore
         // no feed.
         full.extend_from_slice(&0u16.to_be_bytes());
         full.extend_from_slice(&0f64.to_bits().to_be_bytes());
@@ -3336,7 +3350,7 @@ mod tests {
             checksum_protected: true,
             b_value_bits: 1.0f64.to_bits(),
             cut_inner_radius: 0,
-            deadwax_b_value_bits: 0,
+            silent_groove_b_value_bits: 0,
             spiral_family: SpiralFamily::Archimedean,
             record_profile: RECORD_PROFILE_SINGLE45.to_string(),
             stream_byte_length: 4096,
@@ -3366,7 +3380,7 @@ mod tests {
             isrcs: Vec::new(),
             upc: None,
             deferred_attestation: None,
-            deadwax: None,
+            silent_groove: None,
             lead_out_geometry_revision: LEAD_OUT_GEOMETRY_REVISION,
         }
     }

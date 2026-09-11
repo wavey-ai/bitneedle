@@ -14,7 +14,7 @@ const SCHEME: &str = "pairsign-safe-luma-v2";
 
 /// A programme short enough that the cut stops well above the label.
 ///
-/// A side that runs to the label leaves no deadwax, and the deadwax is one of
+/// A side that runs to the label leaves no silent groove and the silent groove is one of
 /// the carriers under test. The bytes are opaque to the press: an unregistered
 /// container name selects the extension container, which carries them as they
 /// are.
@@ -24,7 +24,7 @@ fn payload() -> Vec<u8> {
         .collect()
 }
 
-/// A pressed record with a wheel, so its deadwax and trailer carry a palette.
+/// A pressed record with a wheel, so its silent groove and trailer carry a palette.
 fn press_toned(payload: &[u8]) -> Vec<u8> {
     let options = serde_json::json!({
         "grooveToneSlots": [
@@ -99,7 +99,7 @@ fn a_toned_record_offers_every_carrier_in_fill_order() {
         order,
         vec![
             SidecarCarrier::LeadIn,
-            SidecarCarrier::Deadwax,
+            SidecarCarrier::SilentGroove,
             SidecarCarrier::Trailer,
             SidecarCarrier::Intergroove,
             SidecarCarrier::Label,
