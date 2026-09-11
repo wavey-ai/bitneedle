@@ -31,18 +31,10 @@ pub const GAP_MAGIC: &[u8; 4] = b"GAP1";
 /// Current GAP payload version.
 pub const GAP_VERSION: u8 = 1;
 
-/// The `flags` bit that marks a GAP entry with a *patternized* filler. A
-/// patternized filler has its pixels reordered after toning, for visual effect,
-/// so its bytes differ from the raw `xorshift32(seed)` keystream. With this bit
-/// set, the enclosing chunk CRC32 carries the integrity of the entry, as it does
-/// for every chunk payload outside a GAP, and [`validate_gap_payload`] skips its
-/// keystream-equality check. The seed then records the construction of the
-/// entry.
-pub const GAP_FLAG_PATTERNIZED: u8 = 0x01;
-
-/// Mask of every `flags` bit that this version reads. Any other bit set marks
-/// an entry from a later writer, and a reader must reject that entry.
-const GAP_KNOWN_FLAGS: u8 = GAP_FLAG_PATTERNIZED;
+/// Mask of every `flags` bit that this version reads. No flag bit is defined,
+/// so any bit set marks an entry from a later writer and a reader must reject
+/// that entry.
+const GAP_KNOWN_FLAGS: u8 = 0;
 
 /// Byte length of the fixed `GAP1` header preceding the deterministic filler.
 pub const GAP_HEADER_LENGTH: usize = 4 // magic
@@ -87,16 +79,8 @@ pub struct GapHeader {
     pub payload_byte_length: u64,
     /// Deterministic filler seed.
     pub seed: u32,
-    /// Entry flags (see [`GAP_FLAG_PATTERNIZED`]).
+    /// Entry flags. Reserved; every bit must be zero.
     pub flags: u8,
-}
-
-impl GapHeader {
-    /// Whether this entry's filler has been patternized (see
-    /// [`GAP_FLAG_PATTERNIZED`]).
-    pub fn is_patternized(&self) -> bool {
-        self.flags & GAP_FLAG_PATTERNIZED != 0
-    }
 }
 
 /// Profile-derived geometry that sizes the visible band of a GAP, so that its
@@ -314,22 +298,15 @@ pub fn validate_gap_payload(bytes: &[u8]) -> Result<GapHeader> {
         bytes.len()
     );
 
-    // The filler of a patternized GAP is a post-toning reordering of the
-    // keystream, so it differs from `xorshift32(seed)`. The enclosing chunk
-    // CRC32 carries the integrity of such an entry, as it does for every other
-    // chunk payload. This function checks the quiet-keystream form byte for
-    // byte.
-    if !header.is_patternized() {
-        // Verify the deterministic filler so a strict parser rejects tampered or
-        // corrupted carrier bytes that the enclosing integrity check might miss.
-        let mut generator = XorShift32::new(header.seed);
-        let mut expected = vec![0u8; bytes.len() - GAP_HEADER_LENGTH];
-        generator.fill_quiet(&mut expected);
-        ensure!(
-            &bytes[GAP_HEADER_LENGTH..] == expected.as_slice(),
-            "GAP deterministic filler does not match the declared seed"
-        );
-    }
+    // Verify the deterministic filler so a strict parser rejects tampered or
+    // corrupted carrier bytes that the enclosing integrity check might miss.
+    let mut generator = XorShift32::new(header.seed);
+    let mut expected = vec![0u8; bytes.len() - GAP_HEADER_LENGTH];
+    generator.fill_quiet(&mut expected);
+    ensure!(
+        &bytes[GAP_HEADER_LENGTH..] == expected.as_slice(),
+        "GAP deterministic filler does not match the declared seed"
+    );
 
     Ok(header)
 }
@@ -375,11 +352,6 @@ mod tests {
         out.resize(payload_byte_length, 0);
         fill_gap_quiet_filler(seed, &mut out[GAP_HEADER_LENGTH..]);
         out
-    }
-
-    fn test_mark_payload_patternized(payload: &mut [u8]) {
-        decode_gap_header(payload).unwrap();
-        payload[5] |= GAP_FLAG_PATTERNIZED;
     }
 
     #[test]
@@ -522,36 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn patternized_flag_skips_keystream_check_but_keeps_structural_checks() {
-        // A patternized entry: reorder the filler so it no longer equals the
-        // keystream, then stamp the flag.
-        let mut payload = test_encode_gap_payload(96_000, 256, 9);
-        payload[GAP_HEADER_LENGTH..].reverse();
-        // Without the flag, the reordered filler is rejected.
-        assert!(validate_gap_payload(&payload).is_err());
-
-        test_mark_payload_patternized(&mut payload);
-        let header = validate_gap_payload(&payload).unwrap();
-        assert!(header.is_patternized());
-        assert_eq!(header.flags, GAP_FLAG_PATTERNIZED);
-
-        // The structural checks still run on a patternized entry, so a
-        // declared-length mismatch is rejected.
-        assert!(validate_gap_payload(&payload[..255]).is_err());
-        // A corrupted magic is rejected.
-        let mut broken = payload.clone();
-        broken[0] = b'X';
-        assert!(decode_gap_header(&broken).is_err());
-    }
-
-    #[test]
     fn unknown_flag_bits_are_rejected() {
         let mut payload = test_encode_gap_payload(96_000, 64, 1);
         payload[5] = 0x80; // a bit this version does not understand
         assert!(decode_gap_header(&payload).is_err());
-        // The defined patternized bit is accepted.
-        payload[5] = GAP_FLAG_PATTERNIZED;
-        assert!(decode_gap_header(&payload).is_ok());
+        // No flag bit is defined, so bit 0x01 is rejected too.
+        payload[5] = 0x01;
+        assert!(decode_gap_header(&payload).is_err());
     }
 
     #[test]

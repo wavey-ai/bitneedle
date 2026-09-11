@@ -9,7 +9,6 @@ members = [
   "record-descriptor",
   "record-label",
   "record-groove",
-  "record-patternize",
   "record-proof",
   "record-package",
   "record-render",

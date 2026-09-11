@@ -10,10 +10,9 @@
 //! the canonical entry that decoder crates read back.
 
 use anyhow::{ensure, Result};
-use record_core::gap::decode_gap_header;
 use record_core::gap::{
     fill_gap_quiet_filler, gap_payload_byte_length, gap_sample_count_from_seconds,
-    GapRenderContext, GAP_FLAG_PATTERNIZED, GAP_HEADER_LENGTH, GAP_MAGIC, GAP_VERSION,
+    GapRenderContext, GAP_HEADER_LENGTH, GAP_MAGIC, GAP_VERSION,
 };
 
 /// Derive a deterministic GAP seed from stable construction context. Mixing all
@@ -113,19 +112,6 @@ pub fn build_gap_payload(
     encode_gap_payload(sample_count, payload_byte_length, seed)
 }
 
-/// Mark an already-encoded `GAP1` payload as patternized in place, setting
-/// `GAP_FLAG_PATTERNIZED` in its header. The filler bytes are left untouched;
-/// the actual reordering is performed later on the toned pixels, and the chunk
-/// CRC32 is (re)issued over the final bytes. Validates the header first so a
-/// malformed buffer is rejected rather than silently stamped.
-pub fn mark_payload_patternized(payload: &mut [u8]) -> Result<()> {
-    use anyhow::Context;
-    // Ensures magic/version/length are well-formed before mutating.
-    decode_gap_header(payload).context("cannot mark a malformed GAP payload as patternized")?;
-    payload[5] |= GAP_FLAG_PATTERNIZED;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,22 +145,5 @@ mod tests {
         // 2.0 s is 1.5 single45 revolutions wide.
         let expected = gap_payload_byte_length(2.0, "single45", &ctx()).unwrap();
         assert_eq!(payload.len(), expected);
-    }
-
-    #[test]
-    fn mark_payload_patternized_rejects_malformed() {
-        let mut not_a_gap = vec![0u8; GAP_HEADER_LENGTH];
-        assert!(mark_payload_patternized(&mut not_a_gap).is_err());
-    }
-
-    #[test]
-    fn mark_payload_patternized_round_trips() {
-        let mut payload = encode_gap_payload(96_000, 256, 9).unwrap();
-        payload[GAP_HEADER_LENGTH..].reverse();
-        assert!(validate_gap_payload(&payload).is_err());
-
-        mark_payload_patternized(&mut payload).unwrap();
-        let header = validate_gap_payload(&payload).unwrap();
-        assert!(header.is_patternized());
     }
 }

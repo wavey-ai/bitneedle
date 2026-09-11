@@ -186,39 +186,6 @@ fn repaint_label(png: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn the_patternize_map_is_run_against_the_groove_it_claims_to_describe() {
-    let png = press(&payload());
-
-    // A light permutation. `amount` is a percentage of blocks and the
-    // reverse map grows with it: at the default 20% the map for a record
-    // this small is four times what its carriers hold. 2% fits. (1.0 does
-    // not mean one percent — `normalize_amount` reads a value that is not
-    // greater than 1 as a fraction, so 1.0 is the whole groove.)
-    //
-    // Patternize writes the sidecar itself, so nothing is added first: the
-    // map has to be the sidecar the record ends up carrying.
-    let patternized = bitneedle_record_author::patternize_record_png_native(
-        &png,
-        "{\"amount\":2.0}",
-        Some(PROFILE),
-    )
-    .expect("the groove permutes")
-    .png_bytes;
-
-    let report = test_spin::sidecars::inspect(&patternized, Some(PROFILE));
-    assert!(report.present(), "the sidecar survived patternizing");
-    assert!(report.ok(), "and every check passes: {:#?}", report.checks);
-
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.label == "Patternize groove restores" && check.passed),
-        "the map was actually run, not merely parsed"
-    );
-}
-
-#[test]
 fn the_manifest_reads_a_pressed_record_flat() {
     let png = press(&payload());
     let png = with_sidecar(&png, serde_json::json!([text_item("note", "hello")]));

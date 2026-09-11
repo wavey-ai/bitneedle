@@ -25,7 +25,6 @@ record-core = { path = "../record-core", version = "0.1.7" }
 record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
 record-decode = { path = "../record-decode", version = "0.1.7" }
 record-sidecar = { path = "../record-sidecar", version = "0.1.7" }
-record-patternize = { path = "../record-patternize", version = "0.1.7" }
 encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"], optional = true }
 
 [features]

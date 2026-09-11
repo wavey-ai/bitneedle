@@ -147,23 +147,8 @@ impl ManifestReport {
 
 /// Read a pressed record and lay its manifest out flat.
 pub fn manifest_report(png: &[u8], options: &crate::InspectionOptions<'_>) -> Result<ManifestReport> {
-    // Patternize first: a permuted groove will not parse, and the reverse
-    // map lives in the sidecar.
-    //
-    // A restore that fails is not on its own a record that fails. The
-    // permutation is optional, and a record that was never permuted can
-    // still trip this — a sidecar that is not a reverse map, a descriptor
-    // this build does not know — so the plain decode is tried before
-    // anything is reported. What is reported then is the decode's own
-    // error, with the restore's beside it: naming the last thing tried
-    // rather than the thing that was wrong sends a reader hunting a
-    // Patternize map on a record that has none.
-    let decoded = match record_sidecar::restore_patternized_record_png(png, None) {
-        Ok(restored) => record_decode::decode_record_png(restored.as_deref().unwrap_or(png))
-            .context("failed to decode the record PNG")?,
-        Err(restore_error) => record_decode::decode_record_png(png)
-            .with_context(|| format!("this file could not be read as a record: {restore_error:#}"))?,
-    };
+    let decoded = record_decode::decode_record_png(png)
+        .context("failed to decode the record PNG")?;
     let descriptor = &decoded.descriptor;
     let parsed = record_core::parse_record_stream(&decoded.chunk_stream.bytes)
         .context("failed to parse the BRS1 record stream")?;

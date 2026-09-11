@@ -52,8 +52,6 @@ pub const PACKAGE_METADATA_ITEM_NAME: &str = "bitneedle-package-metadata.json";
 pub const PACKAGE_METADATA_MIME: &str = "application/vnd.bitneedle.package-metadata+json";
 pub const PACKAGE_PHOTO_MIME: &str = "image/avif";
 pub const PACKAGE_COVER_ITEM_NAME: &str = "album-cover.avif";
-pub const PACKAGE_PATTERN_SIDECAR_ITEM_NAME: &str = "bitneedle-pattern-map";
-pub const PACKAGE_PATTERN_SIDECAR_MIME: &str = "application/vnd.bitneedle.pattern-map";
 const DISPLAY_HEADER_FLAG_COVER_SHOWN: u16 = 1 << 0;
 const DISPLAY_HEADER_FLAG_COVER_EFFECTS: u16 = 1 << 1;
 const DISPLAY_HEADER_FLAG_COVER_RGB_GRAIN: u16 = 1 << 2;
@@ -1542,125 +1540,6 @@ pub fn build_package_sidecar_render_options(
     }
 
     serde_json::json!({ "sidecar": serde_json::Value::Object(sidecar) })
-}
-
-pub fn package_preserved_pattern_items_json(decoded_json: &str) -> Result<String> {
-    let decoded: serde_json::Value =
-        serde_json::from_str(decoded_json).context("decoded sidecar JSON is invalid")?;
-    let items = package_preserved_pattern_items(&decoded)?;
-    serde_json::to_string(&items).context("failed to serialize preserved pattern items")
-}
-
-pub fn package_preserved_pattern_items(
-    decoded: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>> {
-    let Some(items) = decoded.get("items").and_then(serde_json::Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    let mut preserved = Vec::new();
-    for item in items {
-        if package_decoded_item_is_pattern_map(item) {
-            preserved.push(package_preserved_pattern_item(item)?);
-        }
-    }
-    Ok(preserved)
-}
-
-fn package_decoded_item_is_pattern_map(item: &serde_json::Value) -> bool {
-    decoded_item_text_field(item, "name")
-        .is_some_and(|value| value == PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
-        || decoded_item_text_field(item, "mime")
-            .is_some_and(|value| value == PACKAGE_PATTERN_SIDECAR_MIME)
-}
-
-fn package_preserved_pattern_item(item: &serde_json::Value) -> Result<serde_json::Value> {
-    let item_type = decoded_item_u8_field(item, "itemType")?;
-    let codec = decoded_item_u8_field(item, "codec")?;
-    let mut preserved = serde_json::Map::new();
-    preserved.insert(
-        "type".to_string(),
-        package_sidecar_input_type_value(item_type),
-    );
-    preserved.insert(
-        "codec".to_string(),
-        package_sidecar_input_codec_value(codec),
-    );
-    preserved.insert(
-        "name".to_string(),
-        serde_json::Value::String(
-            decoded_item_text_field(item, "name")
-                .filter(|value| !value.is_empty())
-                .unwrap_or(PACKAGE_PATTERN_SIDECAR_ITEM_NAME)
-                .to_string(),
-        ),
-    );
-    preserved.insert(
-        "mime".to_string(),
-        serde_json::Value::String(
-            decoded_item_text_field(item, "mime")
-                .filter(|value| !value.is_empty())
-                .unwrap_or(PACKAGE_PATTERN_SIDECAR_MIME)
-                .to_string(),
-        ),
-    );
-    preserved.insert(
-        "dataBase64".to_string(),
-        serde_json::Value::String(
-            decoded_item_text_field(item, "storedDataBase64")
-                .context("pattern sidecar item is missing storedDataBase64")?
-                .to_string(),
-        ),
-    );
-    if let Some(raw_byte_length) = decoded_item_optional_u64_field(item, "rawByteLength") {
-        preserved.insert(
-            "rawByteLength".to_string(),
-            serde_json::json!(raw_byte_length),
-        );
-    }
-    if let Some(flags) = decoded_item_optional_u64_field(item, "flags").filter(|value| *value != 0)
-    {
-        preserved.insert("flags".to_string(), serde_json::json!(flags));
-    }
-    Ok(serde_json::Value::Object(preserved))
-}
-
-fn package_sidecar_input_type_value(item_type: u8) -> serde_json::Value {
-    match item_type {
-        SIDECAR_TYPE_OPAQUE => serde_json::json!("opaque"),
-        SIDECAR_TYPE_UTF8_TEXT => serde_json::json!("text"),
-        SIDECAR_TYPE_IMAGE => serde_json::json!("image"),
-        SIDECAR_TYPE_JSON => serde_json::json!("json"),
-        value => serde_json::json!(value),
-    }
-}
-
-fn package_sidecar_input_codec_value(codec: u8) -> serde_json::Value {
-    match codec {
-        SIDECAR_CODEC_RAW => serde_json::json!("raw"),
-        SIDECAR_CODEC_BROTLI => serde_json::json!("brotli"),
-        SIDECAR_CODEC_ZSTD => serde_json::json!("zstd"),
-        SIDECAR_CODEC_AVIF => serde_json::json!("avif"),
-        value => serde_json::json!(value),
-    }
-}
-
-fn decoded_item_u8_field(item: &serde_json::Value, field: &str) -> Result<u8> {
-    let value = item
-        .get(field)
-        .and_then(serde_json::Value::as_u64)
-        .with_context(|| format!("decoded sidecar item is missing numeric {field}"))?;
-    u8::try_from(value).with_context(|| format!("decoded sidecar item {field} exceeds u8 range"))
-}
-
-fn decoded_item_optional_u64_field(item: &serde_json::Value, field: &str) -> Option<u64> {
-    item.get(field).and_then(serde_json::Value::as_u64)
-}
-
-fn decoded_item_text_field<'a>(item: &'a serde_json::Value, field: &str) -> Option<&'a str> {
-    item.get(field)
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
 }
 
 fn package_quantizer_trials_by_quantizer(
@@ -3532,14 +3411,6 @@ impl SidecarInspection {
         self.decoded.items.iter().find(|item| item.name == name)
     }
 
-    /// The Patternize reverse map, if the groove was permuted.
-    pub fn pattern_map(&self) -> Option<&SidecarDecodedItem> {
-        self.decoded.items.iter().find(|item| {
-            item.name == PACKAGE_PATTERN_SIDECAR_ITEM_NAME
-                || item.mime == PACKAGE_PATTERN_SIDECAR_MIME
-        })
-    }
-
     /// Every item that is not one of the reserved, structural ones: the
     /// arbitrary data a presser chose to carry.
     pub fn arbitrary_items(&self) -> Vec<&SidecarDecodedItem> {
@@ -3548,8 +3419,6 @@ impl SidecarInspection {
             .iter()
             .filter(|item| {
                 item.name != SIDECAR_ATTESTATION_ITEM_NAME
-                    && item.name != PACKAGE_PATTERN_SIDECAR_ITEM_NAME
-                    && item.mime != PACKAGE_PATTERN_SIDECAR_MIME
                     && item.name != DISPLAY_HEADER_NAME
                     && item.name != PACKAGE_METADATA_ITEM_NAME
                     && item.name != PACKAGE_COVER_ITEM_NAME
@@ -3616,51 +3485,6 @@ pub fn inspect_record_png_sidecar(
         attestation_covers,
         pointer_digest_matches,
     }))
-}
-
-/// Restore a Patternize groove permutation before payload decoding.
-///
-/// Returns `Ok(None)` for an ordinary record or a sidecar that contains no
-/// BNPM item. The restored PNG retains its descriptor and sidecar pixels; only
-/// payload-groove pixels are put back in their exact pre-Patternize order.
-pub fn restore_patternized_record_png(
-    png_bytes: &[u8],
-    record_profile: Option<&str>,
-) -> Result<Option<Vec<u8>>> {
-    let mut context = decode_record_png_context(png_bytes, record_profile)?;
-    if sidecar_pointer_from_descriptor(&context.descriptor)?.is_none() {
-        return Ok(None);
-    }
-    let (bts1, _) =
-        decode_record_png_sidecar_with_context(png_bytes, Some(&context.record_profile))
-            .context("failed to decode Patternize reverse-map sidecar")?;
-    let decoded =
-        decode_sidecar_container_items(&bts1).context("Patternize sidecar container is invalid")?;
-    let Some(item) = decoded.items.iter().find(|item| {
-        item.name == PACKAGE_PATTERN_SIDECAR_ITEM_NAME || item.mime == PACKAGE_PATTERN_SIDECAR_MIME
-    }) else {
-        return Ok(None);
-    };
-    let reverse_map = decode_base64_text(&item.data_base64, "Patternize reverse map")?;
-    let mask = record_core::build_spiral_mask_with_family(
-        context.width,
-        context.height,
-        context.descriptor.b_value(),
-        &context.descriptor.spiral_family,
-        &context.record_profile,
-        None,
-        None,
-        None,
-    )?;
-    let groove_indices = mask
-        .ordered_pixel_indices
-        .iter()
-        .copied()
-        .take_while(|pixel_index| context.rgba[pixel_index * 4 + 3] != 0)
-        .collect::<Vec<_>>();
-    record_patternize::restore(&mut context.rgba, &groove_indices, &reverse_map)
-        .context("failed to restore Patternize groove pixels")?;
-    write_rgba_png(context.width, context.height, &context.rgba).map(Some)
 }
 
 pub fn rewrite_record_png(
@@ -5129,40 +4953,6 @@ mod tests {
         assert_eq!(bsc1_options["sidecar"]["labelTuning"]["grain"], 3);
         assert_eq!(bsc1_options["sidecar"]["bsc1Base64"], "AAAA");
         assert!(bsc1_options["sidecar"]["items"].is_null());
-    }
-
-    #[test]
-    fn package_pattern_preservation_owns_decoded_item_protocol_mapping() {
-        let decoded = serde_json::json!({
-            "items": [
-                {
-                    "itemType": 3,
-                    "codec": 0,
-                    "flags": 2,
-                    "rawByteLength": 123,
-                    "name": PACKAGE_PATTERN_SIDECAR_ITEM_NAME,
-                    "mime": PACKAGE_PATTERN_SIDECAR_MIME,
-                    "storedDataBase64": "stored-bytes",
-                    "dataBase64": "decoded-bytes"
-                },
-                {
-                    "itemType": 2,
-                    "codec": 3,
-                    "name": "album-cover.avif",
-                    "mime": "image/avif",
-                    "storedDataBase64": "cover"
-                }
-            ]
-        });
-        let items = package_preserved_pattern_items(&decoded).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["type"], "json");
-        assert_eq!(items[0]["codec"], "raw");
-        assert_eq!(items[0]["name"], PACKAGE_PATTERN_SIDECAR_ITEM_NAME);
-        assert_eq!(items[0]["mime"], PACKAGE_PATTERN_SIDECAR_MIME);
-        assert_eq!(items[0]["dataBase64"], "stored-bytes");
-        assert_eq!(items[0]["rawByteLength"], 123);
-        assert_eq!(items[0]["flags"], 2);
     }
 
     #[test]

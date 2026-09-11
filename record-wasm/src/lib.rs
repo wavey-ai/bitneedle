@@ -802,14 +802,13 @@ fn decode_record_png_payload_bytes(png_bytes: &[u8]) -> Result<Vec<u8>> {
     decoded_chunk_stream_payload_bytes(&decoded.chunk_stream.bytes)
 }
 
-fn decode_pattern_aware_chunk_stream(
+fn decode_chunk_stream_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
     byte_length: Option<usize>,
 ) -> Result<record_decode::DecodedChunkStream> {
-    let restored = record_sidecar::restore_patternized_record_png(png_bytes, Some(record_profile))?;
     record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
-        restored.as_deref().unwrap_or(png_bytes),
+        png_bytes,
         record_profile,
         byte_length,
     )
@@ -819,7 +818,7 @@ fn decode_record_png_payload_bytes_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
 ) -> Result<Vec<u8>> {
-    let decoded = decode_pattern_aware_chunk_stream(png_bytes, record_profile, None)
+    let decoded = decode_chunk_stream_for_profile(png_bytes, record_profile, None)
         .context("failed to decode Bitneedle record PNG for profile")?;
     decoded_chunk_stream_payload_bytes(&decoded.bytes)
 }
@@ -837,7 +836,7 @@ fn decode_record_png_to_payload_with_length(
     let decode_with_length = || -> Result<WasmPayloadDecodeResult> {
         let (profile, _descriptor) = decode_record_descriptor_resolving_profile(png_bytes, None)
             .context("failed to decode Bitneedle record descriptor")?;
-        let decoded = decode_pattern_aware_chunk_stream(png_bytes, &profile, Some(byte_length))
+        let decoded = decode_chunk_stream_for_profile(png_bytes, &profile, Some(byte_length))
             .context("failed to decode Bitneedle record PNG with explicit byte length")?;
         decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
     };
@@ -855,7 +854,7 @@ fn decode_record_png_to_payload_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
 ) -> Result<WasmPayloadDecodeResult> {
-    let decoded = decode_pattern_aware_chunk_stream(png_bytes, record_profile, None)
+    let decoded = decode_chunk_stream_for_profile(png_bytes, record_profile, None)
         .context("failed to decode Bitneedle record PNG for profile")?;
     decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
 }
@@ -867,7 +866,7 @@ fn decode_record_png_to_payload_for_profile_with_length(
 ) -> Result<WasmPayloadDecodeResult> {
     let decode_with_length = || -> Result<WasmPayloadDecodeResult> {
         let decoded =
-            decode_pattern_aware_chunk_stream(png_bytes, record_profile, Some(byte_length))
+            decode_chunk_stream_for_profile(png_bytes, record_profile, Some(byte_length))
                 .context(
                     "failed to decode Bitneedle record PNG for profile with explicit byte length",
                 )?;
@@ -943,7 +942,7 @@ fn decode_record_png_resolving_profile(
 ) -> Result<record_decode::DecodedRecord> {
     let (normalized_profile, descriptor) =
         decode_record_descriptor_resolving_profile(png_bytes, record_profile)?;
-    let chunk_stream = decode_pattern_aware_chunk_stream(
+    let chunk_stream = decode_chunk_stream_for_profile(
         png_bytes,
         &normalized_profile,
         Some(descriptor.stream_byte_length),

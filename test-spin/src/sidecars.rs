@@ -2,13 +2,11 @@
 //!
 //! The payload — BRD1, BRS1, the spirals — was the only thing this tool ever
 //! read. A pressed record also carries a BSC1 sidecar hidden in the label,
-//! the intergroove and the lead-in, and that sidecar is where the Patternize
-//! reverse map lives, where the package's display header and metadata live,
-//! where a cover sits, and where a presser may put anything at all. None of
-//! it was inspected, so a record could pass `record-test` with a sidecar that
-//! was truncated, mistyped, unattested, or carrying a reverse map that would
-//! not restore the groove it claims to describe — which is to say, a record
-//! that does not open.
+//! the intergroove and the lead-in, and that sidecar is where the package's
+//! display header and metadata live, where a cover sits, and where a presser
+//! may put anything at all. None of it was inspected, so a record could pass
+//! `record-test` with a sidecar that was truncated, mistyped or unattested —
+//! which is to say, a record that does not open.
 //!
 //! The inspection checks every item, including the items with unknown names:
 //!
@@ -19,9 +17,6 @@
 //!   declared raw length against its decompressed length, and its payload
 //!   against its declared type: text is UTF-8, JSON parses, and an image is
 //!   AVIF;
-//! * the Patternize reverse map, run against the groove indices of this
-//!   record, so a map that fails to restore reports a failure here rather than
-//!   in a player;
 //! * the package display header's magic, version, length and both CRCs;
 //! * the package metadata and cover;
 //! * the attestation, and whether it covers the items that the sidecar holds;
@@ -32,8 +27,8 @@ use anyhow::{Context, Result};
 use record_sidecar::{
     SidecarDecodedItem, SidecarInspection, DISPLAY_HEADER_LENGTH, DISPLAY_HEADER_MAGIC,
     DISPLAY_HEADER_NAME, DISPLAY_HEADER_VERSION, PACKAGE_COVER_ITEM_NAME,
-    PACKAGE_METADATA_ITEM_NAME, PACKAGE_PATTERN_SIDECAR_ITEM_NAME, SIDECAR_ATTESTATION_ITEM_NAME,
-    SIDECAR_CONTAINER_VERSION, SIDECAR_MAGIC,
+    PACKAGE_METADATA_ITEM_NAME, SIDECAR_ATTESTATION_ITEM_NAME, SIDECAR_CONTAINER_VERSION,
+    SIDECAR_MAGIC,
 };
 
 use crate::manifest::{ManifestRow, ManifestSection};
@@ -102,7 +97,7 @@ pub fn inspect(png: &[u8], record_profile: Option<&str>) -> SidecarReport {
             checks: Vec::new(),
         },
         Ok(Some(inspection)) => {
-            let checks = collect_checks(png, record_profile, &inspection);
+            let checks = collect_checks(&inspection);
             SidecarReport {
                 inspection: Some(inspection),
                 error: None,
@@ -120,11 +115,7 @@ pub fn inspect(png: &[u8], record_profile: Option<&str>) -> SidecarReport {
     }
 }
 
-fn collect_checks(
-    png: &[u8],
-    record_profile: Option<&str>,
-    inspection: &SidecarInspection,
-) -> Vec<SidecarCheck> {
+fn collect_checks(inspection: &SidecarInspection) -> Vec<SidecarCheck> {
     let mut checks = Vec::new();
     let bytes = &inspection.bytes;
 
@@ -253,26 +244,6 @@ fn collect_checks(
         ));
     }
 
-    // The Patternize reverse map, run against this record. A map that parses
-    // and describes another groove is the one failure that a player cannot
-    // recover from, and every other check here passes it.
-    match inspection.pattern_map() {
-        Some(item) => {
-            checks.push(SidecarCheck::from(
-                "Patternize reverse map",
-                pattern_map_detail(item),
-            ));
-            checks.push(SidecarCheck::from(
-                "Patternize groove restores",
-                restores_detail(png, record_profile),
-            ));
-        }
-        None => checks.push(SidecarCheck::pass(
-            "Patternize reverse map",
-            "absent; the groove was never permuted",
-        )),
-    }
-
     // The package's display header: fixed 128 bytes, two CRCs, one over the
     // payload and one over the header with its own CRC field zeroed.
     match inspection.item(DISPLAY_HEADER_NAME) {
@@ -332,30 +303,6 @@ fn carrier_names(pointer: &record_sidecar::SidecarHeaderPointer) -> String {
         .map(|carrier| carrier.name())
         .collect::<Vec<_>>()
         .join(" + ")
-}
-
-fn pattern_map_detail(item: &SidecarDecodedItem) -> Result<String> {
-    let map = record_sidecar::decode_base64_text(&item.data_base64, "Patternize reverse map")?;
-    let amount = record_patternize::reverse_map_amount(&map)
-        .context("the reverse map's header is not readable")?;
-    Ok(format!(
-        "BNPM, {} bytes, amount {amount:.3}",
-        map.len()
-    ))
-}
-
-fn restores_detail(png: &[u8], record_profile: Option<&str>) -> Result<String> {
-    let restored = record_sidecar::restore_patternized_record_png(png, record_profile)
-        .context("the reverse map would not restore this record's groove")?;
-    match restored {
-        Some(bytes) => Ok(format!(
-            "the groove was put back in order, {} bytes rewritten",
-            bytes.len()
-        )),
-        // A map present in the container but not applied means the record
-        // was read as unpermuted, which contradicts the item being there.
-        None => anyhow::bail!("a reverse map is present but the record restored nothing"),
-    }
 }
 
 fn display_header_detail(item: &SidecarDecodedItem) -> Result<String> {
@@ -561,12 +508,11 @@ pub fn sections(report: &SidecarReport) -> Vec<ManifestSection> {
 }
 
 /// The name an item is shown under. The reserved names are spelled out —
-/// `attestation` and `bitneedle-pattern-map` say nothing to a reader — and
-/// everything else keeps the name it was stored with.
+/// `attestation` says nothing to a reader — and everything else keeps the name
+/// it was stored with.
 fn item_label(item: &SidecarDecodedItem) -> String {
     match item.name.as_str() {
         SIDECAR_ATTESTATION_ITEM_NAME => "Attestation".to_owned(),
-        PACKAGE_PATTERN_SIDECAR_ITEM_NAME => "Patternize map".to_owned(),
         DISPLAY_HEADER_NAME => "Display header".to_owned(),
         PACKAGE_METADATA_ITEM_NAME => "Package metadata".to_owned(),
         PACKAGE_COVER_ITEM_NAME => "Album cover".to_owned(),
