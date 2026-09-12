@@ -1,6 +1,6 @@
 [package]
 name = "record-sidecar"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "bitneedle steganographic data carrier for sleeve extras"
 repository = "https://github.com/wavey-ai/bitneedle"
@@ -18,7 +18,7 @@ brotli = "7"
 bytes2rgb = { version = "0.1.7", path = "../bytes2rgb" }
 record-core = { version = "0.1.7", path = "../record-core" }
 record-cut = { version = "0.1.7", path = "../record-cut" }
-record-decode = { path = "../record-decode", version = "0.1.7" }
+record-decode = { path = "../record-decode", version = "0.1.9" }
 record-descriptor = { version = "0.1.7", path = "../record-descriptor" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

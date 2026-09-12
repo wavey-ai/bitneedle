@@ -1,6 +1,6 @@
 [package]
 name = "test-spin"
-version = "0.1.7"
+version = "0.1.9"
 edition = "2021"
 description = "Bitneedle record inspection/report CLI for testing and verification"
 repository = "https://github.com/wavey-ai/bitneedle"
@@ -21,16 +21,16 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-record-core = { path = "../record-core", version = "0.1.7" }
-record-descriptor = { path = "../record-descriptor", version = "0.1.7" }
+record-core = { path = "../record-core", version = "0.1.9" }
+record-descriptor = { path = "../record-descriptor", version = "0.1.9" }
 # Every format the press can read back, always: record-test is the reader of
 # record what came off the disc, and a record exported as WebP, TIFF or QOI
 # must not be refused by the one tool that exists to inspect it.
-record-decode = { path = "../record-decode", version = "0.1.7", features = ["all-formats"] }
-record-sidecar = { path = "../record-sidecar", version = "0.1.7" }
+record-decode = { path = "../record-decode", version = "0.1.9", features = ["all-formats"] }
+record-sidecar = { path = "../record-sidecar", version = "0.1.9" }
 # The YL catalogue code is derived, never stored: this is the crate that
 # derives it, so the report cannot disagree with the phone or the label.
-bitneedle-id = { path = "../bitneedle-id", version = "0.1.7" }
+bitneedle-id = { path = "../bitneedle-id", version = "0.1.9" }
 encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"], optional = true }
 
 [features]
