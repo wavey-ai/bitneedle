@@ -32,7 +32,7 @@ pub struct InspectionOptions<'a> {
     /// Optional EnCodec bundle metadata used only for ECDC packet-layout
     /// diagnostics.
     #[cfg(feature = "bundle-metadata")]
-    pub bundle_metadata: Option<&'a encodec_rs::metadata::OnnxFrameBundleMetadata>,
+    pub bundle_metadata: Option<&'a encodec_rs::metadata::FrameBundleMetadata>,
 
     /// Optional external release-manifest bytes. BRD1 contains only a binary
     /// signed-release reference, so the complete manifest must be supplied
@@ -196,6 +196,12 @@ pub fn report_descriptor(
             .canonical_url
             .as_deref()
             .and_then(yl_catalogue_code_from_url)
+            .unwrap_or_else(|| "absent".to_owned())
+    )?;
+    writeln!(
+        out,
+        "  derived YL code:      {}",
+        yl_catalogue_code_from_release_id(descriptor.release_id)
             .unwrap_or_else(|| "absent".to_owned())
     )?;
     writeln!(
@@ -1610,12 +1616,12 @@ fn report_gap_payload_body(out: &mut String, entry: &[u8]) -> Result<()> {
 #[cfg(feature = "bundle-metadata")]
 pub fn load_bundle_metadata(
     path: impl AsRef<std::path::Path>,
-) -> Result<encodec_rs::metadata::OnnxFrameBundleMetadata> {
+) -> Result<encodec_rs::metadata::FrameBundleMetadata> {
     let path = path.as_ref();
     let json = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read bundle JSON {}", path.display()))?;
 
-    serde_json::from_str(&json).context("failed to deserialize OnnxFrameBundleMetadata")
+    serde_json::from_str(&json).context("failed to deserialize FrameBundleMetadata")
 }
 
 fn report_json_structure(out: &mut String, value: &serde_json::Value) -> Result<()> {
@@ -1691,6 +1697,8 @@ fn report_final_summary(
         .canonical_url
         .as_deref()
         .and_then(yl_catalogue_code_from_url)
+        .unwrap_or_else(|| "absent".to_owned());
+    let derived_catalogue_code = yl_catalogue_code_from_release_id(descriptor.release_id)
         .unwrap_or_else(|| "absent".to_owned());
     let signature_key = descriptor
         .signed_release_reference
@@ -1782,6 +1790,7 @@ fn report_final_summary(
     writeln!(out, "  IDENTITY")?;
     writeln!(out, "    release ID:        {release_id}")?;
     writeln!(out, "    YL catalogue code: {catalogue_code}")?;
+    writeln!(out, "    derived YL code:   {derived_catalogue_code}")?;
     writeln!(out, "    canonical URL:     {canonical_url}")?;
     writeln!(
         out,
@@ -1920,6 +1929,18 @@ fn yl_catalogue_code_from_url(url: &str) -> Option<String> {
     }
 
     Some(format!("yl_{compact}"))
+}
+
+/// The YL catalogue code a record's own release id derives.
+///
+/// The code is computed, never stored — it is the release's identity at the
+/// resolution a person reads aloud, so a record that has not been issued yet
+/// still has one, and the report can say what the row would be. This is the
+/// same derivation the phone and the label use, from the same crate.
+pub(crate) fn yl_catalogue_code_from_release_id(
+    release_id: Option<[u8; record_descriptor::RELEASE_ID_LENGTH]>,
+) -> Option<String> {
+    release_id.map(|bytes| bitneedle_id::YlCatalogueCode::derive(bytes).canonical())
 }
 
 fn green_tick() -> &'static str {
@@ -2226,6 +2247,46 @@ fn report_sidecar(out: &mut String, png: &[u8], record_profile: &str) -> Result<
             writeln!(out, "{}", indent(&text.chars().take(512).collect::<String>(), 6))?;
         } else if let Some(json) = item.json.as_ref() {
             report_json_structure(out, json)?;
+        }
+    }
+
+    if let Some(press) = report.press_metadata() {
+        section(out, "PRESSED RECORD METADATA");
+        writeln!(
+            out,
+            "  saved record ID:           {}",
+            press.saved_record_id.as_deref().unwrap_or("absent")
+        )?;
+        writeln!(
+            out,
+            "  side:                      {}",
+            press.side.as_deref().unwrap_or("absent")
+        )?;
+        writeln!(
+            out,
+            "  edition:                   {}",
+            match (press.edition_number, press.edition_maximum) {
+                (Some(number), Some(maximum)) if maximum > 0 => format!("{number} of {maximum}"),
+                (Some(number), _) => number.to_string(),
+                _ => "open".to_owned(),
+            }
+        )?;
+        if let Some(kind) = press.edition_kind.as_deref() {
+            writeln!(out, "  edition kind:              {kind}")?;
+        }
+        if press.tracks.is_empty() {
+            writeln!(out, "  track IDs:                 none")?;
+        } else {
+            for (index, track) in press.tracks.iter().enumerate() {
+                match track.artist.as_deref() {
+                    Some(artist) => writeln!(
+                        out,
+                        "  track[{index}] ID:            {} (artist {artist})",
+                        track.id
+                    )?,
+                    None => writeln!(out, "  track[{index}] ID:            {}", track.id)?,
+                }
+            }
         }
     }
 

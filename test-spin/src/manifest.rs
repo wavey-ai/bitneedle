@@ -154,10 +154,11 @@ pub fn manifest_report(png: &[u8], options: &crate::InspectionOptions<'_>) -> Re
         .context("failed to parse the BRS1 record stream")?;
 
     let sidecar = sidecars::inspect(png, Some(&decoded.record_profile));
+    let press = sidecar.press_metadata();
 
     let mut sections = Vec::new();
     sections.push(record_section(png, &decoded, options.png_name));
-    sections.push(identity_section(descriptor));
+    sections.push(identity_section(descriptor, press.as_ref()));
     sections.push(audio_section(&parsed));
     sections.push(programme_section(&parsed));
     sections.extend(sidecars::sections(&sidecar));
@@ -227,7 +228,7 @@ pub fn structure_report(png: &[u8]) -> Result<ManifestReport> {
         ok: true,
         checks_passed: 0,
         checks_failed: 0,
-        sections: vec![record, identity_section(&descriptor)],
+        sections: vec![record, identity_section(&descriptor, None)],
     })
 }
 
@@ -260,7 +261,10 @@ fn record_section(
     section
 }
 
-fn identity_section(descriptor: &RecordDescriptor) -> ManifestSection {
+fn identity_section(
+    descriptor: &RecordDescriptor,
+    press: Option<&sidecars::PressMetadata>,
+) -> ManifestSection {
     let mut section = ManifestSection::new("IDENTITY");
     section.push(ManifestRow::new(
         "Title",
@@ -285,14 +289,38 @@ fn identity_section(descriptor: &RecordDescriptor) -> ManifestSection {
             .map(record_descriptor::release_id_to_text)
             .unwrap_or_else(|| "—".to_owned()),
     ));
+    // The code is derived from the release's own id, so this row says what
+    // the record is called on a label whether or not it has been issued and
+    // has a canonical URL yet.
     section.push(ManifestRow::new(
-        "YL code",
+        "Derived YL code",
+        crate::yl_catalogue_code_from_release_id(descriptor.release_id)
+            .unwrap_or_else(|| "—".to_owned()),
+    ));
+    section.push(ManifestRow::new(
+        "YL code (issued)",
         descriptor
             .canonical_url
             .as_deref()
             .and_then(crate::yl_catalogue_code_from_url)
             .unwrap_or_else(|| "—".to_owned()),
     ));
+    // A press stamps the ids it cut from beside the groove; the release id
+    // above is the release they belong to, and this is the other half of
+    // where the record came from.
+    if let Some(press) = press {
+        if !press.tracks.is_empty() {
+            section.push(ManifestRow::new(
+                "Track IDs",
+                press
+                    .tracks
+                    .iter()
+                    .map(|track| track.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
     section.push(ManifestRow::new(
         "Canonical URL",
         descriptor.canonical_url.as_deref().unwrap_or("—"),

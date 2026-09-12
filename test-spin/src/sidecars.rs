@@ -86,6 +86,90 @@ impl SidecarReport {
     pub fn present(&self) -> bool {
         self.inspection.is_some()
     }
+
+    /// The pressed-record supplemental metadata, when the sidecar holds it.
+    ///
+    /// A press (rather than an import) stamps one reserved item beside the
+    /// groove: the track ids behind the side, the saved record it came from,
+    /// the side letter and any edition. The record's own descriptor holds
+    /// the release id and the YL code is derived from it; the track ids are
+    /// only here, which is why the manifest surfaces them.
+    pub fn press_metadata(&self) -> Option<PressMetadata> {
+        press_metadata(self.inspection.as_ref()?)
+    }
+}
+
+/// The reserved sidecar item a press writes, and the `kind` it carries.
+pub const PRESS_METADATA_ITEM_NAME: &str = "infidelity-pressed-record-v1.json";
+pub const PRESS_METADATA_KIND: &str = "infidelity.pressedRecord";
+
+/// One track of a pressed record, as the supplemental item names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PressTrackMetadata {
+    pub id: String,
+    pub artist: Option<String>,
+}
+
+/// What a press stamped beside the groove.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PressMetadata {
+    pub saved_record_id: Option<String>,
+    pub side: Option<String>,
+    pub edition_number: Option<u64>,
+    pub edition_maximum: Option<u64>,
+    pub edition_kind: Option<String>,
+    pub tracks: Vec<PressTrackMetadata>,
+}
+
+/// Read the reserved item, by name and by its own `kind`, so a record that
+/// renamed the file still reads and one that merely borrowed the name does
+/// not.
+fn press_metadata(inspection: &SidecarInspection) -> Option<PressMetadata> {
+    for item in &inspection.decoded.items {
+        if item.name != PRESS_METADATA_ITEM_NAME {
+            continue;
+        }
+        let Some(value) = item.json.as_ref() else {
+            continue;
+        };
+        if value.get("kind").and_then(|kind| kind.as_str()) != Some(PRESS_METADATA_KIND) {
+            continue;
+        }
+        let tracks = value
+            .get("tracks")
+            .and_then(|tracks| tracks.as_array())
+            .map(|tracks| {
+                tracks
+                    .iter()
+                    .filter_map(|track| {
+                        Some(PressTrackMetadata {
+                            id: track.get("id")?.as_str()?.to_owned(),
+                            artist: track
+                                .get("artist")
+                                .and_then(|artist| artist.as_str())
+                                .map(str::to_owned),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Some(PressMetadata {
+            saved_record_id: string_field(value, "savedRecordID"),
+            side: string_field(value, "side"),
+            edition_number: value.get("editionNumber").and_then(|number| number.as_u64()),
+            edition_maximum: value.get("editionMaximum").and_then(|number| number.as_u64()),
+            edition_kind: string_field(value, "editionKind"),
+            tracks,
+        });
+    }
+    None
+}
+
+fn string_field(value: &serde_json::Value, name: &str) -> Option<String> {
+    value
+        .get(name)
+        .and_then(|field| field.as_str())
+        .map(str::to_owned)
 }
 
 /// Read a record's sidecar and check every part of it.

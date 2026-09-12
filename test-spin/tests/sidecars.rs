@@ -274,6 +274,76 @@ fn long_values_are_cut_for_the_screen_and_kept_whole_for_the_share() {
     }
 }
 
+#[test]
+fn a_pressed_record_surfaces_its_release_and_track_ids() {
+    // The release id is cut into the descriptor; the track ids are only in
+    // the reserved supplemental item a press stamps beside the groove.
+    let release_id = "rel_01JXWQ7H6K8V4Z2T9M3N5C1BPA";
+    let track_id = "trk_01JXWQ7H6K8V4Z2T9M3N5C1BPA";
+    let options = format!(r#"{{"headerReleaseId":"{release_id}"}}"#);
+    let png = bitneedle_record_author::render_payload_container_to_png_native(
+        &payload(),
+        "ecdc",
+        "encodec",
+        "rgb",
+        PROFILE,
+        30.0,
+        &options,
+    )
+    .expect("the record presses with a release")
+    .png_bytes;
+    let png = with_sidecar(
+        &png,
+        serde_json::json!([serde_json::json!({
+            "type": "json",
+            "codec": "raw",
+            "name": test_spin::sidecars::PRESS_METADATA_ITEM_NAME,
+            "json": {
+                "kind": test_spin::sidecars::PRESS_METADATA_KIND,
+                "version": 1,
+                "savedRecordID": track_id,
+                "side": "a",
+                "tracks": [{ "id": track_id, "artist": "Lori Asha" }],
+            },
+        })]),
+    );
+
+    let report = test_spin::sidecars::inspect(&png, Some(PROFILE));
+    let press = report.press_metadata().expect("the press metadata is read");
+    assert_eq!(press.side.as_deref(), Some("a"));
+    assert_eq!(press.tracks.len(), 1);
+    assert_eq!(press.tracks[0].id, track_id);
+    assert_eq!(press.tracks[0].artist.as_deref(), Some("Lori Asha"));
+
+    let options = test_spin::InspectionOptions::verbose_defaults();
+    let manifest = test_spin::manifest_report(&png, &options).expect("the manifest reads");
+    let identity = manifest
+        .sections
+        .iter()
+        .find(|section| section.title == "IDENTITY")
+        .expect("the identity section");
+    let row = |label: &str| {
+        identity
+            .rows
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.whole().to_owned())
+    };
+    assert_eq!(
+        row("Release ID").as_deref(),
+        Some(record_descriptor::release_id_to_text(
+            record_descriptor::release_id_to_bytes(release_id).expect("a valid release id")
+        ))
+        .as_deref()
+    );
+    assert_eq!(row("Track IDs").as_deref(), Some(track_id));
+    let derived = bitneedle_id::YlCatalogueCode::derive(
+        record_descriptor::release_id_to_bytes(release_id).expect("a valid release id"),
+    )
+    .canonical();
+    assert_eq!(row("Derived YL code").as_deref(), Some(derived.as_str()));
+}
+
 /// Writes a real pressed record out, for driving the apps by hand.
 ///
 /// Ignored by default: it is not a test, it is the fixture the phone and the

@@ -2075,13 +2075,15 @@ pub fn parse_sidecar_carrier(raw: &str) -> Result<SidecarCarrier> {
         "label" => Ok(SidecarCarrier::Label),
         "intergroove" | "intragroove" | "groove" => Ok(SidecarCarrier::Intergroove),
         "leadin" => Ok(SidecarCarrier::LeadIn),
-        "silent_groove" => Ok(SidecarCarrier::SilentGroove),
+        // Normalized: the `_` is stripped above, so the spelling here must be
+        // the joined one. `deadwax` is the same band under its other name.
+        "silentgroove" | "deadwax" => Ok(SidecarCarrier::SilentGroove),
         "trailer" | "runout" | "leadout" | "lockedgroove" => Ok(SidecarCarrier::Trailer),
         // The rim band and the clearance above the label are intergroove. This
         // spelling named them when they were a region of their own, and it
         // named the lead-in groove alongside them, which is a carrier in its
         // own right now.
-        "leadinsilent_groove" | "leadsilent_groove" => Ok(SidecarCarrier::Intergroove),
+        "leadinsilentgroove" | "leadsilentgroove" => Ok(SidecarCarrier::Intergroove),
         _ => bail!("unknown sidecar carrier: {raw}"),
     }
 }
