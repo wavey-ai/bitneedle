@@ -26,12 +26,14 @@ record-descriptor = { path = "../record-descriptor", version = "0.1.9" }
 # Every format the press can read back, always: record-test is the reader of
 # record what came off the disc, and a record exported as WebP, TIFF or QOI
 # must not be refused by the one tool that exists to inspect it.
-record-decode = { path = "../record-decode", version = "0.1.9", features = ["all-formats"] }
+record-decode = { path = "../record-decode", version = "0.1.9", features = [
+  "all-formats",
+] }
 record-sidecar = { path = "../record-sidecar", version = "0.1.9" }
 # The YL catalogue code is derived, never stored: this is the crate that
 # derives it, so the report cannot disagree with the phone or the label.
 bitneedle-id = { path = "../bitneedle-id", version = "0.1.9" }
-encodec-rs = { path = "../../encodec-rs", version = "0.1.1", features = ["ecdc"], optional = true }
+encodec-rs = { version = "1.0.0", features = ["ecdc"], optional = true }
 
 [features]
 # The ECDC packet-layout diagnostics, and the bundle JSON they are read
