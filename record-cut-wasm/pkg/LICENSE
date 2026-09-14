@@ -2,7 +2,7 @@ WAVEY ARTIST SOURCE LICENCE
 
 Version 0.1
 
-Copyright © Wavey, Inc.
+Copyright © Wavey Inc
 
 This software and its source code are made available under the following terms.
 
@@ -36,11 +36,11 @@ This is a source-available licence. It is not an open-source licence.
 
 (f) primarily to commercialise the Software or the authoring technology itself.
 
-"Wavey Patent Rights" means patent claims owned or controlled by Wavey, Inc. that would necessarily be infringed by using the Software, with or without permitted modifications, solely for the activities expressly permitted by this licence. Wavey Patent Rights do not include claims infringed only because of functionality newly introduced by a modification.
+"Wavey Patent Rights" means patent claims owned or controlled by Wavey Inc that would necessarily be infringed by using the Software, with or without permitted modifications, solely for the activities expressly permitted by this licence. Wavey Patent Rights do not include claims infringed only because of functionality newly introduced by a modification.
 
 2. Permission for Artists
 
-Subject to this licence, Wavey, Inc. grants an Artist or Artist Entity a worldwide, non-exclusive, non-transferable, non-sublicensable, royalty-free licence to:
+Subject to this licence, Wavey Inc grants an Artist or Artist Entity a worldwide, non-exclusive, non-transferable, non-sublicensable, royalty-free licence to:
 
 (a) access, copy, compile, run, and modify the Software;
 
@@ -56,13 +56,13 @@ An Artist does not lose these permissions merely because the Artist earns money 
 
 3. Limited Patent Permission
 
-Wavey, Inc. grants an Artist or Artist Entity a limited licence under the Wavey Patent Rights solely to use the Software to create Artist Records as permitted by Section 2.
+Wavey Inc grants an Artist or Artist Entity a limited licence under the Wavey Patent Rights solely to use the Software to create Artist Records as permitted by Section 2.
 
 This patent permission includes the right to publish, distribute, license, and sell completed Artist Records.
 
 It does not include the right to commercially exploit the Software, offer authoring services, operate authoring technology for third parties, or practise the patented authoring methods outside the permissions expressly granted by this licence.
 
-Except for this limited permission, Wavey, Inc. reserves all rights under its patents and patent applications.
+Except for this limited permission, Wavey Inc reserves all rights under its patents and patent applications.
 
 No patent rights are granted by implication, estoppel, or otherwise.
 
@@ -76,7 +76,7 @@ The broader permissions in Section 2 apply only to Artists and Artist Entities.
 
 5. Prohibited Uses
 
-Without a separate written licence from Wavey, Inc., You must not:
+Without a separate written licence from Wavey Inc, You must not:
 
 (a) make any Commercial Authoring Use of the Software;
 
@@ -92,7 +92,7 @@ Without a separate written licence from Wavey, Inc., You must not:
 
 (g) remove copyright, licence, attribution, or patent notices;
 
-(h) claim that an output is officially issued, certified, verified, or endorsed by Wavey, Inc., Bitneedle, or YL.VIN without separate permission; or
+(h) claim that an output is officially issued, certified, verified, or endorsed by Wavey Inc, Bitneedle, or YL.VIN without separate permission; or
 
 (i) assist another person or organisation in carrying out a prohibited use.
 
@@ -112,7 +112,7 @@ A record label or music company may not itself:
 
 (e) provide the Software to its artists.
 
-Those activities require a separate commercial licence from Wavey, Inc.
+Those activities require a separate commercial licence from Wavey Inc.
 
 A record label or other music company may not avoid these restrictions by requiring, funding, directing, or arranging for an Artist, Artist Entity, employee, contractor, or intermediary to operate the Software on its behalf.
 
@@ -144,21 +144,21 @@ You may reproduce and distribute the Software, including modified versions, prov
 
 (e) distribution does not itself constitute a Commercial Authoring Use.
 
-You may submit modifications to Wavey, Inc., but Wavey, Inc. is not required to accept or use them.
+You may submit modifications to Wavey Inc, but Wavey Inc is not required to accept or use them.
 
 No additional patent permission is granted for functionality introduced by a modification.
 
 9. Ownership
 
-Wavey, Inc. retains all rights in the Software and Wavey Patent Rights.
+Wavey Inc retains all rights in the Software and Wavey Patent Rights.
 
 Artists retain all rights they otherwise hold in their Artist Work and creative contributions to Artist Records.
 
-Using the Software does not transfer ownership of an Artist's music, recording, performance, artwork, or metadata to Wavey, Inc.
+Using the Software does not transfer ownership of an Artist's music, recording, performance, artwork, or metadata to Wavey Inc.
 
 10. No Trademark Permission
 
-This licence grants no right to use the names, logos, or trademarks of Wavey, Inc., Bitneedle, or YL.VIN.
+This licence grants no right to use the names, logos, or trademarks of Wavey Inc, Bitneedle, or YL.VIN.
 
 Accurate statements that an output is compatible with the publicly documented Bitneedle format are permitted.
 
@@ -182,13 +182,13 @@ Termination does not prevent continued distribution or sale of Artist Records la
 
 The Software is provided "as is," without warranties or conditions of any kind, to the maximum extent permitted by applicable law.
 
-Wavey, Inc. does not promise that the Software is error-free, secure, suitable for a particular purpose, or free from third-party claims.
+Wavey Inc does not promise that the Software is error-free, secure, suitable for a particular purpose, or free from third-party claims.
 
-Wavey, Inc. does not promise that any pending patent application will be granted or that any granted patent will remain valid.
+Wavey Inc does not promise that any pending patent application will be granted or that any granted patent will remain valid.
 
 14. Liability
 
-To the maximum extent permitted by applicable law, Wavey, Inc. will not be liable for indirect, incidental, special, consequential, or punitive loss arising from use of the Software.
+To the maximum extent permitted by applicable law, Wavey Inc will not be liable for indirect, incidental, special, consequential, or punitive loss arising from use of the Software.
 
 Nothing in this licence excludes liability that cannot lawfully be excluded.
 
@@ -198,7 +198,7 @@ Record labels, platforms, businesses, service providers, and other commercial us
 
 licence@yl.vin
 
-Wavey, Inc. is not required to grant a commercial licence.
+Wavey Inc is not required to grant a commercial licence.
 
 16. Entire Licence
 
@@ -206,4 +206,4 @@ Only the permissions expressly stated in this licence are granted.
 
 All other copyright, patent, trademark, and other rights are reserved.
 
-Wavey, Inc. may release later versions of the Software under different terms. A version already received remains governed by the licence supplied with that version.
+Wavey Inc may release later versions of the Software under different terms. A version already received remains governed by the licence supplied with that version.

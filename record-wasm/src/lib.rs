@@ -1,4 +1,4 @@
-// Copyright © Wavey, Inc.
+// Copyright © Wavey Inc
 // Licensed under the Apache License, Version 2.0.
 //
 // WebAssembly facade for Bitneedle record decoding, verification, sidecar

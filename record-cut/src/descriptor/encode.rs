@@ -1,4 +1,4 @@
-// Copyright © Wavey, Inc.
+// Copyright © Wavey Inc
 // Licensed under the Wavey Artist Source Licence.
 // Patent pending. All patent rights are reserved except as expressly granted by the licence.
 // Commercial licensing: licence@yl.vin
