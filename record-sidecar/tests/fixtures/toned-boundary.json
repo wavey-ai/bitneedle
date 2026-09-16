@@ -1,0 +1,660 @@
+{
+  "version": 4,
+  "checksumProtected": true,
+  "bValueBits": 4597042792628952806,
+  "cutInnerRadius": 164,
+  "silentGrooveBValueBits": 4599405781057128579,
+  "spiralFamily": {
+    "family": "archimedean"
+  },
+  "spiralClockwise": false,
+  "recordProfile": "single45",
+  "streamByteLength": 265198,
+  "payloadEncoding": "toned-v2",
+  "title": null,
+  "artist": null,
+  "releaseId": null,
+  "catalogNumber": null,
+  "label": null,
+  "artworkCredit": null,
+  "canonicalUrl": null,
+  "createdAt": null,
+  "copyrightYear": null,
+  "copyrightHolder": null,
+  "signedReleaseReference": null,
+  "bscPointer": null,
+  "toneSpans": [],
+  "toneClock": {
+    "rotationCentidegrees": [
+      0,
+      0,
+      0
+    ],
+    "blend": true,
+    "bitsPerPixel": 20,
+    "ordering": "chromaProximity",
+    "rings": [
+      11,
+      14,
+      18
+    ],
+    "span": [
+      5261,
+      9756
+    ],
+    "slots": [
+      {
+        "base": [
+          21,
+          21,
+          21
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          93,
+          93,
+          93
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          8,
+          8,
+          8
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          82,
+          82,
+          82
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          10,
+          10,
+          10
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          84,
+          84,
+          84
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          110,
+          110,
+          110
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          162,
+          162,
+          162
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          253,
+          253,
+          253
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          222,
+          222,
+          222
+        ],
+        "lumaTolerance": 48,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          192,
+          192,
+          192
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          249,
+          249,
+          249
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          222,
+          222,
+          222
+        ],
+        "lumaTolerance": 48,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          104,
+          104,
+          104
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          156,
+          156,
+          156
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          87,
+          87,
+          87
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          142,
+          142,
+          142
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          19,
+          19,
+          19
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          91,
+          91,
+          91
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          21,
+          21,
+          21
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          93,
+          93,
+          93
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          19,
+          19,
+          19
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          91,
+          91,
+          91
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          7,
+          7,
+          7
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          81,
+          81,
+          81
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          21,
+          21,
+          21
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          93,
+          93,
+          93
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          31,
+          31,
+          31
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          101,
+          101,
+          101
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          242,
+          242,
+          242
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          227,
+          227,
+          227
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          163,
+          163,
+          163
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          219,
+          219,
+          219
+        ],
+        "gapLumaTolerance": 48
+      },
+      {
+        "base": [
+          122,
+          122,
+          122
+        ],
+        "lumaTolerance": 8,
+        "gapBase": [
+          175,
+          175,
+          175
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          210,
+          210,
+          210
+        ],
+        "lumaTolerance": 48,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          181,
+          181,
+          181
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          238,
+          238,
+          238
+        ],
+        "gapLumaTolerance": 64
+      },
+      {
+        "base": [
+          54,
+          54,
+          54
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          118,
+          118,
+          118
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          18,
+          18,
+          18
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          90,
+          90,
+          90
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          19,
+          19,
+          19
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          91,
+          91,
+          91
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          21,
+          21,
+          21
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          93,
+          93,
+          93
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          21,
+          21,
+          21
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          93,
+          93,
+          93
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          12,
+          12,
+          12
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          85,
+          85,
+          85
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          12,
+          12,
+          12
+        ],
+        "lumaTolerance": 96,
+        "gapBase": [
+          85,
+          85,
+          85
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          20,
+          20,
+          20
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          92,
+          92,
+          92
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          18,
+          18,
+          18
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          90,
+          90,
+          90
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          102,
+          102,
+          102
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          154,
+          154,
+          154
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          93,
+          93,
+          93
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          146,
+          146,
+          146
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          208,
+          208,
+          208
+        ],
+        "lumaTolerance": 48,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          143,
+          143,
+          143
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          198,
+          198,
+          198
+        ],
+        "gapLumaTolerance": 32
+      },
+      {
+        "base": [
+          58,
+          58,
+          58
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          121,
+          121,
+          121
+        ],
+        "gapLumaTolerance": 8
+      },
+      {
+        "base": [
+          55,
+          55,
+          55
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          119,
+          119,
+          119
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          204,
+          204,
+          204
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          255,
+          255,
+          255
+        ],
+        "gapLumaTolerance": 96
+      },
+      {
+        "base": [
+          104,
+          104,
+          104
+        ],
+        "lumaTolerance": 16,
+        "gapBase": [
+          156,
+          156,
+          156
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          18,
+          18,
+          18
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          90,
+          90,
+          90
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          39,
+          39,
+          39
+        ],
+        "lumaTolerance": 48,
+        "gapBase": [
+          107,
+          107,
+          107
+        ],
+        "gapLumaTolerance": 16
+      },
+      {
+        "base": [
+          76,
+          76,
+          76
+        ],
+        "lumaTolerance": 32,
+        "gapBase": [
+          134,
+          134,
+          134
+        ],
+        "gapLumaTolerance": 8
+      },
+      {
+        "base": [
+          25,
+          25,
+          25
+        ],
+        "lumaTolerance": 64,
+        "gapBase": [
+          96,
+          96,
+          96
+        ],
+        "gapLumaTolerance": 16
+      }
+    ],
+    "gapSwitchOffsets": []
+  },
+  "cacheEncryption": null,
+  "chainAnchor": null,
+  "additionalSignatures": [],
+  "isrcs": [],
+  "upc": null,
+  "deferredAttestation": null,
+  "leadOutGeometryRevision": 3,
+  "runOutTone": null,
+  "silentGroove": null
+}

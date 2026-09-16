@@ -3,6 +3,9 @@
 // Patent pending. All patent rights are reserved except as expressly granted by the licence.
 // Commercial licensing: licence@yl.vin
 
+mod regions;
+pub use regions::record_png_carrier_regions_json;
+
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
@@ -179,6 +182,8 @@ pub struct SidecarDecodedItem {
     pub flags: u8,
     pub raw_byte_length: Option<u32>,
     pub stored_byte_length: u32,
+    /// Payload offset in the decoded container, after its name and MIME.
+    pub stored_byte_offset: usize,
     pub decoded_byte_length: usize,
     pub name: String,
     pub mime: String,
@@ -2017,6 +2022,7 @@ pub fn decode_sidecar_container_items(bytes: &[u8]) -> Result<SidecarDecodedItem
             .context("sidecar item MIME type is not valid ASCII/UTF-8")?
             .to_string();
         offset += mime_len;
+        let stored_byte_offset = offset;
         let stored = &bytes[offset..offset + stored_byte_length as usize];
         offset += stored_byte_length as usize;
         let decoded = decode_sidecar_item_payload(item_type, codec, raw_byte_length, stored)?;
@@ -2046,6 +2052,7 @@ pub fn decode_sidecar_container_items(bytes: &[u8]) -> Result<SidecarDecodedItem
             raw_byte_length: (raw_byte_length != SIDECAR_RAW_LENGTH_ABSENT)
                 .then_some(raw_byte_length),
             stored_byte_length,
+            stored_byte_offset,
             decoded_byte_length: decoded.len(),
             name,
             mime,
@@ -2609,6 +2616,7 @@ pub fn build_sidecar_plan(
             }
         }
     }
+    regions::protect_groove_and_carriers(width, height, descriptor, &mut runs)?;
     Ok(runs)
 }
 
@@ -4373,6 +4381,7 @@ mod attestation_tests {
             flags: 0,
             raw_byte_length: None,
             stored_byte_length: data.len() as u32,
+            stored_byte_offset: 0,
             decoded_byte_length: data.len(),
             name: name.to_string(),
             mime: "application/json".to_string(),
@@ -4512,6 +4521,8 @@ mod tests {
         assert_eq!(validation.item_count, 1);
         let decoded = decode_sidecar_container_items(&bsc1).unwrap();
         assert_eq!(decoded.items[0].text.as_deref(), Some("hello"));
+        let item = &decoded.items[0];
+        assert_eq!(&bsc1[item.stored_byte_offset..item.stored_byte_offset + item.stored_byte_length as usize], b"hello");
     }
 
     #[test]
