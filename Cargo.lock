@@ -481,7 +481,9 @@ dependencies = [
 
 [[package]]
 name = "encodec-rs"
-version = "0.1.4"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a74faab7a23316944e4e7b55aa264b631f721642205fac0835e2c0d70bf16531"
 dependencies = [
  "anyhow",
  "cc",
@@ -1305,7 +1307,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bitneedle-id",
- "encodec-rs 0.1.4",
+ "encodec-rs 1.0.0",
  "hex",
  "image",
  "record-core",
