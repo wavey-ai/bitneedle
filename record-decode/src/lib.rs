@@ -163,7 +163,9 @@ pub fn load_record_rgba(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>)> {
         Err(_) => image::load_from_memory_with_format(bytes, image::ImageFormat::Tga)
             .context("failed to decode record image")?,
         #[cfg(not(feature = "tga"))]
-        Err(error) => return Err(anyhow::Error::new(error).context("failed to decode record image")),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context("failed to decode record image"))
+        }
     }
     .to_rgba8();
 
@@ -220,15 +222,30 @@ fn descriptor_payload_len_from_prefix(prefix: &[u8]) -> Result<usize> {
     Ok(payload_len)
 }
 
-fn decode_record_descriptor_from_rgba(
+fn descriptor_from_rgba(
     rgba: &[u8],
     width: usize,
     height: usize,
-    record_profile: &str,
-) -> Result<RecordDescriptor> {
-    let descriptor_bytes = record_descriptor_bytes_from_rgba(rgba, width, height, record_profile)?;
-
-    record_descriptor::decode_record_descriptor_bytes(&descriptor_bytes)
+    record_profile: Option<&str>,
+) -> Result<(String, RecordDescriptor, Vec<u8>)> {
+    let read = |profile: &str| -> Result<_> {
+        let bytes = record_descriptor_bytes_from_rgba(rgba, width, height, profile)?;
+        let descriptor = record_descriptor::decode_record_descriptor_bytes(&bytes)?;
+        let actual = normalize_record_profile_name(&descriptor.record_profile)?;
+        if actual != profile {
+            bail!("record descriptor profile {actual} does not match inferred profile {profile}");
+        }
+        Ok((actual, descriptor, bytes))
+    };
+    if let Some(profile) = record_profile {
+        return read(&normalize_record_profile_name(profile)?);
+    }
+    for &candidate in known_record_profile_names() {
+        if let Ok(found) = read(candidate) {
+            return Ok(found);
+        }
+    }
+    bail!("failed to infer record profile from descriptor spirals")
 }
 
 fn record_descriptor_bytes_from_rgba(
@@ -384,19 +401,7 @@ fn decode_record_groove_to_track_data(
 
 pub fn infer_record_profile_from_png(png_bytes: &[u8]) -> Result<String> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
-
-    for &candidate in known_record_profile_names() {
-        if let Ok(descriptor) = decode_record_descriptor_from_rgba(&rgba, width, height, candidate)
-        {
-            let normalized = normalize_record_profile_name(&descriptor.record_profile)?;
-
-            if normalized == candidate {
-                return Ok(normalized);
-            }
-        }
-    }
-
-    bail!("failed to infer record profile from descriptor spirals")
+    Ok(descriptor_from_rgba(&rgba, width, height, None)?.0)
 }
 
 pub fn decode_record_descriptor_from_png(
@@ -404,25 +409,8 @@ pub fn decode_record_descriptor_from_png(
     record_profile: Option<&str>,
 ) -> Result<(String, RecordDescriptor)> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
-
-    let normalized_profile = match record_profile {
-        Some(profile) => normalize_record_profile_name(profile)?,
-        None => infer_record_profile_from_png(png_bytes)?,
-    };
-
-    let descriptor = decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
-
-    let normalized_descriptor_profile = normalize_record_profile_name(&descriptor.record_profile)?;
-
-    if normalized_descriptor_profile != normalized_profile {
-        bail!(
-            "record descriptor profile {} does not match inferred profile {}",
-            normalized_descriptor_profile,
-            normalized_profile
-        );
-    }
-
-    Ok((normalized_profile, descriptor))
+    let (profile, descriptor, _) = descriptor_from_rgba(&rgba, width, height, record_profile)?;
+    Ok((profile, descriptor))
 }
 
 pub fn decode_record_descriptor_bytes_from_png(
@@ -430,21 +418,8 @@ pub fn decode_record_descriptor_bytes_from_png(
     record_profile: Option<&str>,
 ) -> Result<(String, Vec<u8>)> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
-    let normalized_profile = match record_profile {
-        Some(profile) => normalize_record_profile_name(profile)?,
-        None => infer_record_profile_from_png(png_bytes)?,
-    };
-    let bytes = record_descriptor_bytes_from_rgba(&rgba, width, height, &normalized_profile)?;
-    let descriptor = record_descriptor::decode_record_descriptor_bytes(&bytes)?;
-    let descriptor_profile = normalize_record_profile_name(&descriptor.record_profile)?;
-    if descriptor_profile != normalized_profile {
-        bail!(
-            "record descriptor profile {} does not match inferred profile {}",
-            descriptor_profile,
-            normalized_profile
-        );
-    }
-    Ok((normalized_profile, bytes))
+    let (profile, _, bytes) = descriptor_from_rgba(&rgba, width, height, record_profile)?;
+    Ok((profile, bytes))
 }
 
 pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
@@ -453,15 +428,29 @@ pub fn decode_record_png_to_chunk_stream_for_profile_with_length(
     byte_length: Option<usize>,
 ) -> Result<DecodedChunkStream> {
     let (width, height, rgba) = load_png_rgba(png_bytes)?;
-    let normalized_profile = normalize_record_profile_name(record_profile)?;
-    let descriptor = decode_record_descriptor_from_rgba(&rgba, width, height, &normalized_profile)?;
+    let (profile, descriptor, _) =
+        descriptor_from_rgba(&rgba, width, height, Some(record_profile))?;
+    chunk_stream_from_rgba(&rgba, width, height, &profile, &descriptor, byte_length)
+}
+
+/// The chunk stream of a record whose pixels are decoded and whose descriptor
+/// is read, so neither is done twice. `record_profile` is the normalized
+/// profile the descriptor was checked against.
+fn chunk_stream_from_rgba(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    record_profile: &str,
+    descriptor: &RecordDescriptor,
+    byte_length: Option<usize>,
+) -> Result<DecodedChunkStream> {
     let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
 
     let (track_data, pixel_count, pixel_indices) = decode_record_groove_to_track_data(
-        &rgba,
+        rgba,
         width,
         height,
-        &normalized_profile,
+        record_profile,
         descriptor.b_value(),
         &descriptor.spiral_family,
         descriptor.spiral_clockwise,
@@ -511,13 +500,9 @@ pub fn decode_record_png_to_chunk_stream_with_length(
     png_bytes: &[u8],
     byte_length: Option<usize>,
 ) -> Result<(String, DecodedChunkStream)> {
-    let (profile, descriptor) = decode_record_descriptor_from_png(png_bytes, None)?;
-    let resolved_byte_length = byte_length.or(Some(descriptor.stream_byte_length));
-    let decoded = decode_record_png_to_chunk_stream_for_profile_with_length(
-        png_bytes,
-        &profile,
-        resolved_byte_length,
-    )?;
+    let (width, height, rgba) = load_png_rgba(png_bytes)?;
+    let (profile, descriptor, _) = descriptor_from_rgba(&rgba, width, height, None)?;
+    let decoded = chunk_stream_from_rgba(&rgba, width, height, &profile, &descriptor, byte_length)?;
 
     Ok((profile, decoded))
 }
@@ -527,12 +512,10 @@ pub fn decode_record_png_to_chunk_stream(png_bytes: &[u8]) -> Result<(String, De
 }
 
 pub fn decode_record_png(png_bytes: &[u8]) -> Result<DecodedRecord> {
-    let (record_profile, descriptor) = decode_record_descriptor_from_png(png_bytes, None)?;
-    let chunk_stream = decode_record_png_to_chunk_stream_for_profile_with_length(
-        png_bytes,
-        &record_profile,
-        Some(descriptor.stream_byte_length),
-    )?;
+    let (width, height, rgba) = load_png_rgba(png_bytes)?;
+    let (record_profile, descriptor, _) = descriptor_from_rgba(&rgba, width, height, None)?;
+    let chunk_stream =
+        chunk_stream_from_rgba(&rgba, width, height, &record_profile, &descriptor, None)?;
 
     Ok(DecodedRecord {
         record_profile,
@@ -544,6 +527,55 @@ pub fn decode_record_png(png_bytes: &[u8]) -> Result<DecodedRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_reads_preserve_headers_and_programme_bytes() {
+        let png = include_bytes!("../../goldenfiles/records/lori-asha-westside-single45-hq/lori-asha-westside-single45-hq.record.png");
+        let (profile, descriptor) = decode_record_descriptor_from_png(png, None).unwrap();
+        assert_eq!(profile, infer_record_profile_from_png(png).unwrap());
+        assert_eq!(
+            descriptor,
+            decode_record_descriptor_from_png(png, Some(&profile))
+                .unwrap()
+                .1
+        );
+        let (_, encoded) = decode_record_descriptor_bytes_from_png(png, None).unwrap();
+        assert_eq!(
+            descriptor,
+            record_descriptor::decode_record_descriptor_bytes(&encoded).unwrap()
+        );
+        let decoded = decode_record_png(png).unwrap();
+        let chunks = decode_record_png_to_chunk_stream_for_profile(png, &profile).unwrap();
+        assert_eq!(decoded.chunk_stream.bytes, chunks.bytes);
+        assert!(record_core::parse_record_stream(&chunks.bytes).is_ok());
+
+        let (width, height, mut rgba) = load_png_rgba(png).unwrap();
+        let (_, _, indices) = decode_record_groove_to_track_data(
+            &rgba,
+            width,
+            height,
+            &profile,
+            descriptor.b_value(),
+            &descriptor.spiral_family,
+            descriptor.spiral_clockwise,
+        )
+        .unwrap();
+        rgba[indices[0] * 4 + 3] = 0;
+        let mut damaged = Vec::new();
+        let mut encoder = png::Encoder::new(&mut damaged, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&rgba)
+            .unwrap();
+        assert_eq!(
+            decode_record_descriptor_from_png(&damaged, None).unwrap().1,
+            descriptor
+        );
+        assert!(decode_record_png(&damaged).is_err());
+    }
 
     #[test]
     fn rejects_non_brs1_groove_bytes() {
