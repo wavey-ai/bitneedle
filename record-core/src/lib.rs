@@ -1241,6 +1241,13 @@ pub fn lock_radius_px(record_profile: &str) -> Result<f64> {
 /// turns. The reserve follows from the profile's own scale, so a reader derives
 /// the same floor from the descriptor without the fit's pitch.
 pub fn programme_floor_radius(record_profile: &str) -> Result<f64> {
+    // Study branch only: `examples/dead_wax_study.rs` sets the floor a pressed
+    // dead wax needs, to render full sides under it.
+    if let Ok(value) = std::env::var(format!("STUDY_PROGRAMME_FLOOR_{}", record_profile.to_uppercase())) {
+        if let Ok(floor) = value.parse::<f64>() {
+            return Ok(floor);
+        }
+    }
     let lock = lock_radius_px(record_profile)?;
     let run_out_min = fill_run_out_min_descent();
 
@@ -1363,9 +1370,11 @@ pub fn cut_inner_radius_from_geometry(
 ) -> Result<i32> {
     let fraction = validate_groove_span_fraction(span_fraction)?;
     let outer = g.payload_outer_radius as f64;
-    let inner = programme_floor_radius(&g.record_profile)?
-        .min(g.payload_inner_radius as f64)
-        .max(1.0);
+    let floor = programme_floor_radius(&g.record_profile)?;
+    // Study branch only: a pressed floor may sit above the profile's
+    // payload inner radius, and the fit takes it as it is.
+    let study = std::env::var(format!("STUDY_PROGRAMME_FLOOR_{}", g.record_profile.to_uppercase())).is_ok();
+    let inner = if study { floor } else { floor.min(g.payload_inner_radius as f64) }.max(1.0);
     let span = (outer - inner).max(0.0);
 
     Ok(js_round(outer - span * fraction).max(inner.ceil() as i32))
