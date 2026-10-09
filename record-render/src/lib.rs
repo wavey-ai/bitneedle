@@ -64,7 +64,13 @@ impl RotationDegrees {
             Self::PerRing(many) => many,
         };
         (0..rings)
-            .map(|ring| given.get(ring).or_else(|| given.last()).copied().unwrap_or(0.0))
+            .map(|ring| {
+                given
+                    .get(ring)
+                    .or_else(|| given.last())
+                    .copied()
+                    .unwrap_or(0.0)
+            })
             .collect()
     }
 }
@@ -1743,9 +1749,18 @@ fn solve_cut(
         let span = span_for_turn_separation(track_pixel_count, &geometry, separation);
         if span < 1.0 {
             let fit = find_exact_fit_with_coverage(
-                width, height, track_pixel_count, family, record_profile, span, None,
+                width,
+                height,
+                track_pixel_count,
+                family,
+                record_profile,
+                span,
+                None,
             )?;
-            return Ok(CutFit { span_fraction: span, fit });
+            return Ok(CutFit {
+                span_fraction: span,
+                fit,
+            });
         }
     }
 
@@ -1768,8 +1783,8 @@ fn solve_cut(
     let reserve_inner = record_core::programme_floor_radius(record_profile)?.min(outer - 1.0);
 
     let pixels = track_pixel_count.max(1) as f64;
-    let b_natural =
-        ((outer * outer - reserve_inner * reserve_inner) / (2.0 * pixels)).max(record_core::MIN_B_VALUE);
+    let b_natural = ((outer * outer - reserve_inner * reserve_inner) / (2.0 * pixels))
+        .max(record_core::MIN_B_VALUE);
     let b_floor = record_core::MIN_PROGRAMME_TURN_SEPARATION_PX / (2.0 * PI);
     let b_cap = record_core::MAX_PROGRAMME_TURN_SEPARATION_PX / (2.0 * PI);
     let mut b = b_natural.clamp(b_floor, b_cap);
@@ -1785,8 +1800,8 @@ fn solve_cut(
     // whatever this chose without needing the seed; a re-press with the same
     // release id seeds identically.
     if b_natural >= b_cap {
-        let factor =
-            PITCH_VARIATION_MIN_FACTOR + (1.0 - PITCH_VARIATION_MIN_FACTOR) * seeded_unit(pitch_seed);
+        let factor = PITCH_VARIATION_MIN_FACTOR
+            + (1.0 - PITCH_VARIATION_MIN_FACTOR) * seeded_unit(pitch_seed);
         b = (b * factor).clamp(b_floor, b_cap);
     }
 
@@ -1824,14 +1839,8 @@ fn solve_cut(
     }
 
     // The pitch is the promise and is now held fixed; the depth is what moves.
-    let (span_fraction, fit) = fit_span_at_pitch(
-        width,
-        height,
-        track_pixel_count,
-        family,
-        record_profile,
-        b,
-    )?;
+    let (span_fraction, fit) =
+        fit_span_at_pitch(width, height, track_pixel_count, family, record_profile, b)?;
 
     Ok(CutFit { span_fraction, fit })
 }
@@ -1927,13 +1936,7 @@ fn fit_span_at_pitch(
     }
 
     let exact = best.addressable_pixel_count == track_pixel_count;
-    Ok((
-        high,
-        FitResult {
-            b_value,
-            exact,
-        },
-    ))
+    Ok((high, FitResult { b_value, exact }))
 }
 
 /// The trailer's tone, as the caller gave it.
@@ -2205,9 +2208,14 @@ fn render_track_scanline_onto_transparent_spiral(
     tone_preview: bool,
     trailer_tone: Option<[u8; 3]>,
 ) -> Result<TransparentRender> {
-    let spiral_mask =
-        build_spiral_mask(width, height, b_value, family, record_profile,
-            descriptor_input.spiral_clockwise)?;
+    let spiral_mask = build_spiral_mask(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        descriptor_input.spiral_clockwise,
+    )?;
     let mut data = vec![0_u8; width * height * 4];
 
     if guide_outlines {
@@ -2326,7 +2334,9 @@ fn render_track_scanline_onto_transparent_spiral(
         0
     });
 
-    for &pixel_index in spiral_mask.ordered_pixel_indices.iter() {
+    // The mask position of the last pixel the programme painted.
+    let mut programme_end: Option<usize> = None;
+    for (position, &pixel_index) in spiral_mask.ordered_pixel_indices.iter().enumerate() {
         while let Some(region) = dummy_spiral_regions.get(dummy_region_index) {
             if carrier_pixels_written <= region.carrier_pixel_start {
                 break;
@@ -2342,6 +2352,7 @@ fn render_track_scanline_onto_transparent_spiral(
                 paint_dummy_spiral_pixel(&mut data, pixel_index);
                 dummy_region_pixels_written += 1;
                 pixels_added += 1;
+                programme_end = Some(position);
                 if dummy_region_pixels_written >= region.pixel_count {
                     dummy_region_index += 1;
                     dummy_region_pixels_written = 0;
@@ -2365,6 +2376,7 @@ fn render_track_scanline_onto_transparent_spiral(
         track_offset += 4;
         carrier_pixels_written += 1;
         pixels_added += 1;
+        programme_end = Some(position);
     }
 
     if let Some((codes, clock)) = tone_clock {
@@ -2401,11 +2413,8 @@ fn render_track_scanline_onto_transparent_spiral(
             // pattern are the press's own; only the grain is missing, which
             // is what a preview is for. Carries no payload, so the facade
             // never asks it to prove it reads.
-            for (groove_index, ((&pixel_index, &angle), &away)) in placements
-                .iter()
-                .zip(&angles)
-                .zip(&radii)
-                .enumerate()
+            for (groove_index, ((&pixel_index, &angle), &away)) in
+                placements.iter().zip(&angles).zip(&radii).enumerate()
             {
                 let cell = clock.cell_index(groove_index, angle, away);
                 let pocket = &clock.slots[cell];
@@ -2478,6 +2487,46 @@ fn render_track_scanline_onto_transparent_spiral(
             .map(|clock| (trailer_indices.as_slice(), clock)),
     )?;
 
+    // The groove is one cut, so each region begins on the pixel after the
+    // last pixel of the region before it. Where the walks of two regions do
+    // not meet, the groove between them is cut in the tone of the region it
+    // leaves or enters. Only transparent pixels are cut, so no region loses a
+    // pixel, and no reader reads one of these as its own: the lead-in bridge
+    // lies outside every band, and the programme bridge lies after the
+    // stream's last byte.
+    bridge_lead_in_to_programme(
+        &mut data,
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        descriptor_input.spiral_clockwise,
+        &spiral_mask,
+    )?;
+    if let (Some(end), Some(&target)) = (
+        programme_end,
+        silent_groove_indices.first().or(trailer_indices.first()),
+    ) {
+        let bridge = programme_bridge(
+            &data,
+            width,
+            &spiral_mask.ordered_pixel_indices,
+            end,
+            target,
+            cut_inner_radius,
+        );
+        paint_toned_groove(
+            &mut data,
+            width,
+            height,
+            &bridge,
+            groove_clock,
+            single_tone,
+            53,
+        );
+    }
+
     let pixels_remaining =
         track_pixel_count as isize - spiral_mask.addressable_pixel_count as isize;
 
@@ -2498,6 +2547,106 @@ fn render_track_scanline_onto_transparent_spiral(
         silent_groove_bounds,
         descriptor,
     })
+}
+
+/// Cuts the groove between the lead-in's last pixel and the programme's first.
+///
+/// The programme's walk starts on the payload's outer radius, and its first
+/// pixels round to that radius, so the mask leaves them out. They take the
+/// colour of the lead-in's last pixel.
+#[allow(clippy::too_many_arguments)]
+fn bridge_lead_in_to_programme(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    clockwise: bool,
+    spiral_mask: &SpiralMask,
+) -> Result<()> {
+    let Some(&first) = spiral_mask.ordered_pixel_indices.first() else {
+        return Ok(());
+    };
+    let lead_in = build_lead_in_spiral_indices(width, height, record_profile)?;
+    let Some(&last) = lead_in.last() else {
+        return Ok(());
+    };
+    let geometry = describe_record_profile(record_profile)?;
+    let outer = payload_outer_radius(&geometry) as f64;
+    let (_, walk, _, _) = trace_record_spiral(
+        width,
+        height,
+        b_value,
+        family,
+        None,
+        DEFAULT_START_ANGLE,
+        1.0,
+        clockwise,
+        outer,
+        outer - 2.0,
+    )?;
+    let colour: [u8; 4] = data[last * 4..last * 4 + 4]
+        .try_into()
+        .expect("four channels");
+    for &pixel in walk.iter().take_while(|&&pixel| pixel != first) {
+        if data[pixel * 4 + 3] == 0 {
+            data[pixel * 4..pixel * 4 + 4].copy_from_slice(&colour);
+        }
+    }
+    Ok(())
+}
+
+/// The transparent mask pixels between the programme's last pixel and
+/// `target`, the first pixel of the silent groove (or of the run-out), in
+/// walk order.
+///
+/// The silent groove starts where the walk reaches the cut radius, which is a
+/// whole pixel. A programme that stops short of that point leaves the walk
+/// between them empty. A programme that reaches it has no gap.
+fn programme_bridge(
+    data: &[u8],
+    width: usize,
+    mask: &[usize],
+    end: usize,
+    target: usize,
+    cut_inner_radius: i32,
+) -> Vec<usize> {
+    // The canvas is square: the centre is half its width on both axes.
+    let centre = width as f64 / 2.0;
+    let at = |pixel: usize| {
+        (
+            (pixel % width) as f64 + 0.5 - centre,
+            (pixel / width) as f64 + 0.5 - centre,
+        )
+    };
+    let (tx, ty) = at(target);
+    let cut = f64::from(cut_inner_radius);
+    let mut bridge = Vec::new();
+    for &pixel in mask.iter().skip(end + 1) {
+        let (x, y) = at(pixel);
+        if x.hypot(y) < cut - 1.0 {
+            break;
+        }
+        if data[pixel * 4 + 3] == 0 {
+            bridge.push(pixel);
+        }
+        // The pixel beside the target is the bridge's last.
+        if (x - tx).hypot(y - ty) <= 1.5 {
+            break;
+        }
+    }
+    // The walk passed the target without meeting it: the programme ran past
+    // the cut, and the silent groove already continues it.
+    let reached = mask.iter().skip(end + 1).any(|&pixel| {
+        let (x, y) = at(pixel);
+        (x - tx).hypot(y - ty) <= 1.5
+    });
+    if reached {
+        bridge
+    } else {
+        Vec::new()
+    }
 }
 
 fn measure_outer_sector_coverage_stats(
@@ -3195,8 +3344,10 @@ fn groove_clock_track(
             if !degrees.is_finite() {
                 bail!("grooveToneRotationDegrees must be finite");
             }
-            Ok(((degrees.rem_euclid(360.0) * units_per_degree).round() as u32
-                % record_groove::TONE_CLOCK_ROTATION_UNITS_PER_TURN) as u16)
+            Ok(
+                ((degrees.rem_euclid(360.0) * units_per_degree).round() as u32
+                    % record_groove::TONE_CLOCK_ROTATION_UNITS_PER_TURN) as u16,
+            )
         })
         .collect::<Result<_>>()?;
     let blend = render_options.groove_tone_blend.unwrap_or(true);
@@ -3228,10 +3379,8 @@ fn groove_clock_track(
         }
         let base = TonedConfig::from_hex(hex, 0, 1).base;
         if preview {
-            let effective_gap_tone_lightness = adaptive_gap_tone_lightness(
-                oklch_lightness(base),
-                predominant_gap_tone_lightness,
-            )?;
+            let effective_gap_tone_lightness =
+                adaptive_gap_tone_lightness(oklch_lightness(base), predominant_gap_tone_lightness)?;
             let gap_base = lighten_base_oklch(base, effective_gap_tone_lightness)?;
             let (bits_per_pixel, ordering, luma_tolerance) = preview_config();
             match shared {
@@ -3270,7 +3419,9 @@ fn groove_clock_track(
         // tolerance per pocket for exactly this.
         let gap_config = TonedConfig::balanced(gap_base, GROOVE_TONE_MAX_SIZE_FACTOR)
             .with_context(|| format!("grooveToneSlots[{index}] {hex} gap tone cannot be toned"))?;
-        if (gap_config.bits_per_pixel, gap_config.ordering) != (config.bits_per_pixel, config.ordering) {
+        if (gap_config.bits_per_pixel, gap_config.ordering)
+            != (config.bits_per_pixel, config.ordering)
+        {
             bail!(
                 "grooveToneSlots[{index}] {hex} gap tone tuned to {} bits per pixel where its \
                  track tone tuned to {}; a clock's tones must agree",
@@ -3477,6 +3628,7 @@ pub fn write_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use record_core::parse_chunk_stream;
     use record_cut::{
         encode_record_stream, PayloadDescriptorInput, PayloadEntryInput, RecordStreamInput,
@@ -3619,8 +3771,7 @@ mod tests {
             large.b_value,
         );
         assert!(
-            record_core::turn_separation_px(large.b_value)
-                >= record_core::MIN_TURN_SEPARATION_PX,
+            record_core::turn_separation_px(large.b_value) >= record_core::MIN_TURN_SEPARATION_PX,
             "the fit never packs below the raster floor",
         );
     }
@@ -3736,7 +3887,8 @@ mod tests {
 
         for bytes in [60_000usize, 200_000, 250_000] {
             let cut = render_lp(&rgb_code_block(bytes), "{}");
-            let travel = (f64::from(cut.cut_inner_radius) - hand_over(cut.cut_inner_radius)).max(0.0);
+            let travel =
+                (f64::from(cut.cut_inner_radius) - hand_over(cut.cut_inner_radius)).max(0.0);
 
             assert!(
                 (cut.silent_groove_turns - travel / separation).abs() < 1e-6,
@@ -3845,7 +3997,9 @@ mod tests {
                 false,
             )
             .unwrap();
-            let first = *silent_groove.first().expect("a short cut has a silent_groove");
+            let first = *silent_groove
+                .first()
+                .expect("a short cut has a silent_groove");
 
             let radius = radius_of(first);
             assert!(
@@ -3860,6 +4014,95 @@ mod tests {
             assert!(
                 drift.abs() <= 2.0,
                 "span {span}: the silent_groove starts {drift:.1} degrees off the programme's crossing",
+            );
+        }
+    }
+
+    /// The groove is one cut: the programme starts on the pixel after the
+    /// lead-in's last, and a reader walking the programme reaches the silent
+    /// groove's first pixel without crossing a transparent pixel.
+    #[test]
+    fn the_lead_in_programme_and_silent_groove_are_one_groove() {
+        for span in [0.25_f64, 0.33, 0.50] {
+            let output = render_payload_codes_to_png(
+                &rgb_code_block(60_000),
+                PAYLOAD_CODE_FORMAT_RGB,
+                "lp",
+                100.0,
+                Some(&format!(r#"{{"grooveSpanFraction":{span}}}"#)),
+            )
+            .unwrap();
+            let rgba = image::load_from_memory(&output.png_bytes)
+                .unwrap()
+                .to_rgba8()
+                .into_raw();
+            let opaque = |pixel: usize| rgba[pixel * 4 + 3] != 0;
+            let near = |a: usize, b: usize| {
+                let (ax, ay) = ((a % RECORD_WIDTH) as f64, (a / RECORD_WIDTH) as f64);
+                let (bx, by) = ((b % RECORD_WIDTH) as f64, (b / RECORD_WIDTH) as f64);
+                (ax - bx).hypot(ay - by) <= 1.5
+            };
+            let cut = &output.payload;
+            let family = SpiralFamily::Archimedean;
+
+            let lead_in = build_lead_in_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp").unwrap();
+            let mask = build_spiral_mask(
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+                cut.b_value,
+                &family,
+                "lp",
+                false,
+            )
+            .unwrap();
+            let outer = payload_outer_radius(&describe_record_profile("lp").unwrap()) as f64;
+            let (_, walk, _, _) = trace_record_spiral(
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+                cut.b_value,
+                &family,
+                None,
+                DEFAULT_START_ANGLE,
+                1.0,
+                false,
+                outer,
+                outer - 2.0,
+            )
+            .unwrap();
+            assert!(
+                near(*lead_in.last().unwrap(), walk[0]),
+                "span {span}: the programme does not start beside the lead-in"
+            );
+            let to_mask: Vec<usize> = walk
+                .iter()
+                .copied()
+                .take_while(|&pixel| pixel != mask.ordered_pixel_indices[0])
+                .collect();
+            assert!(
+                to_mask.iter().all(|&pixel| opaque(pixel)),
+                "span {span}: the groove between the lead-in and the programme is not cut"
+            );
+
+            let silent = build_silent_groove_spiral_indices(
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+                cut.b_value,
+                &family,
+                "lp",
+                cut.cut_inner_radius,
+                false,
+            )
+            .unwrap();
+            let first_silent = *silent.first().expect("a short cut has a silent groove");
+            let reached = mask
+                .ordered_pixel_indices
+                .iter()
+                .copied()
+                .take_while(|&pixel| opaque(pixel))
+                .any(|pixel| near(pixel, first_silent));
+            assert!(
+                reached,
+                "span {span}: the programme stops short of the silent groove"
             );
         }
     }
@@ -4037,7 +4280,9 @@ mod tests {
             if format.is_available() {
                 assert!(written.is_ok(), "{} is compiled in", format.id());
             } else {
-                let error = written.expect_err("an uncompiled format must not write").to_string();
+                let error = written
+                    .expect_err("an uncompiled format must not write")
+                    .to_string();
                 assert!(
                     error.contains(format.id()),
                     "{} refused without naming itself: {error}",
@@ -4073,7 +4318,12 @@ mod tests {
                 Some(stream.len()),
             )
             .unwrap_or_else(|error| panic!("{}: {error:#}", format.id()));
-            assert_eq!(decoded.bytes, stream, "a record lost itself in {}", format.id());
+            assert_eq!(
+                decoded.bytes,
+                stream,
+                "a record lost itself in {}",
+                format.id()
+            );
         }
     }
 
@@ -4638,9 +4888,16 @@ mod tests {
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("clock-toned-single45.png"), &output.png_bytes).unwrap();
 
-        assert_eq!(output.descriptor.payload_encoding, PAYLOAD_ENCODING_TONED_V2);
+        assert_eq!(
+            output.descriptor.payload_encoding,
+            PAYLOAD_ENCODING_TONED_V2
+        );
         assert!(output.descriptor.tone_spans.is_empty());
-        let clock = output.descriptor.tone_clock.as_ref().expect("clock in descriptor");
+        let clock = output
+            .descriptor
+            .tone_clock
+            .as_ref()
+            .expect("clock in descriptor");
         assert_eq!(clock.slots.len(), 16);
         // One rotation per ring since the clock grew a wheel: the option is
         // still a single angle, so every ring must have taken it.
@@ -4649,15 +4906,16 @@ mod tests {
             "a clock with no rotation at all"
         );
         assert!(
-            clock
-                .rotation_centidegrees
-                .iter()
-                .all(|&turn| turn == 563),
+            clock.rotation_centidegrees.iter().all(|&turn| turn == 563),
             "5.625° in hundredths, rounded, on every ring: {:?}",
             clock.rotation_centidegrees
         );
         assert!(clock.blend);
-        assert_eq!(clock.gap_switch_offsets.len(), 2, "into the gap and out again");
+        assert_eq!(
+            clock.gap_switch_offsets.len(),
+            2,
+            "into the gap and out again"
+        );
         for slot in &clock.slots {
             assert_ne!(slot.gap_base, slot.base);
         }
@@ -4681,7 +4939,10 @@ mod tests {
             Some(stream.len()),
         )
         .unwrap();
-        assert_eq!(decoded.bytes, stream, "clock-toned groove did not round-trip");
+        assert_eq!(
+            decoded.bytes, stream,
+            "clock-toned groove did not round-trip"
+        );
     }
 
     /// The house wheel, cut and read back: eight pockets across the inside
@@ -4728,7 +4989,11 @@ mod tests {
         let output =
             render_payload_codes_to_png(&stream, "rgb", "single45", 208.5, Some(&options)).unwrap();
 
-        let clock = output.descriptor.tone_clock.as_ref().expect("clock in descriptor");
+        let clock = output
+            .descriptor
+            .tone_clock
+            .as_ref()
+            .expect("clock in descriptor");
         assert_eq!(clock.rings, vec![8, 16]);
         assert_eq!(clock.slots.len(), 24);
         assert!(clock.has_rings(), "a ringed wheel is written as one");
@@ -4768,7 +5033,10 @@ mod tests {
             Some(stream.len()),
         )
         .unwrap();
-        assert_eq!(decoded.bytes, stream, "ringed clock groove did not round-trip");
+        assert_eq!(
+            decoded.bytes, stream,
+            "ringed clock groove did not round-trip"
+        );
     }
 
     /// The two rings turn independently, and the record carries both.
@@ -4987,7 +5255,14 @@ mod tests {
     #[test]
     fn the_silent_groove_and_the_trailer_are_cut_in_colour() {
         let slots: Vec<String> = (0..24)
-            .map(|slot| format!("#{:02X}{:02X}{:02X}", 60 + slot * 8, 120 + slot * 4, 200 - slot * 6))
+            .map(|slot| {
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    60 + slot * 8,
+                    120 + slot * 4,
+                    200 - slot * 6
+                )
+            })
             .collect();
         let options = serde_json::json!({
             "grooveSpanFraction": 0.33,
@@ -4998,11 +5273,18 @@ mod tests {
         .to_string();
         // Short enough that the cut stops well up the side and leaves both
         // bands room to be looked at.
-        let output =
-            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
-                .unwrap();
+        let output = render_payload_codes_to_png(
+            &codec_bytes(64, 40_000),
+            "rgb",
+            "lp",
+            60.0,
+            Some(&options),
+        )
+        .unwrap();
 
-        let rgba = record_decode::load_record_rgba(&output.png_bytes).unwrap().2;
+        let rgba = record_decode::load_record_rgba(&output.png_bytes)
+            .unwrap()
+            .2;
         let read = |index: usize| {
             let at = index * 4;
             [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]]
@@ -5043,7 +5325,10 @@ mod tests {
             output.descriptor.spiral_clockwise,
         )
         .unwrap();
-        assert!(!silent_groove.is_empty(), "the record has no silent_groove to look at");
+        assert!(
+            !silent_groove.is_empty(),
+            "the record has no silent_groove to look at"
+        );
         let toned = silent_groove
             .iter()
             .filter(|&&index| !is_grey(read(index)))
@@ -5055,8 +5340,7 @@ mod tests {
         );
 
         // And the bootstrap band is untouched.
-        let lead_in =
-            build_lead_in_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp").unwrap();
+        let lead_in = build_lead_in_spiral_indices(RECORD_WIDTH, RECORD_HEIGHT, "lp").unwrap();
         for &index in &lead_in {
             assert!(
                 is_grey(read(index)),
@@ -5090,9 +5374,14 @@ mod tests {
             "headerCanonicalUrl": long,
         })
         .to_string();
-        let output =
-            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
-                .unwrap();
+        let output = render_payload_codes_to_png(
+            &codec_bytes(64, 40_000),
+            "rgb",
+            "lp",
+            60.0,
+            Some(&options),
+        )
+        .unwrap();
 
         assert!(
             output.descriptor.stream_byte_length > 0,
@@ -5118,7 +5407,9 @@ mod tests {
 
         // The written part of the band is still the band's own colour: an
         // iso-luma palette varies the colour and never the light.
-        let rgba = record_decode::load_record_rgba(&output.png_bytes).unwrap().2;
+        let rgba = record_decode::load_record_rgba(&output.png_bytes)
+            .unwrap()
+            .2;
         let trailer = record_core::build_run_out_spiral_indices(
             RECORD_WIDTH,
             RECORD_HEIGHT,
@@ -5153,7 +5444,14 @@ mod tests {
     #[test]
     fn a_wheel_toned_trailer_carries_the_header_too() {
         let slots: Vec<String> = (0..24)
-            .map(|slot| format!("#{:02X}{:02X}{:02X}", 60 + slot * 8, 120 + slot * 4, 200 - slot * 6))
+            .map(|slot| {
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    60 + slot * 8,
+                    120 + slot * 4,
+                    200 - slot * 6
+                )
+            })
             .collect();
         let long = "WESTSIDE-".repeat(111);
         let options = serde_json::json!({
@@ -5165,9 +5463,14 @@ mod tests {
             "headerCanonicalUrl": long,
         })
         .to_string();
-        let output =
-            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
-                .unwrap();
+        let output = render_payload_codes_to_png(
+            &codec_bytes(64, 40_000),
+            "rgb",
+            "lp",
+            60.0,
+            Some(&options),
+        )
+        .unwrap();
 
         assert_eq!(
             output.descriptor.run_out_tone, None,
@@ -5211,9 +5514,14 @@ mod tests {
             "headerCanonicalUrl": long,
         })
         .to_string();
-        let output =
-            render_payload_codes_to_png(&codec_bytes(64, 40_000), "rgb", "lp", 60.0, Some(&options))
-                .unwrap();
+        let output = render_payload_codes_to_png(
+            &codec_bytes(64, 40_000),
+            "rgb",
+            "lp",
+            60.0,
+            Some(&options),
+        )
+        .unwrap();
 
         let clock = output
             .descriptor
@@ -5724,13 +6032,21 @@ mod tests {
     fn the_descriptor_band_of_a_pressed_record_is_mid_grey() {
         for golden in GOLDENS {
             let png = fixture_bytes(golden.id, golden.record_png_name);
-            let image = image::load_from_memory(&png).expect("golden png").to_rgba8();
+            let image = image::load_from_memory(&png)
+                .expect("golden png")
+                .to_rgba8();
             let (width, height) = (image.width() as usize, image.height() as usize);
             let rgba = image.into_raw();
 
-            let lead_in =
-                record_core::build_lead_in_spiral_indices(width, height, golden.profile, None, None, None)
-                    .expect("lead-in indices");
+            let lead_in = record_core::build_lead_in_spiral_indices(
+                width,
+                height,
+                golden.profile,
+                None,
+                None,
+                None,
+            )
+            .expect("lead-in indices");
 
             for &index in &lead_in {
                 let (r, g, b, a) = (
@@ -5742,7 +6058,11 @@ mod tests {
                 if a == 0 {
                     continue;
                 }
-                assert!(r == g && g == b, "{} lead-in pixel is not grey", golden.profile);
+                assert!(
+                    r == g && g == b,
+                    "{} lead-in pixel is not grey",
+                    golden.profile
+                );
                 assert!(
                     (record_descriptor::METADATA_GRAYSCALE_BASE
                         ..=record_descriptor::METADATA_GRAYSCALE_TOP)
