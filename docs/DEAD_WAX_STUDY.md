@@ -42,19 +42,52 @@ with these figures: 115 px on `lp`, 138 px on `ten` and 177 px on
 
 ## Revision 4
 
-- The locked groove is at the finishing-groove radius of IEC 60098.
+- The locked groove is at the lower limit of the finishing-groove diameter
+  of IEC 60098: 96.4 mm on a 7", and 105.6 mm on a 10" or a 12".
 - The land from the locked groove to the label is bare.
 - The run-out has at least one turn at one constant pitch. The pitch is
   6.4 mm a turn when the room permits it. The pitch is a minimum of 3.2 mm.
-- The programme floor is the larger of the minimum inside radius and the
-  radius that holds one run-out turn at 3.2 mm, the silent groove and the
-  raster clearance.
+- The programme floor is the radius that holds one run-out turn at 3.2 mm,
+  two silent-groove turns and one raster gap above the locked groove. A full
+  side cuts inside the minimum inside diameter of recording.
 
 The encoder writes revision 4 in `SEGMENT_LEAD_OUT_GEOMETRY` (35). A reader
 traces the trailer, the silent groove and the programme mask at the revision
 that the descriptor names. A record that has revision 3 or an earlier
 revision reads with the revision 3 geometry. A sidecar rewrite keeps the
 revision of the record (`RecordDescriptorInput::lead_out_geometry_revision`).
+
+## Reasons for the layout
+
+The dead wax of a full side is as narrow as the playback rules of IEC 60098
+permit.
+
+The locked groove and the run-out keep to IEC 60098, because a turntable
+uses them:
+
+- An automatic turntable starts its return when the arm reaches the
+  finishing-groove diameter, or when the arm moves inward faster than the
+  programme feed. The run-out pitch of 6.4 ± 3.2 mm gives that fast movement.
+  Thus each side keeps at least one run-out turn of 3.2 mm or more.
+- The locked groove stops the stylus. Its diameter has a tolerance, and the
+  label is fixed, so the land is the remaining vinyl. The lock is at the
+  lower limit of the tolerance, so the land is as narrow as the standard
+  permits: 2.3 mm on a 7", 3.0 mm on a 10" and 2.9 mm on a 12".
+- A pressing plant etches or stamps its matrix marks into the land.
+
+The minimum inside diameter of recording (RIAA, and IEC 60098 of 1958) does
+not apply to the programme:
+
+- The rule limits inner-groove distortion. Near the centre, the groove speed
+  is low and a stylus cannot trace short wavelengths accurately.
+- The bitneedle programme is a picture of data, not an audio groove, so the
+  reason for the rule does not apply.
+- A full side cuts down to the run-out. This removes 0.6 mm (7"),
+  1.7 mm (10") and 1.3 mm (12") of dead wax, and adds capacity.
+
+The two-turn layout and a layout with no run-out turn were also measured.
+The two-turn layout costs capacity and does not help a turntable. A layout
+with no run-out turn breaks the run-out rule of IEC 60098.
 
 ## Results
 
@@ -65,18 +98,18 @@ at f4e03db.
 
 | Profile | Full side, revision 3 (bytes) | Full side, revision 4 (bytes) | Of revision 3 |
 |---|---:|---:|---:|
-| `single45` | 426,054 | 390,283 | 91.6% |
-| `ten` | 513,066 | 487,929 | 95.1% |
-| `lp` | 561,406 | 544,970 | 97.1% |
+| `single45` | 426,054 | 396,083 | 93.0% |
+| `ten` | 513,066 | 494,696 | 96.4% |
+| `lp` | 561,406 | 548,837 | 97.8% |
 
 | Profile | Side | Programme stops at | Run-out | Locked groove | Land | Trailer (bytes) |
 |---|---|---|---|---|---|---:|
-| `single45` | Short | 243 px | 4 turns at 5.8 mm | 48.7 mm | 2.8 mm | 4,014 |
-| `single45` | Full | 177 px | 1 turn at 3.3 mm | 48.7 mm | 2.8 mm | 1,319 |
-| `ten` | Short | 242 px | 8 turns at 6.2 mm | 53.2 mm | 3.4 mm | 6,557 |
-| `ten` | Full | 138 px | 1 turn at 4.5 mm | 53.2 mm | 3.4 mm | 1,001 |
-| `lp` | Short | 244 px | 11 turns at 6.5 mm | 53.2 mm | 3.3 mm | 8,319 |
-| `lp` | Full | 115 px | 1 turn at 4.1 mm | 53.2 mm | 3.3 mm | 815 |
+| `single45` | Short | 243 px | 4 turns at 6.0 mm | 96.4 mm | 2.3 mm | 3,996 |
+| `single45` | Full | 175 px | 1 turn at 3.2 mm | 96.4 mm | 2.3 mm | 1,301 |
+| `ten` | Short | 242 px | 8 turns at 6.3 mm | 105.6 mm | 3.0 mm | 6,537 |
+| `ten` | Full | 135 px | 1 turn at 3.6 mm | 105.6 mm | 3.0 mm | 978 |
+| `lp` | Short | 244 px | 11 turns at 6.6 mm | 105.6 mm | 2.9 mm | 8,297 |
+| `lp` | Full | 113 px | 1 turn at 3.4 mm | 105.6 mm | 2.9 mm | 797 |
 
 The trailer is the run-out and the locked groove at six bits a pixel. Each
 cut holds more than the 512 bytes that the format guarantees.
@@ -89,5 +122,5 @@ the programme pitch, and the run-out has one turn.
 
 The study also measured a layout with a minimum of two run-out turns at
 3.2 mm. Its full sides held 83.7% (`single45`), 92.8% (`ten`) and 95.2%
-(`lp`) of revision 3. Revision 4 uses one turn, because the land inside the
-locked groove holds the marks of the plant.
+(`lp`) of revision 3. Revision 4 uses one turn, because IEC 60098 asks for
+one turn, and the land inside the locked groove holds the marks of the plant.

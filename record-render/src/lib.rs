@@ -3839,9 +3839,8 @@ mod tests {
     }
 
     /// A short payload stops well above the label; a long one reaches the
-    /// programme floor. The pressed floor is the minimum inside diameter of
-    /// recording, so a full programme stops on the registered band edge and
-    /// leaves the dead wax to the lead-out.
+    /// programme floor, which sits below the registered band edge because the
+    /// programme can cut down to the lead-out. Neither reaches the label.
     #[test]
     fn a_short_cut_stops_short_of_the_label() {
         let geometry = describe_record_profile("lp").unwrap();
@@ -3860,8 +3859,8 @@ mod tests {
             full.cut_inner_radius,
         );
         assert!(
-            full.cut_inner_radius >= geometry.payload_inner_radius,
-            "the programme stays outside the minimum inside diameter of recording",
+            full.cut_inner_radius < geometry.payload_inner_radius,
+            "the programme may reach past the registered edge, into the lead-out",
         );
         assert!(
             short.groove_span_fraction < full.groove_span_fraction,

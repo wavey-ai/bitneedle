@@ -47,10 +47,10 @@ pub const RUN_OUT_TURNS: f64 = 2.0;
 /// (`record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY`). Revision 3 and the
 /// revisions before it share one geometry here.
 pub const LEAD_OUT_REVISION_MERGED: u8 = 3;
-/// The pressed dead wax: the locked groove at the finishing-groove radius of
-/// IEC 60098, bare land from the lock to the label, at least one lead-out turn
-/// at one constant pitch, and the programme kept outside the minimum inside
-/// diameter of recording.
+/// The pressed dead wax: the locked groove at the smallest finishing-groove
+/// diameter of IEC 60098, bare land from the lock to the label, and at least
+/// one lead-out turn at one constant pitch. The programme can cut down to the
+/// lead-out.
 pub const LEAD_OUT_REVISION_PRESSED: u8 = 4;
 /// The revision that this build cuts.
 pub const LEAD_OUT_REVISION: u8 = LEAD_OUT_REVISION_PRESSED;
@@ -66,13 +66,15 @@ pub const PRESSED_LEAD_OUT_MIN_MM: f64 = 3.2;
 /// at least one.
 pub const PRESSED_LEAD_OUT_MIN_TURNS: f64 = 1.0;
 
-/// The radius of the finishing (locked) groove of IEC 60098, in millimetres:
-/// 97.4 mm across on a 7", and 106.4 mm across on a 10" or a 12".
+/// The radius of the finishing (locked) groove, in millimetres. IEC 60098
+/// gives 97.4 ± 1.0 mm across on a 7", and 106.4 ± 0.8 mm across on a 10" or
+/// a 12". The lock is at the lower limit, so the land is as narrow as the
+/// standard permits.
 fn finishing_groove_radius_mm(record_profile: &str) -> f64 {
     if record_profile.starts_with("single45") {
-        48.7
+        48.2
     } else {
-        53.2
+        52.8
     }
 }
 
@@ -1287,19 +1289,17 @@ pub fn programme_floor_radius(record_profile: &str) -> Result<f64> {
 
 /// The programme floor at a lead-out geometry revision.
 ///
-/// The pressed dead wax keeps the programme outside the minimum inside
-/// diameter of recording (the profile's payload inner radius), and outside the
-/// radius that holds its fewest lead-out turns at the least pitch, the
-/// silent groove, and the raster clearance between them.
+/// The pressed dead wax keeps the programme outside the radius that holds its
+/// fewest lead-out turns at the least pitch, the silent groove, and the raster
+/// clearance between them. A full side can cut inside the minimum inside
+/// diameter of recording.
 pub fn programme_floor_radius_at(record_profile: &str, revision: u8) -> Result<f64> {
     let lock = lock_radius_px_at(record_profile, revision)?;
     let silent = FILL_SILENT_GROOVE_MIN_TURNS * silent_groove_turn_separation_px(record_profile)?;
     if revision >= LEAD_OUT_REVISION_PRESSED {
-        let g = resolve_record_geometry(record_profile, None, None, None)?;
         let lead_out =
             PRESSED_LEAD_OUT_MIN_TURNS * PRESSED_LEAD_OUT_MIN_MM * pixels_per_mm(record_profile)?;
-        return Ok((lock + lead_out + silent + MIN_TURN_SEPARATION_PX)
-            .max(payload_inner_radius(&g) as f64));
+        return Ok(lock + lead_out + silent + MIN_TURN_SEPARATION_PX);
     }
     Ok(lock + fill_run_out_min_descent() + silent)
 }
@@ -1424,14 +1424,7 @@ pub fn cut_inner_radius_from_geometry(
     let fraction = validate_groove_span_fraction(span_fraction)?;
     let outer = g.payload_outer_radius as f64;
     let floor = programme_floor_radius(&g.record_profile)?;
-    // A pressed floor sits at or above the payload inner radius, and the cut
-    // keeps it; an earlier floor sat below it, and the band stopped there.
-    let inner = if LEAD_OUT_REVISION >= LEAD_OUT_REVISION_PRESSED {
-        floor
-    } else {
-        floor.min(g.payload_inner_radius as f64)
-    }
-    .max(1.0);
+    let inner = floor.min(g.payload_inner_radius as f64).max(1.0);
     let span = (outer - inner).max(0.0);
 
     Ok(js_round(outer - span * fraction).max(inner.ceil() as i32))

@@ -132,20 +132,21 @@ turns nearest to that room, and the pitch is the room divided by the count.
 The wire holds no count, so the two sides compute one answer.
 
 A short side has many run-out turns. A 60,000-byte cut has 4 turns on a 7",
-8 turns on a 10" and 11 turns on a 12". A full side has one turn, at 3.3 mm
-on a 7", 4.5 mm on a 10" and 4.1 mm on a 12".
+8 turns on a 10" and 11 turns on a 12". A full side has one turn, at 3.2 mm
+on a 7", 3.6 mm on a 10" and 3.4 mm on a 12".
 
-The programme stops at the programme floor. The floor is the minimum inside
-radius of recording (`payload_inner_radius`): 4¾" across on a 12" or a 10",
-and 4¼" across on a 7". A full side therefore keeps the dead wax of a pressed
-record. `docs/DEAD_WAX_STUDY.md` gives the capacity of each profile against
-revision 3.
+The programme stops at the programme floor. The floor holds the locked
+groove, one run-out turn at 3.2 mm, two silent-groove turns and one raster
+gap. A full side can cut inside the minimum inside diameter of recording
+(`payload_inner_radius`). `docs/DEAD_WAX_STUDY.md` gives the reasons for this
+layout and the capacity of each profile.
 
-**Locked groove** — one closed revolution at the finishing-groove radius of
-IEC 60098: 106.4 mm across on a 12" or a 10", and 97.4 mm across on a 7".
+**Locked groove** — one closed revolution at the lower limit of the
+finishing-groove diameter of IEC 60098: 105.6 mm across on a 12" or a 10",
+and 96.4 mm across on a 7".
 
-**Land** — the bare vinyl from the locked groove to the label. It is 3.3 mm on
-a 12", 3.4 mm on a 10" and 2.8 mm on a 7". A plant etches or stamps its
+**Land** — the bare vinyl from the locked groove to the label. It is 2.9 mm on
+a 12", 3.0 mm on a 10" and 2.3 mm on a 7". A plant etches or stamps its
 matrix marks into the land.
 
 The pixel sequence of the locked groove is cyclic. A reader that passes the
@@ -193,7 +194,7 @@ The exact radii, in rendered pixels on the 576 x 576 canvas:
 | Dink radius | 63 | 63 | none | none |
 | Dink knockout radius | 58 | 58 | none | none |
 | Lead-in turns | 2 | 2 | 2 | 2 |
-| Locked groove radius | 160.1 | 160.1 | 121.7 | 101.2 |
+| Locked groove radius | 158.5 | 158.5 | 120.8 | 100.5 |
 | Silent groove pitch, px/turn | 2 | 2 | 2 | 2 |
 | Pixels per mm | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
 
