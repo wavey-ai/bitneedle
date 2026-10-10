@@ -5,8 +5,8 @@ use bytes2rgb::{
     ToneOrdering as BytesToneOrdering, ToneSpan, TonedConfig,
 };
 use record_core::{
-    build_lead_in_spiral_indices, build_run_out_spiral_indices, build_spiral_mask_with_handedness,
-    known_record_profile_names, normalize_record_profile_name, SpiralFamily, RECORD_STREAM_MAGIC,
+    build_lead_in_spiral_indices, known_record_profile_names, normalize_record_profile_name,
+    SpiralFamily, RECORD_STREAM_MAGIC,
 };
 use record_descriptor::{
     resolve_tone_spans, RecordDescriptor, ToneOrdering as DescriptorToneOrdering,
@@ -313,7 +313,9 @@ fn record_descriptor_bytes_from_rgba(
             .context("record descriptor prefix has no main-groove b_value")?,
     );
     let clockwise = record_descriptor::spiral_clockwise_from_partial_stream(&head).unwrap_or(false);
-    let trailer_indices = build_run_out_spiral_indices(
+    // The trailer lies where the record's own lead-out geometry put it.
+    let revision = record_descriptor::lead_out_geometry_revision_from_partial_stream(&head);
+    let trailer_indices = record_core::build_run_out_spiral_indices_at(
         width,
         height,
         main_b_value,
@@ -321,6 +323,7 @@ fn record_descriptor_bytes_from_rgba(
         record_profile,
         cut_inner_radius,
         clockwise,
+        revision,
     )?;
 
     let mut bytes = head;
@@ -349,6 +352,8 @@ fn decode_record_groove_to_track_data(
     // with the hand it was cut with or the pixels come back in the wrong
     // order — which is not a wrong picture, it is a wrong stream.
     clockwise: bool,
+    // The lead-out geometry revision sets the programme floor the mask stops at.
+    revision: u8,
 ) -> Result<(Vec<u8>, usize, Vec<usize>)> {
     let expected_rgba_len = width
         .checked_mul(height)
@@ -359,7 +364,7 @@ fn decode_record_groove_to_track_data(
         bail!("record RGBA length does not match width * height * 4");
     }
 
-    let mask = build_spiral_mask_with_handedness(
+    let mask = record_core::build_spiral_mask_at(
         width,
         height,
         b_value,
@@ -369,6 +374,7 @@ fn decode_record_groove_to_track_data(
         None,
         None,
         clockwise,
+        revision,
     )?;
     let mut track_data = Vec::with_capacity(mask.ordered_pixel_indices.len().saturating_mul(4));
     let mut lifted_indices = Vec::with_capacity(mask.ordered_pixel_indices.len());
@@ -454,6 +460,7 @@ fn chunk_stream_from_rgba(
         descriptor.b_value(),
         &descriptor.spiral_family,
         descriptor.spiral_clockwise,
+        descriptor.lead_out_geometry_revision,
     )?;
 
     let bytes = match descriptor.payload_encoding.as_str() {
@@ -558,6 +565,7 @@ mod tests {
             descriptor.b_value(),
             &descriptor.spiral_family,
             descriptor.spiral_clockwise,
+            descriptor.lead_out_geometry_revision,
         )
         .unwrap();
         rgba[indices[0] * 4 + 3] = 0;

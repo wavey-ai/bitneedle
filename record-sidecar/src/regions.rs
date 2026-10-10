@@ -25,7 +25,7 @@ fn live_groove_pixels(
         )?,
         other => bail!("unsupported sidecar payload encoding: {other}"),
     };
-    let mask = record_core::build_spiral_mask_with_handedness(
+    let mask = record_core::build_spiral_mask_at(
         width,
         height,
         descriptor.b_value(),
@@ -35,6 +35,7 @@ fn live_groove_pixels(
         None,
         None,
         descriptor.spiral_clockwise,
+        descriptor.lead_out_geometry_revision,
     )?;
     if count > mask.ordered_pixel_indices.len() {
         bail!("record stream exceeds its groove");
@@ -141,7 +142,7 @@ fn carrier_regions(context: &RecordPngContext) -> Result<serde_json::Value> {
     let capacities =
         sidecar_plan_capacities(&plan, SIDECAR_SCHEME_PAIRSIGN_SAFE_LUMA_V2, &context.rgba)?;
     let mut remaining = pointer.as_ref().map_or(0, |p| p.length);
-    let trace = record_core::build_lead_out_trace(
+    let trace = record_core::build_lead_out_trace_at(
         context.width,
         context.height,
         context.descriptor.b_value(),
@@ -150,6 +151,7 @@ fn carrier_regions(context: &RecordPngContext) -> Result<serde_json::Value> {
         sidecar_cut_inner_radius(&context.descriptor),
         record_core::LeadOutExtent::Fill,
         context.descriptor.spiral_clockwise,
+        context.descriptor.lead_out_geometry_revision,
     )?;
     let mut locked = vec![false; context.width * context.height];
     for &pixel in &trace.indices[trace.lock_start..] {

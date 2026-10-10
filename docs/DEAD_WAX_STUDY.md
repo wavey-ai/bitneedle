@@ -1,21 +1,22 @@
 # Dead wax study
 
-This document compares the lead-out that bitneedle cuts at lead-out geometry
-revision 3 with a lead-out that follows IEC 60098 and RIAA practice. The
-example `record-render/examples/dead_wax_study.rs` renders both.
+This document gives the measurements of the dead wax that lead-out geometry
+revision 4 cuts, and compares them with revision 3. The example
+`record-render/examples/dead_wax_study.rs` makes the measurements.
 
 ## Terms
 
 - **Programme**: the groove that carries the stream.
 - **Silent groove**: the fine groove after the programme, at 2 px from turn
   to turn.
-- **Lead-out**: the wide spiral after the silent groove.
-- **Locked groove**: the closed ring at the end of the lead-out. IEC 60098
+- **Run-out**: the wide spiral after the silent groove. IEC 60098 calls it
+  the lead-out groove.
+- **Locked groove**: the closed ring at the end of the run-out. IEC 60098
   calls it the finishing groove.
 - **Land**: the vinyl between the locked groove and the label. A pressing
-  plant stamps or etches its marks into the land and between the lead-out
+  plant stamps or etches its marks into the land and between the run-out
   turns.
-- **Dead wax**: the lead-out, the locked groove and the land.
+- **Dead wax**: the run-out, the locked groove and the land.
 
 ## Reference dimensions
 
@@ -28,89 +29,65 @@ example `record-render/examples/dead_wax_study.rs` renders both.
 
 The minimum inside radius of each profile (`payload_inner_radius`) agrees
 with these figures: 115 px on `lp`, 138 px on `ten` and 177 px on
-`single45`. The locked-groove radii in `README.md` (101.7, 122.0 and 162.5 px)
-also agree with them.
+`single45`.
 
 ## Revision 3
 
 - The locked groove is 1 mm outside the label (`LOCK_GROOVE_CLEARANCE_MM`).
-- The programme may cut down to the lock, two run-out turns at 2.5 px and
-  two silent-groove turns (`programme_floor_radius`). This floor is under the
-  minimum inside radius on each profile.
-- The run-out fills the room that the cut leaves (`LeadOutExtent::Fill`).
-  Its rings are 5 to 8 px apart on a short side and close to 2 px on a full
-  side.
+- The programme can cut down to the lock, two run-out turns at 2.5 px and
+  two silent-groove turns. This floor is below the minimum inside radius on
+  each profile.
+- The run-out fills the room that the cut leaves. Its rings are 5 to 8 px
+  apart on a short side and approximately 2 px apart on a full side.
 
-`README.md` and the comment on `RUN_OUT_TURNS` state that a pressed record
-keeps two lead-out turns and a smooth land for matrix and stamper marks.
-Revision 3 does not keep the land.
-
-## Proposal
+## Revision 4
 
 - The locked groove is at the finishing-groove radius of IEC 60098.
-- The lead-out has at least two turns at one constant pitch. The pitch is
-  6.4 mm a turn when the room permits it, and it is never less than 3.2 mm.
-- The land from the locked groove to the label stays bare.
-- The programme does not cut below the larger of the minimum inside radius
-  and the radius that holds the lead-out and two silent-groove turns.
+- The land from the locked groove to the label is bare.
+- The run-out has at least one turn at one constant pitch. The pitch is
+  6.4 mm a turn when the room permits it. The pitch is a minimum of 3.2 mm.
+- The programme floor is the larger of the minimum inside radius and the
+  radius that holds one run-out turn at 3.2 mm, the silent groove and the
+  raster clearance.
 
-The **etched** variant also keeps the lead-out turn next to the locked groove
-at 6.4 mm, so each record has one 6.4 mm band for marks.
+The encoder writes revision 4 in `SEGMENT_LEAD_OUT_GEOMETRY` (35). A reader
+traces the trailer, the silent groove and the programme mask at the revision
+that the descriptor names. A record that has revision 3 or an earlier
+revision reads with the revision 3 geometry. A sidecar rewrite keeps the
+revision of the record (`RecordDescriptorInput::lead_out_geometry_revision`).
 
 ## Results
 
-The renders use the `lori-asha-westside-lp-hq` stream at 60,000 bytes for a
-short side. A full side is the largest stream that each layout holds.
+The renders use the `lori-asha-westside-lp-hq` payload. A short side is
+60,000 bytes. A full side is the largest payload that the profile holds, to
+the nearest 1,000 bytes. The revision 3 figures come from the same example
+at f4e03db.
 
-| Profile | Layout | Full side (bytes) | Of revision 3 | Lead-out gaps, full side | Land | Trailer, full side (bytes) |
-|---|---|---:|---:|---|---|---:|
-| `single45` | Revision 3 | 426,054 | 100% | 0.6 mm | 1.1 mm | — |
-| `single45` | Proposal | 356,444 | 83.7% | 2 turns at 3.6 mm | 2.8 mm | 2,172 |
-| `single45` | Etched | 323,573 | 75.9% | 3.9 mm, then 6.4 mm | 2.8 mm | 2,190 |
-| `ten` | Revision 3 | 513,066 | 100% | 0.9 mm | 1.1 mm | — |
-| `ten` | Proposal | 476,327 | 92.8% | 2 turns at 3.8 mm | 3.4 mm | 1,598 |
-| `ten` | Etched | 458,925 | 89.4% | 4.2 mm, then 6.4 mm | 3.4 mm | 1,598 |
-| `lp` | Revision 3 | 561,406 | 100% | none (1 ring) | 1.3 mm | — |
-| `lp` | Proposal | 534,335 | 95.2% | 2 turns at 3.9 mm | 3.3 mm | 1,325 |
-| `lp` | Etched | 522,734 | 93.1% | 4.5 mm, then 6.4 mm | 3.3 mm | 1,335 |
+| Profile | Full side, revision 3 (bytes) | Full side, revision 4 (bytes) | Of revision 3 |
+|---|---:|---:|---:|
+| `single45` | 426,054 | 390,283 | 91.6% |
+| `ten` | 513,066 | 487,929 | 95.1% |
+| `lp` | 561,406 | 544,970 | 97.1% |
 
-On a short side, the proposal cuts 4 to 11 lead-out turns at 6.0 to 6.7 mm,
-where revision 3 cuts 13 to 19 rings at 1.5 to 4.2 mm.
+| Profile | Side | Programme stops at | Run-out | Locked groove | Land | Trailer (bytes) |
+|---|---|---|---|---|---|---:|
+| `single45` | Short | 243 px | 4 turns at 5.8 mm | 48.7 mm | 2.8 mm | 4,014 |
+| `single45` | Full | 177 px | 1 turn at 3.3 mm | 48.7 mm | 2.8 mm | 1,319 |
+| `ten` | Short | 242 px | 8 turns at 6.2 mm | 53.2 mm | 3.4 mm | 6,557 |
+| `ten` | Full | 138 px | 1 turn at 4.5 mm | 53.2 mm | 3.4 mm | 1,001 |
+| `lp` | Short | 244 px | 11 turns at 6.5 mm | 53.2 mm | 3.3 mm | 8,319 |
+| `lp` | Full | 115 px | 1 turn at 4.1 mm | 53.2 mm | 3.3 mm | 815 |
 
-The trailer is the lead-out and the locked groove at six bits a pixel. Each
-layout holds more than the 512 bytes that the format guarantees.
+The trailer is the run-out and the locked groove at six bits a pixel. Each
+cut holds more than the 512 bytes that the format guarantees.
 
-## Implementation
+A short side keeps the programme at its nominal pitch, and the run-out takes
+the remaining room in turns of approximately 6.4 mm. A full side compresses
+the programme pitch, and the run-out has one turn.
 
-The proposal changes the geometry that a reader derives, so it is a new
-revision of `SEGMENT_LEAD_OUT_GEOMETRY` (35): revision 4.
+## Two-turn layout
 
-1. `record-core`: a lead-out geometry for each revision. Revision 4 sets the
-   lock radius from the IEC table, a constant-pitch lead-out of at least two
-   turns, and the programme floor above. `lock_radius_px`,
-   `programme_floor_radius`, `lead_out_geometry_with_extent`,
-   `build_lead_out_trace`, `build_silent_groove_spiral_indices` and
-   `build_run_out_spiral_indices` take the revision.
-2. `record-core`: `cut_inner_radius_from_geometry` takes the floor when the
-   floor is above `payload_inner_radius`. On `single45` the revision 4 floor
-   is above it.
-3. `record-descriptor`: `LEAD_OUT_GEOMETRY_REVISION_PRESSED = 4`.
-4. `record-cut` writes the revision that the render used.
-5. `record-decode`, `record-sidecar` and `record-wasm` trace the trailer and
-   the silent groove at the revision that the descriptor names. A revision 3
-   record then still reads its trailer.
-6. `bitneedle-app`: the capacities in `programme-fit.mjs` (`capacityBytes`)
-   change by the factors in the table.
-
-## Decisions for the owner
-
-- The proposal or the etched variant.
-- Whether revision 4 is the default for each new cut, or a render option.
-- Whether a short side cuts many lead-out turns at 6.4 mm, or a few lead-out
-  turns below a wider bare band.
-
-## Study branch
-
-The branch `dead-wax-study` lets `STUDY_PROGRAMME_FLOOR_<PROFILE>` set the
-programme floor, so the renderer cuts a full side under the proposed floor.
-This override is for the study and is not for `main`.
+The study also measured a layout with a minimum of two run-out turns at
+3.2 mm. Its full sides held 83.7% (`single45`), 92.8% (`ten`) and 95.2%
+(`lp`) of revision 3. Revision 4 uses one turn, because the land inside the
+locked groove holds the marks of the plant.

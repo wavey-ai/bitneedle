@@ -43,6 +43,39 @@ pub const LEAD_IN_TURNS: f64 = 2.0;
 /// [`MIN_LABEL_CLEARANCE_PX`] is the one use of this constant.
 pub const RUN_OUT_TURNS: f64 = 2.0;
 
+/// The lead-out geometry revisions that this build cuts and traces
+/// (`record_descriptor::SEGMENT_LEAD_OUT_GEOMETRY`). Revision 3 and the
+/// revisions before it share one geometry here.
+pub const LEAD_OUT_REVISION_MERGED: u8 = 3;
+/// The pressed dead wax: the locked groove at the finishing-groove radius of
+/// IEC 60098, bare land from the lock to the label, at least one lead-out turn
+/// at one constant pitch, and the programme kept outside the minimum inside
+/// diameter of recording.
+pub const LEAD_OUT_REVISION_PRESSED: u8 = 4;
+/// The revision that this build cuts.
+pub const LEAD_OUT_REVISION: u8 = LEAD_OUT_REVISION_PRESSED;
+
+/// The lead-out pitch that the pressed dead wax aims for, in millimetres a
+/// turn: the nominal pitch of IEC 60098 (6.4 ± 3.2 mm).
+pub const PRESSED_LEAD_OUT_NOMINAL_MM: f64 = 6.4;
+/// The least lead-out pitch of the pressed dead wax, in millimetres a turn:
+/// the lower limit of IEC 60098. The land between two turns stays wide enough
+/// for an etched mark.
+pub const PRESSED_LEAD_OUT_MIN_MM: f64 = 3.2;
+/// The fewest lead-out turns that a pressed dead wax keeps. IEC 60098 asks for
+/// at least one.
+pub const PRESSED_LEAD_OUT_MIN_TURNS: f64 = 1.0;
+
+/// The radius of the finishing (locked) groove of IEC 60098, in millimetres:
+/// 97.4 mm across on a 7", and 106.4 mm across on a 10" or a 12".
+fn finishing_groove_radius_mm(record_profile: &str) -> f64 {
+    if record_profile.starts_with("single45") {
+        48.7
+    } else {
+        53.2
+    }
+}
+
 /// How many rings the run-out lays across the descent it resolves.
 ///
 /// The geometry picks the descent from the room the cut left; this factor
@@ -118,7 +151,6 @@ pub const LOCK_MERGE_PX: f64 = 1.0;
 /// space is the smooth band that the presser marks are stamped into. This floor
 /// checks the caller-supplied override in `resolve_record_geometry`.
 pub const MIN_LABEL_CLEARANCE_PX: i32 = (RUN_OUT_TURNS * MIN_TURN_SEPARATION_PX) as i32;
-
 
 /// The lathe's fine feed through the silent groove, in millimetres per turn.
 ///
@@ -1227,8 +1259,17 @@ fn payload_inner_radius(g: &RecordGeometry) -> i32 {
 /// programme floor both measure from it, so a reader that has read the prefix
 /// reproduces the same circle.
 pub fn lock_radius_px(record_profile: &str) -> Result<f64> {
+    lock_radius_px_at(record_profile, LEAD_OUT_REVISION)
+}
+
+/// The radius of the locked groove at a lead-out geometry revision.
+pub fn lock_radius_px_at(record_profile: &str, revision: u8) -> Result<f64> {
+    let scale = pixels_per_mm(record_profile)?;
+    if revision >= LEAD_OUT_REVISION_PRESSED {
+        return Ok(finishing_groove_radius_mm(record_profile) * scale);
+    }
     let g = resolve_record_geometry(record_profile, None, None, None)?;
-    Ok(g.label_radius as f64 + LOCK_GROOVE_CLEARANCE_MM * pixels_per_mm(record_profile)?)
+    Ok(g.label_radius as f64 + LOCK_GROOVE_CLEARANCE_MM * scale)
 }
 
 /// The radius the programme's groove may not cut below.
@@ -1241,25 +1282,37 @@ pub fn lock_radius_px(record_profile: &str) -> Result<f64> {
 /// turns. The reserve follows from the profile's own scale, so a reader derives
 /// the same floor from the descriptor without the fit's pitch.
 pub fn programme_floor_radius(record_profile: &str) -> Result<f64> {
-    // Study branch only: `examples/dead_wax_study.rs` sets the floor a pressed
-    // dead wax needs, to render full sides under it.
-    if let Ok(value) = std::env::var(format!("STUDY_PROGRAMME_FLOOR_{}", record_profile.to_uppercase())) {
-        if let Ok(floor) = value.parse::<f64>() {
-            return Ok(floor);
-        }
-    }
-    let lock = lock_radius_px(record_profile)?;
-    let run_out_min = fill_run_out_min_descent();
+    programme_floor_radius_at(record_profile, LEAD_OUT_REVISION)
+}
 
-    Ok(lock
-        + run_out_min
-        + FILL_SILENT_GROOVE_MIN_TURNS * silent_groove_turn_separation_px(record_profile)?)
+/// The programme floor at a lead-out geometry revision.
+///
+/// The pressed dead wax keeps the programme outside the minimum inside
+/// diameter of recording (the profile's payload inner radius), and outside the
+/// radius that holds its fewest lead-out turns at the least pitch, the
+/// silent groove, and the raster clearance between them.
+pub fn programme_floor_radius_at(record_profile: &str, revision: u8) -> Result<f64> {
+    let lock = lock_radius_px_at(record_profile, revision)?;
+    let silent = FILL_SILENT_GROOVE_MIN_TURNS * silent_groove_turn_separation_px(record_profile)?;
+    if revision >= LEAD_OUT_REVISION_PRESSED {
+        let g = resolve_record_geometry(record_profile, None, None, None)?;
+        let lead_out =
+            PRESSED_LEAD_OUT_MIN_TURNS * PRESSED_LEAD_OUT_MIN_MM * pixels_per_mm(record_profile)?;
+        return Ok((lock + lead_out + silent + MIN_TURN_SEPARATION_PX)
+            .max(payload_inner_radius(&g) as f64));
+    }
+    Ok(lock + fill_run_out_min_descent() + silent)
 }
 
 /// The radius the programme's groove may not cut below, for a resolved
 /// geometry. See [`programme_floor_radius`].
 pub fn programme_inner_radius(record_profile: &str) -> Result<i32> {
-    Ok(programme_floor_radius(record_profile)?.ceil() as i32)
+    programme_inner_radius_at(record_profile, LEAD_OUT_REVISION)
+}
+
+/// The same, at a lead-out geometry revision.
+pub fn programme_inner_radius_at(record_profile: &str, revision: u8) -> Result<i32> {
+    Ok(programme_floor_radius_at(record_profile, revision)?.ceil() as i32)
 }
 
 pub fn payload_outer_radius_from_geometry(g: &RecordProfileGeometry) -> i32 {
@@ -1371,10 +1424,14 @@ pub fn cut_inner_radius_from_geometry(
     let fraction = validate_groove_span_fraction(span_fraction)?;
     let outer = g.payload_outer_radius as f64;
     let floor = programme_floor_radius(&g.record_profile)?;
-    // Study branch only: a pressed floor may sit above the profile's
-    // payload inner radius, and the fit takes it as it is.
-    let study = std::env::var(format!("STUDY_PROGRAMME_FLOOR_{}", g.record_profile.to_uppercase())).is_ok();
-    let inner = if study { floor } else { floor.min(g.payload_inner_radius as f64) }.max(1.0);
+    // A pressed floor sits at or above the payload inner radius, and the cut
+    // keeps it; an earlier floor sat below it, and the band stopped there.
+    let inner = if LEAD_OUT_REVISION >= LEAD_OUT_REVISION_PRESSED {
+        floor
+    } else {
+        floor.min(g.payload_inner_radius as f64)
+    }
+    .max(1.0);
     let span = (outer - inner).max(0.0);
 
     Ok(js_round(outer - span * fraction).max(inner.ceil() as i32))
@@ -1440,8 +1497,7 @@ fn lead_in_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
 }
 
 fn run_out_spiral_pitch_for_geometry(g: &RecordGeometry) -> f64 {
-    (payload_inner_radius(g) - g.label_radius).max(1) as f64
-        / (2.0 * PI * RUN_OUT_TURNS.max(0.01))
+    (payload_inner_radius(g) - g.label_radius).max(1) as f64 / (2.0 * PI * RUN_OUT_TURNS.max(0.01))
 }
 
 pub fn lead_in_spiral_pitch_for_profile(record_profile: &str) -> Result<f64> {
@@ -1907,13 +1963,34 @@ pub fn groove_angle_at_radius(
 /// profile's nominal entry and fills the extra room itself: the run-out is a
 /// consequence of the silent groove not the other way round, so the two bands always
 /// meet on the same groove.
-pub fn silent_groove_inner_radius(record_profile: &str, cut_inner_radius: Option<i32>) -> Result<f64> {
-    let lead_out =
-        lead_out_geometry_with_extent(record_profile, cut_inner_radius, LeadOutExtent::Fill)?;
+pub fn silent_groove_inner_radius(
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+) -> Result<f64> {
+    silent_groove_inner_radius_at(record_profile, cut_inner_radius, LEAD_OUT_REVISION)
+}
+
+/// The same, at a lead-out geometry revision. The pressed dead wax hands the
+/// groove to the lead-out at the entry of its run-out.
+pub fn silent_groove_inner_radius_at(
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    revision: u8,
+) -> Result<f64> {
+    let lead_out = lead_out_geometry_with_extent_at(
+        record_profile,
+        cut_inner_radius,
+        LeadOutExtent::Fill,
+        revision,
+    )?;
+    if revision >= LEAD_OUT_REVISION_PRESSED {
+        return Ok(lead_out.entry_radius);
+    }
     let entry = lead_out.entry_radius;
     Ok(match cut_inner_radius.filter(|radius| *radius > 0) {
         Some(cut) => {
-            let travel = SILENT_GROOVE_MAX_TURNS * silent_groove_turn_separation_px(record_profile)?;
+            let travel =
+                SILENT_GROOVE_MAX_TURNS * silent_groove_turn_separation_px(record_profile)?;
             let cut = f64::from(cut);
             (cut - travel).max(entry).min(cut)
         }
@@ -1935,7 +2012,31 @@ pub fn build_silent_groove_spiral_indices(
     cut_inner_radius: i32,
     clockwise: bool,
 ) -> Result<Vec<usize>> {
-    let trace = build_lead_out_trace(
+    build_silent_groove_spiral_indices_at(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+        LEAD_OUT_REVISION,
+    )
+}
+
+/// The same, at the lead-out geometry revision that a record names.
+#[allow(clippy::too_many_arguments)]
+pub fn build_silent_groove_spiral_indices_at(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: i32,
+    clockwise: bool,
+    revision: u8,
+) -> Result<Vec<usize>> {
+    let trace = build_lead_out_trace_at(
         width,
         height,
         b_value,
@@ -1944,6 +2045,7 @@ pub fn build_silent_groove_spiral_indices(
         Some(cut_inner_radius),
         LeadOutExtent::Fill,
         clockwise,
+        revision,
     )?;
     let indices = trace.indices[..trace.silent_groove_end].to_vec();
     Ok(indices)
@@ -1994,7 +2096,31 @@ pub fn build_run_out_spiral_indices(
     cut_inner_radius: Option<i32>,
     clockwise: bool,
 ) -> Result<Vec<usize>> {
-    let trace = build_lead_out_trace(
+    build_run_out_spiral_indices_at(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        clockwise,
+        LEAD_OUT_REVISION,
+    )
+}
+
+/// The same, at the lead-out geometry revision that a record names.
+#[allow(clippy::too_many_arguments)]
+pub fn build_run_out_spiral_indices_at(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    clockwise: bool,
+    revision: u8,
+) -> Result<Vec<usize>> {
+    let trace = build_lead_out_trace_at(
         width,
         height,
         b_value,
@@ -2003,6 +2129,7 @@ pub fn build_run_out_spiral_indices(
         cut_inner_radius,
         LeadOutExtent::Fill,
         clockwise,
+        revision,
     )?;
     let indices = trace.indices[trace.silent_groove_end..].to_vec();
     Ok(indices)
@@ -2191,6 +2318,81 @@ pub fn lead_out_geometry(
     lead_out_geometry_with_extent(record_profile, cut_inner_radius, LeadOutExtent::Compact)
 }
 
+/// The pressed dead wax's lead-out.
+///
+/// The run-out is cut at one constant pitch, as a lathe feeds it, from the
+/// silent groove down to the locked groove at the finishing-groove radius. The
+/// pitch is as near [`PRESSED_LEAD_OUT_NOMINAL_MM`] as a whole number of turns
+/// allows and never under [`PRESSED_LEAD_OUT_MIN_MM`], so a short side carries
+/// more turns and a full side keeps [`PRESSED_LEAD_OUT_MIN_TURNS`]. The land
+/// inside the lock stays bare.
+fn pressed_lead_out_geometry(
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+) -> Result<LeadOutGeometry> {
+    let g = resolve_record_geometry(record_profile, None, None, None)?;
+    let scale = pixels_per_mm(record_profile)?;
+    let lock_radius = lock_radius_px_at(record_profile, LEAD_OUT_REVISION_PRESSED)?;
+    let nominal = PRESSED_LEAD_OUT_NOMINAL_MM * scale;
+    let least = PRESSED_LEAD_OUT_MIN_MM * scale;
+    let silent_step = silent_groove_turn_separation_px(record_profile)?;
+    let cut = cut_inner_radius.filter(|radius| *radius > 0).map(f64::from);
+
+    // Where the run-out begins. A filled lead-out hangs the silent groove from
+    // the programme's edge and starts the run-out under it; a declared band
+    // starts below the programme's band edge, or below the cut.
+    let entry = match (extent, cut) {
+        (LeadOutExtent::Fill, Some(edge)) => {
+            let room_turns = (edge - lock_radius - least).max(0.0) / silent_step.max(1.0);
+            let silent_turns = if room_turns >= FILL_SILENT_GROOVE_MAX_TURNS {
+                FILL_SILENT_GROOVE_MAX_TURNS
+            } else {
+                FILL_SILENT_GROOVE_MIN_TURNS
+            };
+            (edge - silent_turns * silent_step)
+                .max(lock_radius + least)
+                .min(edge)
+        }
+        _ => {
+            // A declared band stays under the room that a filled lead-out
+            // leaves its silent groove, so it never reaches above the fill.
+            let ceiling = match cut {
+                Some(edge) => edge - FILL_SILENT_GROOVE_MAX_TURNS * silent_step,
+                None => payload_inner_radius(&g) as f64,
+            } - MIN_TURN_SEPARATION_PX;
+            let wanted = PRESSED_LEAD_OUT_MIN_TURNS
+                + if extent == LeadOutExtent::Fill {
+                    0.0
+                } else {
+                    extent.bonus_turns()
+                };
+            let mut turns = PRESSED_LEAD_OUT_MIN_TURNS;
+            while turns + 1.0 <= wanted && lock_radius + (turns + 1.0) * nominal <= ceiling {
+                turns += 1.0;
+            }
+            (lock_radius + turns * nominal)
+                .min(ceiling)
+                .max(lock_radius + least)
+        }
+    };
+    let room = (entry - lock_radius).max(0.0);
+    let mut turns = (room / nominal).round().max(PRESSED_LEAD_OUT_MIN_TURNS);
+    if room / turns < least {
+        turns = (room / least).floor().max(PRESSED_LEAD_OUT_MIN_TURNS);
+    }
+    let pitch = (room / turns).max(MIN_TURN_SEPARATION_PX);
+    // One gap for every turn: `LeadOutGeometry::gaps` holds a gap at the
+    // inner gap when the coarse gap equals it.
+    Ok(LeadOutGeometry {
+        lock_radius,
+        entry_radius: entry,
+        turns,
+        inner_gap: pitch,
+        turn_separation: pitch,
+    })
+}
+
 /// The same, at a named extent.
 ///
 /// [`LeadOutExtent::Extended`] adds the radial room of one turn above the
@@ -2203,6 +2405,19 @@ pub fn lead_out_geometry_with_extent(
     cut_inner_radius: Option<i32>,
     extent: LeadOutExtent,
 ) -> Result<LeadOutGeometry> {
+    lead_out_geometry_with_extent_at(record_profile, cut_inner_radius, extent, LEAD_OUT_REVISION)
+}
+
+/// The same, at a lead-out geometry revision.
+pub fn lead_out_geometry_with_extent_at(
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+    revision: u8,
+) -> Result<LeadOutGeometry> {
+    if revision >= LEAD_OUT_REVISION_PRESSED {
+        return pressed_lead_out_geometry(record_profile, cut_inner_radius, extent);
+    }
     let g = resolve_record_geometry(record_profile, None, None, None)?;
     let scale = pixels_per_mm(record_profile)?;
     let label_radius = g.label_radius as f64;
@@ -2266,7 +2481,7 @@ pub fn lead_out_geometry_with_extent(
             // shrinking to a sliver before the lock as the programme takes the
             // side.
             let programme_edge = cut + MIN_TURN_SEPARATION_PX;
-    let run_out_min = fill_run_out_min_descent();
+            let run_out_min = fill_run_out_min_descent();
             let room_turns =
                 (programme_edge - lock_radius - run_out_min).max(0.0) / silent_groove_step.max(1.0);
             let silent_groove_turns = if room_turns >= FILL_SILENT_GROOVE_MAX_TURNS {
@@ -2342,6 +2557,7 @@ pub fn lead_out_traced_byte_capacity(
         LeadOutExtent::Compact,
         DEFAULT_START_ANGLE,
         false,
+        LEAD_OUT_REVISION,
     )?;
 
     Ok(u32::try_from(trace.indices.len() / 2).unwrap_or(u32::MAX))
@@ -2417,6 +2633,33 @@ pub fn build_lead_out_indices_with_extent(
     Ok((trace.indices, trace.lock_start))
 }
 
+/// The same, at the lead-out geometry revision that a record names.
+#[allow(clippy::too_many_arguments)]
+pub fn build_lead_out_indices_with_extent_at(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+    clockwise: bool,
+    revision: u8,
+) -> Result<(Vec<usize>, usize)> {
+    let trace = build_lead_out_trace_at(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        extent,
+        clockwise,
+        revision,
+    )?;
+    Ok((trace.indices, trace.lock_start))
+}
+
 /// Trace the whole lead-out, starting from the pixel after the programme.
 ///
 /// The start angle is the angle at which the programme's groove passes
@@ -2431,6 +2674,32 @@ pub fn build_lead_out_trace(
     cut_inner_radius: Option<i32>,
     extent: LeadOutExtent,
     clockwise: bool,
+) -> Result<LeadOutTrace> {
+    build_lead_out_trace_at(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        cut_inner_radius,
+        extent,
+        clockwise,
+        LEAD_OUT_REVISION,
+    )
+}
+
+/// The same, at the lead-out geometry revision that a record names.
+#[allow(clippy::too_many_arguments)]
+pub fn build_lead_out_trace_at(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    cut_inner_radius: Option<i32>,
+    extent: LeadOutExtent,
+    clockwise: bool,
+    revision: u8,
 ) -> Result<LeadOutTrace> {
     let start_angle = match cut_inner_radius.filter(|radius| *radius > 0) {
         Some(radius) => groove_angle_at_radius(
@@ -2453,9 +2722,11 @@ pub fn build_lead_out_trace(
         extent,
         start_angle,
         clockwise,
+        revision,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trace_lead_out(
     width: usize,
     height: usize,
@@ -2464,14 +2735,16 @@ fn trace_lead_out(
     extent: LeadOutExtent,
     start_angle: f64,
     clockwise: bool,
+    revision: u8,
 ) -> Result<LeadOutTrace> {
-    let geometry = lead_out_geometry_with_extent(record_profile, cut_inner_radius, extent)?;
+    let geometry =
+        lead_out_geometry_with_extent_at(record_profile, cut_inner_radius, extent, revision)?;
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let mut occupied = vec![0_u8; width * height];
     let mut ordered: Vec<usize> = Vec::new();
 
-    let handoff = silent_groove_inner_radius(record_profile, cut_inner_radius)?;
+    let handoff = silent_groove_inner_radius_at(record_profile, cut_inner_radius, revision)?;
     let mut angle = start_angle;
 
     // The silent groove: the programme's groove continued at the lathe's own fine
@@ -2669,13 +2942,42 @@ pub fn build_spiral_mask_with_handedness(
     outer_radius: Option<i32>,
     clockwise: bool,
 ) -> Result<SpiralMask> {
+    build_spiral_mask_at(
+        width,
+        height,
+        b_value,
+        family,
+        record_profile,
+        label_radius,
+        label_clearance,
+        outer_radius,
+        clockwise,
+        LEAD_OUT_REVISION,
+    )
+}
+
+/// The same mask, at the lead-out geometry revision that a record names: the
+/// revision sets the programme floor that the mask stops at.
+#[allow(clippy::too_many_arguments)]
+pub fn build_spiral_mask_at(
+    width: usize,
+    height: usize,
+    b_value: f64,
+    family: &SpiralFamily,
+    record_profile: &str,
+    label_radius: Option<i32>,
+    label_clearance: Option<i32>,
+    outer_radius: Option<i32>,
+    clockwise: bool,
+    revision: u8,
+) -> Result<SpiralMask> {
     let g = resolve_record_geometry(record_profile, label_radius, label_clearance, outer_radius)?;
     let outer = payload_outer_radius(&g);
     // The same inner cut the renderer paints with: the programme may reach the
     // lead-out reserve, so the mask addresses down to the programme floor, not
     // the registered payload edge. A renderer and a reader that disagree on
     // this bound disagree on the last bytes of the stream.
-    let inner = programme_inner_radius(record_profile)?;
+    let inner = programme_inner_radius_at(record_profile, revision)?;
 
     let (occupied, traced, cx, cy) = trace_record_spiral_with_family(
         width,
@@ -5220,13 +5522,8 @@ mod tests {
 
     #[test]
     fn a_clearance_under_the_floor_is_refused() {
-        let err = resolve_record_geometry(
-            "single45",
-            None,
-            Some(MIN_LABEL_CLEARANCE_PX - 1),
-            None,
-        )
-        .expect_err("a run-out whose turns merge is not a run-out");
+        let err = resolve_record_geometry("single45", None, Some(MIN_LABEL_CLEARANCE_PX - 1), None)
+            .expect_err("a run-out whose turns merge is not a run-out");
         assert!(err.to_string().contains("label clearance"), "{err}");
     }
 
@@ -5276,10 +5573,7 @@ mod dink_cutout_tests {
     fn the_three_centre_features_nest() {
         let geometry = describe_record_profile("single45").expect("single45 resolves");
 
-        assert!(
-            geometry.spindle_hole_radius
-                < geometry.dink_cutout_radius.expect("a knockout")
-        );
+        assert!(geometry.spindle_hole_radius < geometry.dink_cutout_radius.expect("a knockout"));
         assert!(
             geometry.dink_cutout_radius.expect("a knockout")
                 < geometry.dink_radius.expect("a dink")
@@ -5375,9 +5669,8 @@ mod lead_out_tests {
                 - ((geometry.payload_outer_radius - geometry.payload_inner_radius) as f64 * 0.33)
                     as i32;
 
-            let compact =
-                lead_out_geometry_with_extent(profile, None, LeadOutExtent::Compact)
-                    .expect("compact resolves");
+            let compact = lead_out_geometry_with_extent(profile, None, LeadOutExtent::Compact)
+                .expect("compact resolves");
             let mut previous = compact.entry_radius;
             let mut grew = false;
             for extent in [
@@ -5407,12 +5700,9 @@ mod lead_out_tests {
             }
             assert!(grew, "{profile} gained no room at any extent");
 
-            let extended = lead_out_geometry_with_extent(
-                profile,
-                Some(short_cut),
-                LeadOutExtent::Extended,
-            )
-            .expect("extended resolves");
+            let extended =
+                lead_out_geometry_with_extent(profile, Some(short_cut), LeadOutExtent::Extended)
+                    .expect("extended resolves");
 
             assert!(
                 extended.entry_radius > compact.entry_radius,
@@ -5437,17 +5727,17 @@ mod lead_out_tests {
         for profile in known_record_profile_names() {
             let compact = lead_out_geometry_with_extent(profile, None, LeadOutExtent::Compact)
                 .expect("compact resolves");
-            let programme_edge =
-                describe_record_profile(profile).expect("profile resolves").payload_inner_radius
-                    as f64;
+            let programme_edge = describe_record_profile(profile)
+                .expect("profile resolves")
+                .payload_inner_radius as f64;
 
             for extent in [
                 LeadOutExtent::Extended,
                 LeadOutExtent::Wide,
                 LeadOutExtent::ExtraWide,
             ] {
-                let wider = lead_out_geometry_with_extent(profile, None, extent)
-                    .expect("extent resolves");
+                let wider =
+                    lead_out_geometry_with_extent(profile, None, extent).expect("extent resolves");
                 // With no cut declared there is no room to claim, so a wider
                 // extent takes only what fits inside the programme's own band
                 // — never a pixel the cut might have wanted.
@@ -5531,8 +5821,7 @@ mod lead_out_tests {
                 // ladder down, so check the drawn result.
                 let gaps = lead_out.gaps();
                 let declared: f64 = gaps.iter().sum::<f64>().max(1e-9);
-                let tightest =
-                    gaps.last().copied().unwrap_or(descent) * descent / declared;
+                let tightest = gaps.last().copied().unwrap_or(descent) * descent / declared;
 
                 assert!(
                     tightest >= MIN_TURN_SEPARATION_PX,
@@ -5550,14 +5839,14 @@ mod lead_out_tests {
     fn the_silent_groove_never_runs_past_its_header() {
         for profile in known_record_profile_names() {
             let geometry = describe_record_profile(profile).expect("profile resolves");
-            let band =
-                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let band = (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
             let separation = silent_groove_turn_separation_px(profile).expect("profile has a feed");
 
             for fraction in [1.0_f64, 0.67, 0.5, 0.33, 0.25, 0.15] {
                 let cut = geometry.payload_outer_radius - (band * fraction) as i32;
-                let lead_out = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
-                    .expect("the band resolves");
+                let lead_out =
+                    lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
+                        .expect("the band resolves");
                 // The band the renderer cuts: from the cut down to the
                 // run-out's outermost turn, cleared by the separation floor.
                 let turns = ((cut as f64 - lead_out.entry_radius - MIN_TURN_SEPARATION_PX)
@@ -5580,18 +5869,14 @@ mod lead_out_tests {
     fn the_filled_band_takes_the_room_the_cut_left() {
         for profile in known_record_profile_names() {
             let geometry = describe_record_profile(profile).expect("profile resolves");
-            let band =
-                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let band = (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
             let cut = geometry.payload_outer_radius - (band * 0.33) as i32;
 
             let filled = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
                 .expect("the band resolves");
-            let widest = lead_out_geometry_with_extent(
-                profile,
-                Some(cut),
-                LeadOutExtent::ExtraWide,
-            )
-            .expect("the band resolves");
+            let widest =
+                lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::ExtraWide)
+                    .expect("the band resolves");
 
             assert!(
                 filled.entry_radius >= widest.entry_radius,
@@ -5617,8 +5902,7 @@ mod lead_out_tests {
     fn no_run_out_gap_is_wider_than_the_lathes_feed() {
         for profile in known_record_profile_names() {
             let geometry = describe_record_profile(profile).expect("profile resolves");
-            let band =
-                (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
+            let band = (geometry.payload_outer_radius - geometry.payload_inner_radius) as f64;
             let cut = geometry.payload_outer_radius - (band * 0.33) as i32;
             let lead_out = lead_out_geometry_with_extent(profile, Some(cut), LeadOutExtent::Fill)
                 .expect("the band resolves");
@@ -5646,7 +5930,10 @@ mod lead_out_tests {
             "a cut that ran past the band should have shortened it"
         );
         assert!(deep.run_out_turns() <= capped.run_out_turns());
-        assert_eq!(deep.lock_radius, capped.lock_radius, "the lock does not move");
+        assert_eq!(
+            deep.lock_radius, capped.lock_radius,
+            "the lock does not move"
+        );
     }
 }
 

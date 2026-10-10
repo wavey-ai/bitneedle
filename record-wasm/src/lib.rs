@@ -865,11 +865,10 @@ fn decode_record_png_to_payload_for_profile_with_length(
     byte_length: usize,
 ) -> Result<WasmPayloadDecodeResult> {
     let decode_with_length = || -> Result<WasmPayloadDecodeResult> {
-        let decoded =
-            decode_chunk_stream_for_profile(png_bytes, record_profile, Some(byte_length))
-                .context(
-                    "failed to decode Bitneedle record PNG for profile with explicit byte length",
-                )?;
+        let decoded = decode_chunk_stream_for_profile(png_bytes, record_profile, Some(byte_length))
+            .context(
+                "failed to decode Bitneedle record PNG for profile with explicit byte length",
+            )?;
         decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
     };
 
@@ -1079,6 +1078,7 @@ fn build_sidecar_protected_metadata_pixels(
     spiral_family: &record_core::SpiralFamily,
     cut_inner_radius: Option<i32>,
     clockwise: bool,
+    revision: u8,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -1086,7 +1086,7 @@ fn build_sidecar_protected_metadata_pixels(
     {
         protected[pixel_index] = true;
     }
-    for pixel_index in record_core::build_run_out_spiral_indices(
+    for pixel_index in record_core::build_run_out_spiral_indices_at(
         width,
         height,
         b_value,
@@ -1094,13 +1094,14 @@ fn build_sidecar_protected_metadata_pixels(
         record_profile,
         cut_inner_radius,
         clockwise,
+        revision,
     )? {
         protected[pixel_index] = true;
     }
     // The silent groove carries bytes and is traced apart from the programme's
     // groove. See the same function in `record_sidecar`.
     if let Some(radius) = cut_inner_radius {
-        for pixel_index in record_core::build_silent_groove_spiral_indices(
+        for pixel_index in record_core::build_silent_groove_spiral_indices_at(
             width,
             height,
             b_value,
@@ -1108,6 +1109,7 @@ fn build_sidecar_protected_metadata_pixels(
             record_profile,
             radius,
             clockwise,
+            revision,
         )? {
             protected[pixel_index] = true;
         }
@@ -1180,10 +1182,11 @@ fn build_sidecar_carrier_region_pairs(
     regions: SidecarCarrierRegions,
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
+    revision: u8,
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
     let mask = if regions.intergroove {
-        Some(record_core::build_spiral_mask_with_family(
+        Some(record_core::build_spiral_mask_at(
             width,
             height,
             b_value,
@@ -1192,6 +1195,8 @@ fn build_sidecar_carrier_region_pairs(
             None,
             None,
             None,
+            false,
+            revision,
         )?)
     } else {
         None
@@ -1204,6 +1209,7 @@ fn build_sidecar_carrier_region_pairs(
         spiral_family,
         cut_inner_radius,
         false,
+        revision,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
@@ -1284,6 +1290,7 @@ fn build_sidecar_carrier_pairs(
         },
         seed,
         text_avoid,
+        record_descriptor::LEAD_OUT_GEOMETRY_REVISION,
     )
 }
 
@@ -1689,10 +1696,8 @@ fn record_descriptor_from_json(
         serde_json::from_str(descriptor_json).context("record descriptor JSON is invalid")?;
     if let Some(release_id) = value.get_mut("releaseId") {
         if let Some(text) = release_id.as_str() {
-            *release_id = json!(
-                record_descriptor::release_id_to_bytes(text)
-                    .context("record descriptor release ID is invalid")?
-            );
+            *release_id = json!(record_descriptor::release_id_to_bytes(text)
+                .context("record descriptor release ID is invalid")?);
         }
     }
     let descriptor: record_descriptor::RecordDescriptor =

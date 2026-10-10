@@ -57,24 +57,24 @@ payload into the silent groove in one move. The groove ends in a closed ring, wh
 the locked groove.
 
 ```
-   travel of the stylus  ──────────────────────────────────────────────────▶
+   travel of the stylus  ─────────────────────────────────────────────────────▶
 
-   r_outer   payload_outer   cut_inner        entry      lock   label_radius
-      │           │              │              │          │         │
-      ▼           ▼              ▼              ▼          ▼         ▼
-   ┌──────┬────────────┬───────────────┬─────────────┬──────────┬─────────┐
-   │ rim  │  LEAD-IN   │   PROGRAMME   │   SILENT_GROOVE   │ RUN-OUT  │  LOCK   │
-   │      │            │               │             │          │         │
-   │ flat │ 2 turns    │ pitch = b     │ 1.00 mm/trn │ fills the│ 1 turn  │
-   │ no   │ fixed      │ from the fit  │ true physical│ room     │ closed  │
-   │groove│            │               │ ≤ 6 turns   │ 3.2-5 mm │ 3.5 mm  │
-   ├──────┼────────────┼───────────────┼─────────────┼──────────┼─────────┤
-   │  ―   │ BRD1 [1/2] │ audio payload │ free carrier│ BRD1 [2/2]         │
-   │      │ grey 96-159│ rgb / toned   │ the record's│ matte, iso-luma    │
-   │      │ 6 bits/px  │ 20 bits/px    │ own tone    │ 6 bits/px          │
-   └──────┴────────────┴───────────────┴─────────────┴──────────┴─────────┘
-                        └── the cut stops wherever the programme ran out;
-                            the run-out claims what it can reach of the rest
+   r_outer   payload_outer   cut_inner      entry        lock    label_radius
+      │           │              │             │            │          │
+      ▼           ▼              ▼             ▼            ▼          ▼
+   ┌──────┬────────────┬───────────────┬─────────────┬────────────┬────────┬──────┐
+   │ rim  │  LEAD-IN   │   PROGRAMME   │SILENT GROOVE│  RUN-OUT   │  LOCK  │ LAND │
+   │      │            │               │             │            │        │      │
+   │ flat │ 2 turns    │ pitch = b     │ 2 px a turn │ 6.4 mm a   │ 1 turn │ bare │
+   │ no   │ fixed      │ from the fit  │ 2 or 3 turns│ turn, at   │ closed │ vinyl│
+   │groove│            │               │             │ least 3.2  │ IEC    │      │
+   ├──────┼────────────┼───────────────┼─────────────┼────────────┴────────┼──────┤
+   │  ―   │ BRD1 [1/2] │ audio payload │ free carrier│ BRD1 [2/2]          │  ―   │
+   │      │ grey 96-159│ rgb / toned   │ the record's│ matte, iso-luma     │      │
+   │      │ 6 bits/px  │ 20 bits/px    │ own tone    │ 6 bits/px           │      │
+   └──────┴────────────┴───────────────┴─────────────┴─────────────────────┴──────┘
+                        └── the cut stops where the programme ends;
+                            the run-out takes the room to the lock
 ```
 
 **Lead-in** — two fixed turns at the rim. This band carries the whole BRD1
@@ -106,12 +106,10 @@ record of that vintage.
 from the rim against a nominal span and stops at `cut_inner_radius`, which
 the prefix carries.
 
-**Silent groove** — from the end of the programme in to the outermost ring of the
-run-out. The silent groove is cut at a true physical 1 mm per turn, so it is the one
-band rendered at life size. It is a header of at most **6 turns**. The head
-feeds at the spiral rate of the lathe, and the extent of the band is unknown to
-it, so this limit keeps a short side from filling the annulus with a
-one-millimetre ladder. The run-out takes the space below the header.
+**Silent groove** — from the end of the programme to the first turn of the
+run-out. The silent groove is 2 px from turn to turn on every profile: one
+pixel of groove and one pixel of vinyl. It has 3 turns when the room permits
+them, and 2 turns on a full side.
 
 The silent groove is a carrier: an ordered, addressable pixel sequence, reproducible
 from the prefix alone. It is cut in the tone of the record. Each pixel takes the
@@ -121,30 +119,38 @@ at one colour. `SEGMENT_SILENT_GROOVE_EXTENT` (33) declares the band, and the fo
 offers it to sidecars, which write it as a groove. A record that offers no
 palette for the band declares no extent.
 
-**Run-out** — widely spaced rings from the lock up to the silent groove header. The
-gaps open outward from a fixed 3.2 mm at the inside, each ring standing 1.5
-times further out than the one within, until they reach the lathe's own coarse
-feed of 5 mm. Every ring above that sits at the feed. Unclamped the taper is
-exponential: a sixth ring alone would be 24 mm, and a band long enough to cross
-a short side's annulus would be four rings with a bare disc above them.
+**Run-out** — the spiral from the silent groove to the locked groove. Lead-out
+geometry revision 4 cuts the run-out at one constant pitch. The pitch is
+6.4 mm a turn when the room permits it, and it is a minimum of 3.2 mm. These
+values are the nominal pitch and the lower limit of IEC 60098. The run-out
+has at least one turn.
 
-The ring count is **derived**. The band fills the space between the lock and the
-header, and the count is the ladder that comes nearest that space. A 12" cut a
-third of the way down carries twelve rings, and a 12" cut to the label carries
-one ring. The encoder and the decoder compute the same band from
-`cut_inner_radius`, which the prefix carries. The wire holds no count, so the
-two sides compute one answer.
+The turn count is **derived**. The encoder and the decoder compute the band
+from `cut_inner_radius`, which the prefix carries. The band fills the room
+between the silent groove and the lock. The count is the number of 6.4 mm
+turns nearest to that room, and the pitch is the room divided by the count.
+The wire holds no count, so the two sides compute one answer.
 
-The gaps absorb the remainder that a whole number of rings leaves. The band
-begins at the ceiling, and the ladder spans the whole descent. Silent groove at the
-fine feed fills the space above the band, so a band that stops one gap short
-costs five more turns of ladder.
+A short side has many run-out turns. A 60,000-byte cut has 4 turns on a 7",
+8 turns on a 10" and 11 turns on a 12". A full side has one turn, at 3.3 mm
+on a 7", 4.5 mm on a 10" and 4.1 mm on a 12".
 
-**Locked groove** — one closed revolution 3.5 mm out from the label edge. A
-pressed record puts its lock groove at that radius and keeps the annulus inside
-it smooth for matrix and stamper marks. Its pixel sequence is cyclic: a reader
-that passes the end of the lock returns to the first pixel of the lock. A reader
-passes the run-out once and repeats the lock.
+The programme stops at the programme floor. The floor is the minimum inside
+radius of recording (`payload_inner_radius`): 4¾" across on a 12" or a 10",
+and 4¼" across on a 7". A full side therefore keeps the dead wax of a pressed
+record. `docs/DEAD_WAX_STUDY.md` gives the capacity of each profile against
+revision 3.
+
+**Locked groove** — one closed revolution at the finishing-groove radius of
+IEC 60098: 106.4 mm across on a 12" or a 10", and 97.4 mm across on a 7".
+
+**Land** — the bare vinyl from the locked groove to the label. It is 3.3 mm on
+a 12", 3.4 mm on a 10" and 2.8 mm on a 7". A plant etches or stamps its
+matrix marks into the land.
+
+The pixel sequence of the locked groove is cyclic. A reader that passes the
+end of the lock goes back to the first pixel of the lock. A reader passes the
+run-out one time and repeats the lock.
 
 The run-out and the lock together are the trailer carrier — one ordered
 sequence holding whatever of the BRD1 stream outgrew the lead-in, guaranteed to
@@ -187,16 +193,13 @@ The exact radii, in rendered pixels on the 576 x 576 canvas:
 | Dink radius | 63 | 63 | none | none |
 | Dink knockout radius | 58 | 58 | none | none |
 | Lead-in turns | 2 | 2 | 2 | 2 |
-| Locked groove radius | 162.5 | 149.5 | 122.0 | 101.7 |
-| Silent groove pitch, px/turn | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
+| Locked groove radius | 160.1 | 160.1 | 121.7 | 101.2 |
+| Silent groove pitch, px/turn | 2 | 2 | 2 | 2 |
 | Pixels per mm | 3.2875 | 3.2875 | 2.2884 | 1.9032 |
 
-The silent groove pitch equals the pixels-per-mm figure, because the band is cut at
-1.00 mm per turn by definition. The run-out gaps are also physical: 3.2 mm at
-the inside and 5 mm at the feed on every profile. The four profiles render to
-one canvas at four scales, so a gap fixed in pixels would give four distances.
-The silent groove header is 6 turns, which is 6 mm on every profile for the same
-reason.
+The silent groove pitch is 2 px on every profile. The run-out pitch and the
+locked-groove radius are physical: the four profiles render to one canvas at
+four scales, so a value fixed in pixels gives four distances.
 
 ### Canvas mapping
 

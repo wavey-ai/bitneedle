@@ -3037,6 +3037,7 @@ fn render_payload_codes_to_transparent_spiral(
         } else {
             0
         },
+        lead_out_geometry_revision: None,
         silent_groove_b_value: if declares_silent_groove {
             record_core::silent_groove_spiral_pitch(&normalized_profile)?
         } else {
@@ -3838,9 +3839,9 @@ mod tests {
     }
 
     /// A short payload stops well above the label; a long one reaches the
-    /// programme floor, which sits below the registered band edge because the
-    /// lead-out shrinks to let the programme take the room. Neither reaches
-    /// the label itself.
+    /// programme floor. The pressed floor is the minimum inside diameter of
+    /// recording, so a full programme stops on the registered band edge and
+    /// leaves the dead wax to the lead-out.
     #[test]
     fn a_short_cut_stops_short_of_the_label() {
         let geometry = describe_record_profile("lp").unwrap();
@@ -3859,8 +3860,8 @@ mod tests {
             full.cut_inner_radius,
         );
         assert!(
-            full.cut_inner_radius < geometry.payload_inner_radius,
-            "the programme may reach past the registered edge, into the lead-out",
+            full.cut_inner_radius >= geometry.payload_inner_radius,
+            "the programme stays outside the minimum inside diameter of recording",
         );
         assert!(
             short.groove_span_fraction < full.groove_span_fraction,

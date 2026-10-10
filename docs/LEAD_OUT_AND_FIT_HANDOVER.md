@@ -5,6 +5,11 @@ and the programme fit in `record-core` / `record-render`. Written to restart
 without re-deriving it. Everything below is on `main` in `bitneedle`; no
 `goldenfiles/` were added to on purpose — the sweep writes to `/tmp`.
 
+Lead-out geometry revision 4 replaces the run-out, the locked groove and the
+programme floor that this document describes. `docs/DEAD_WAX_STUDY.md` and
+`README.md` describe revision 4. A record that has revision 3 reads with the
+geometry in this document.
+
 ## Policy (what we are aiming for)
 
 The cut should read like a real record: a realistic programme pitch, a fine

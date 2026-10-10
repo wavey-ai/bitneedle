@@ -2305,6 +2305,7 @@ fn build_sidecar_protected_metadata_pixels(
     spiral_family: &record_core::SpiralFamily,
     cut_inner_radius: Option<i32>,
     clockwise: bool,
+    revision: u8,
 ) -> Result<Vec<bool>> {
     let mut protected = vec![false; width * height];
     for pixel_index in
@@ -2312,7 +2313,7 @@ fn build_sidecar_protected_metadata_pixels(
     {
         protected[pixel_index] = true;
     }
-    for pixel_index in record_core::build_run_out_spiral_indices(
+    for pixel_index in record_core::build_run_out_spiral_indices_at(
         width,
         height,
         b_value,
@@ -2320,6 +2321,7 @@ fn build_sidecar_protected_metadata_pixels(
         record_profile,
         cut_inner_radius,
         clockwise,
+        revision,
     )? {
         protected[pixel_index] = true;
     }
@@ -2329,7 +2331,7 @@ fn build_sidecar_protected_metadata_pixels(
     // pair-sign modulation, and the silent groove carries bytes, so a pixel in both
     // is written twice.
     if let Some(radius) = cut_inner_radius {
-        for pixel_index in record_core::build_silent_groove_spiral_indices(
+        for pixel_index in record_core::build_silent_groove_spiral_indices_at(
             width,
             height,
             b_value,
@@ -2337,6 +2339,7 @@ fn build_sidecar_protected_metadata_pixels(
             record_profile,
             radius,
             clockwise,
+            revision,
         )? {
             protected[pixel_index] = true;
         }
@@ -2366,6 +2369,7 @@ fn label_sidecar_pixels(
     spiral_family: &record_core::SpiralFamily,
     cut_inner_radius: Option<i32>,
     text_avoid: Option<&TextAvoidSpec>,
+    revision: u8,
 ) -> Result<Vec<usize>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
     let mut protected = build_sidecar_protected_metadata_pixels(
@@ -2376,6 +2380,7 @@ fn label_sidecar_pixels(
         spiral_family,
         cut_inner_radius,
         false,
+        revision,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let center_x = width as f64 / 2.0;
@@ -2553,9 +2558,13 @@ pub fn build_sidecar_plan(
             SidecarCarrier::SilentGroove => {
                 // The silent groove carries no programme and no descriptor, so the
                 // whole band is free. A record with no tone offers no band.
-                let Some(clock) = clock.as_ref() else { continue };
-                let Some(radius) = cut_inner_radius else { continue };
-                let indices = record_core::build_silent_groove_spiral_indices(
+                let Some(clock) = clock.as_ref() else {
+                    continue;
+                };
+                let Some(radius) = cut_inner_radius else {
+                    continue;
+                };
+                let indices = record_core::build_silent_groove_spiral_indices_at(
                     width,
                     height,
                     descriptor.b_value(),
@@ -2563,6 +2572,7 @@ pub fn build_sidecar_plan(
                     record_profile,
                     radius,
                     descriptor.spiral_clockwise,
+                    descriptor.lead_out_geometry_revision,
                 )?;
                 if !indices.is_empty() {
                     runs.push(SidecarRun::Groove {
@@ -2573,8 +2583,10 @@ pub fn build_sidecar_plan(
                 }
             }
             SidecarCarrier::Trailer => {
-                let Some(clock) = clock.as_ref() else { continue };
-                let indices = record_core::build_run_out_spiral_indices(
+                let Some(clock) = clock.as_ref() else {
+                    continue;
+                };
+                let indices = record_core::build_run_out_spiral_indices_at(
                     width,
                     height,
                     descriptor.b_value(),
@@ -2582,6 +2594,7 @@ pub fn build_sidecar_plan(
                     record_profile,
                     cut_inner_radius,
                     descriptor.spiral_clockwise,
+                    descriptor.lead_out_geometry_revision,
                 )?;
                 // What the descriptor spilled past the lead-in sits at the
                 // front of this band.
@@ -2609,6 +2622,7 @@ pub fn build_sidecar_plan(
                     },
                     seed,
                     text_avoid,
+                    descriptor.lead_out_geometry_revision,
                 )?;
                 if !pairs.is_empty() {
                     runs.push(SidecarRun::Steg { carrier, pairs });
@@ -2738,11 +2752,11 @@ pub fn read_sidecar_bytes_from_plan(
             SidecarRun::Groove {
                 indices, encoding, ..
             } => match encoding {
-                GrooveEncoding::Grey => out.extend_from_slice(
-                    &record_descriptor::metadata_bytes_from_grayscale_rgba(
+                GrooveEncoding::Grey => {
+                    out.extend_from_slice(&record_descriptor::metadata_bytes_from_grayscale_rgba(
                         rgba, indices, take, label,
-                    )?,
-                ),
+                    )?)
+                }
                 GrooveEncoding::Toned(clock) => {
                     out.extend_from_slice(&record_descriptor::band_bytes_from_toned_rgba(
                         rgba, width, height, indices, clock, take, label,
@@ -2767,10 +2781,11 @@ fn build_sidecar_carrier_region_pairs(
     regions: SidecarCarrierRegions,
     seed: u32,
     text_avoid: Option<&TextAvoidSpec>,
+    revision: u8,
 ) -> Result<Vec<(usize, usize)>> {
     let geometry = record_core::describe_record_profile(record_profile)?;
     let mask = if regions.intergroove {
-        Some(record_core::build_spiral_mask_with_family(
+        Some(record_core::build_spiral_mask_at(
             width,
             height,
             b_value,
@@ -2779,6 +2794,8 @@ fn build_sidecar_carrier_region_pairs(
             None,
             None,
             None,
+            false,
+            revision,
         )?)
     } else {
         None
@@ -2791,6 +2808,7 @@ fn build_sidecar_carrier_region_pairs(
         spiral_family,
         cut_inner_radius,
         false,
+        revision,
     )?;
     apply_text_avoid_spec(&mut protected, width, height, text_avoid);
     let mut pairs = Vec::new();
@@ -2871,6 +2889,7 @@ fn build_sidecar_carrier_pairs(
         },
         seed,
         text_avoid,
+        record_descriptor::LEAD_OUT_GEOMETRY_REVISION,
     )
 }
 
@@ -3074,6 +3093,7 @@ fn descriptor_input_with_rewrite_options(
         // groove in the PNG was cut with.
         spiral_clockwise: descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
+        lead_out_geometry_revision: Some(descriptor.lead_out_geometry_revision),
         // Carried through for the same reason. The trailer in the PNG is cut
         // already, and a rewritten descriptor keeps naming the
         // colour it was cut in.
@@ -3136,6 +3156,7 @@ fn descriptor_input_with_cache_encryption_option(
         // groove in the PNG was cut with.
         spiral_clockwise: descriptor.spiral_clockwise,
         cut_inner_radius: descriptor.cut_inner_radius,
+        lead_out_geometry_revision: Some(descriptor.lead_out_geometry_revision),
         // Carried through for the same reason. The trailer in the PNG is cut
         // already, and a rewritten descriptor keeps naming the colour that it
         // was cut in.
@@ -3192,27 +3213,28 @@ fn encoded_descriptor_bytes(
         record_core::build_lead_in_spiral_indices(width, height, record_profile, None, None, None)?;
     let lead_in_capacity =
         record_descriptor::metadata_byte_capacity_for_pixel_count(lead_in_indices.len());
-    let trailer_capacity = match band_clock_for_descriptor(
-        descriptor.run_out_tone,
-        descriptor.tone_clock.as_ref(),
-    )? {
-        Some(clock) => {
-            let indices = record_core::build_run_out_spiral_indices(
-                width,
-                height,
-                main_b_value,
-                &descriptor.spiral_family,
-                record_profile,
-                match descriptor.cut_inner_radius {
-                    0 => None,
-                    radius => Some(i32::from(radius)),
-                },
-                descriptor.spiral_clockwise,
-            )?;
-            record_descriptor::band_byte_capacity(indices.len(), &clock)
-        }
-        None => 0,
-    };
+    let trailer_capacity =
+        match band_clock_for_descriptor(descriptor.run_out_tone, descriptor.tone_clock.as_ref())? {
+            Some(clock) => {
+                let indices = record_core::build_run_out_spiral_indices_at(
+                    width,
+                    height,
+                    main_b_value,
+                    &descriptor.spiral_family,
+                    record_profile,
+                    match descriptor.cut_inner_radius {
+                        0 => None,
+                        radius => Some(i32::from(radius)),
+                    },
+                    descriptor.spiral_clockwise,
+                    descriptor
+                        .lead_out_geometry_revision
+                        .unwrap_or(record_descriptor::LEAD_OUT_GEOMETRY_REVISION),
+                )?;
+                record_descriptor::band_byte_capacity(indices.len(), &clock)
+            }
+            None => 0,
+        };
     record_cut::descriptor::encode_record_descriptor_stream(
         main_b_value,
         descriptor,
@@ -3241,7 +3263,7 @@ fn paint_descriptor_spiral(
     };
     let trailer_indices = match trailer_clock.as_ref() {
         Some(clock) => Some((
-            record_core::build_run_out_spiral_indices(
+            record_core::build_run_out_spiral_indices_at(
                 width,
                 height,
                 main_b_value,
@@ -3252,6 +3274,9 @@ fn paint_descriptor_spiral(
                     radius => Some(i32::from(radius)),
                 },
                 descriptor.spiral_clockwise,
+                descriptor
+                    .lead_out_geometry_revision
+                    .unwrap_or(record_descriptor::LEAD_OUT_GEOMETRY_REVISION),
             )?,
             clock,
         )),
@@ -3523,6 +3548,7 @@ pub fn rewrite_record_png(
                 &context.descriptor.spiral_family,
                 sidecar_cut_inner_radius(&context.descriptor),
                 text_avoid.as_ref(),
+                context.descriptor.lead_out_geometry_revision,
             )?;
             tune_sidecar_pixels(&mut context.rgba, &pixels, tuning);
         }
@@ -4522,7 +4548,11 @@ mod tests {
         let decoded = decode_sidecar_container_items(&bsc1).unwrap();
         assert_eq!(decoded.items[0].text.as_deref(), Some("hello"));
         let item = &decoded.items[0];
-        assert_eq!(&bsc1[item.stored_byte_offset..item.stored_byte_offset + item.stored_byte_length as usize], b"hello");
+        assert_eq!(
+            &bsc1[item.stored_byte_offset
+                ..item.stored_byte_offset + item.stored_byte_length as usize],
+            b"hello"
+        );
     }
 
     #[test]

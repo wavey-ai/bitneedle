@@ -32,6 +32,10 @@ pub struct RecordDescriptorInput {
     /// The radius, in rendered pixels, at which the programme's groove stops
     /// and the silent groove takes over. Zero for a cut that reaches the label.
     pub cut_inner_radius: u16,
+    /// The lead-out geometry revision that drew the groove. `None` is the
+    /// revision this build cuts. A rewrite of a cut record keeps the revision
+    /// of its groove, because a reader traces the trailer at that revision.
+    pub lead_out_geometry_revision: Option<u8>,
     /// The silent groove s spiral `b`. The feed, never the turn count: a lathe's
     /// spiral lever does not know how far it has to travel, and neither does
     /// a reader — both derive the turns from the space that is left.
@@ -194,7 +198,9 @@ pub fn encode_segmented_body(descriptor: &RecordDescriptorInput) -> Result<(Vec<
     // so this byte is what stops a decoder tracing an old record's band with
     // new constants. The tone follows it where the trailer was cut in one:
     // the band is a carrier, and its palette is on no other segment.
-    let mut lead_out_geometry: Vec<u8> = vec![record_descriptor::LEAD_OUT_GEOMETRY_REVISION];
+    let mut lead_out_geometry: Vec<u8> = vec![descriptor
+        .lead_out_geometry_revision
+        .unwrap_or(record_descriptor::LEAD_OUT_GEOMETRY_REVISION)];
     if let Some(tone) = descriptor.run_out_tone {
         lead_out_geometry.extend_from_slice(&tone);
     }

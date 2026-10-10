@@ -78,13 +78,12 @@ pub const METADATA_GRAYSCALE_BASE: u8 =
     ((255 - (METADATA_GRAYSCALE_LEVELS - 1) * METADATA_GRAYSCALE_STEP as u32) / 2) as u8;
 
 /// The lightest grey on the ladder.
-pub const METADATA_GRAYSCALE_TOP: u8 = METADATA_GRAYSCALE_BASE
-    + ((METADATA_GRAYSCALE_LEVELS - 1) as u8) * METADATA_GRAYSCALE_STEP;
+pub const METADATA_GRAYSCALE_TOP: u8 =
+    METADATA_GRAYSCALE_BASE + ((METADATA_GRAYSCALE_LEVELS - 1) as u8) * METADATA_GRAYSCALE_STEP;
 
 /// The grey a level is painted as.
 pub fn grayscale_value_for_level(level: u32) -> u8 {
-    METADATA_GRAYSCALE_BASE
-        + ((level % METADATA_GRAYSCALE_LEVELS) as u8) * METADATA_GRAYSCALE_STEP
+    METADATA_GRAYSCALE_BASE + ((level % METADATA_GRAYSCALE_LEVELS) as u8) * METADATA_GRAYSCALE_STEP
 }
 
 /// The level a grey reads back as.
@@ -327,10 +326,23 @@ pub const LEAD_OUT_GEOMETRY_REVISION_FILLED: u8 = 2;
 /// lead-in, which is the ordinary case, and its groove and programme hold their
 /// bytes. A reader must treat the band that this build traces there as another
 /// band, and not as the run-out of that record.
-pub const LEAD_OUT_GEOMETRY_REVISION_MERGED: u8 = 3;
+pub const LEAD_OUT_GEOMETRY_REVISION_MERGED: u8 = record_core::LEAD_OUT_REVISION_MERGED;
 
-/// The revision this build cuts and can read.
-pub const LEAD_OUT_GEOMETRY_REVISION: u8 = LEAD_OUT_GEOMETRY_REVISION_MERGED;
+/// The pressed dead wax: the locked groove at the finishing-groove radius of
+/// IEC 60098 (106.4 mm across on a 12" or a 10", 97.4 mm on a 7"), bare land
+/// from the lock to the label, and a run-out of at least one turn at one
+/// constant pitch of 3.2 to 6.4 mm. The programme stays outside the minimum
+/// inside diameter of recording.
+///
+/// The bands are the same three, in the same order, and the silent groove is
+/// cut as at revision 3. The lock moves out, the run-out turns are evenly
+/// spaced, and the programme floor moves out. A reader traces the bands of a
+/// record at the revision that the record names, so a revision 3 record still
+/// reads its trailer and its programme.
+pub const LEAD_OUT_GEOMETRY_REVISION_PRESSED: u8 = record_core::LEAD_OUT_REVISION_PRESSED;
+
+/// The revision this build cuts. It reads this revision and the earlier ones.
+pub const LEAD_OUT_GEOMETRY_REVISION: u8 = record_core::LEAD_OUT_REVISION;
 
 /// The silent groove is an empty groove. A writer and its reader agree on the content
 /// of that groove between them.
@@ -1557,8 +1569,7 @@ impl SilentGrooveExtent {
 
     /// What is left for a writer, in bytes.
     pub fn free_byte_capacity(&self) -> u32 {
-        self.byte_capacity
-            .saturating_sub(self.claimed_byte_length)
+        self.byte_capacity.saturating_sub(self.claimed_byte_length)
     }
 }
 
@@ -2000,6 +2011,16 @@ pub fn run_out_tone_from_partial_stream(bytes: &[u8]) -> Option<[u8; 3]> {
     Some([payload[1], payload[2], payload[3]])
 }
 
+/// The lead-out geometry revision, read out of however much of the stream is
+/// in hand. A reader traces the trailer at this revision. The segment is
+/// written at the front of the body, so the lead-in carries it. An absent
+/// segment names [`LEAD_OUT_GEOMETRY_REVISION_DRAFT04`].
+pub fn lead_out_geometry_revision_from_partial_stream(bytes: &[u8]) -> u8 {
+    segment_from_partial_stream(bytes, SEGMENT_LEAD_OUT_GEOMETRY)
+        .and_then(|payload| payload.first().copied())
+        .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04)
+}
+
 /// The record's wheel, read out of however much of the stream is in hand.
 ///
 /// A trailer cut by the wheel is read with the wheel, which
@@ -2116,9 +2137,7 @@ pub fn record_profile_from_code(code: u8) -> Result<String> {
         RECORD_PROFILE_SINGLE45_CODE => Ok(RECORD_PROFILE_SINGLE45.to_string()),
         RECORD_PROFILE_LP_CODE => Ok(RECORD_PROFILE_LP.to_string()),
         RECORD_PROFILE_TEN_CODE => Ok(RECORD_PROFILE_TEN.to_string()),
-        RECORD_PROFILE_SINGLE45_VINTAGE_CODE => {
-            Ok(RECORD_PROFILE_SINGLE45_VINTAGE.to_string())
-        }
+        RECORD_PROFILE_SINGLE45_VINTAGE_CODE => Ok(RECORD_PROFILE_SINGLE45_VINTAGE.to_string()),
         other => bail!("unknown record profile code {other}"),
     }
 }
@@ -2206,7 +2225,8 @@ pub fn decode_descriptor_prefix(bytes: &[u8]) -> Result<DescriptorPrefix> {
         u16::from_be_bytes(bytes[9..11].try_into().expect("slice length")) as usize;
     let b_value_bits = u64::from_be_bytes(bytes[11..19].try_into().expect("slice length"));
     let cut_inner_radius = u16::from_be_bytes(bytes[19..21].try_into().expect("slice length"));
-    let silent_groove_b_value_bits = u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
+    let silent_groove_b_value_bits =
+        u64::from_be_bytes(bytes[21..29].try_into().expect("slice length"));
 
     if payload_len < RECORD_DESCRIPTOR_PREFIX_LENGTH || payload_len > bytes.len() {
         bail!("record descriptor payload length is invalid");
@@ -2411,7 +2431,8 @@ pub fn validate_tone_clock(
     if clock.span.0 >= clock.span.1 {
         bail!(
             "tone clock band runs from {} to {}, which is not a band",
-            clock.span.0, clock.span.1
+            clock.span.0,
+            clock.span.1
         );
     }
     if u32::from(clock.span.1) > TONE_CLOCK_SPAN_UNITS {
@@ -2442,8 +2463,7 @@ pub fn validate_tone_clock(
             bail!("tone clock gap switch offsets must be strictly increasing");
         }
     }
-    if let (Some(expected), Some(&last)) = (expected_byte_length, clock.gap_switch_offsets.last())
-    {
+    if let (Some(expected), Some(&last)) = (expected_byte_length, clock.gap_switch_offsets.last()) {
         if last >= expected {
             bail!("tone clock gap switch at byte {last} is beyond the {expected}-byte stream");
         }
@@ -2583,7 +2603,8 @@ pub fn decode_tone_clock_map(
         });
     }
     let switch_count = cursor.read_varuint("tone clock gap switch count")?;
-    let switch_count = usize::try_from(switch_count).context("tone clock gap switch count exceeds usize")?;
+    let switch_count =
+        usize::try_from(switch_count).context("tone clock gap switch count exceeds usize")?;
     if switch_count > cursor.remaining() {
         bail!("tone clock declares more gap switches than the map can hold");
     }
@@ -3117,8 +3138,7 @@ pub fn decode_record_descriptor_bytes(bytes: &[u8]) -> Result<RecordDescriptor> 
         upc,
         deferred_attestation,
         silent_groove,
-        lead_out_geometry_revision: lead_out_geometry
-            .unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04),
+        lead_out_geometry_revision: lead_out_geometry.unwrap_or(LEAD_OUT_GEOMETRY_REVISION_DRAFT04),
         run_out_tone,
     };
     // A deferred field is null or signed. A deferred field with no attestation
@@ -3998,10 +4018,18 @@ mod tests {
     fn a_grey_off_the_ladder_is_refused() {
         // Every value below the band and above it.
         for value in 0..METADATA_GRAYSCALE_BASE {
-            assert_eq!(level_for_grayscale_value(value), None, "{value} is below the band");
+            assert_eq!(
+                level_for_grayscale_value(value),
+                None,
+                "{value} is below the band"
+            );
         }
         for value in (METADATA_GRAYSCALE_TOP + 1)..=255 {
-            assert_eq!(level_for_grayscale_value(value), None, "{value} is above the band");
+            assert_eq!(
+                level_for_grayscale_value(value),
+                None,
+                "{value} is above the band"
+            );
         }
         // And, when the step ever widens again, the gaps between the rungs.
         if METADATA_GRAYSCALE_STEP > 1 {
@@ -4050,7 +4078,9 @@ mod lead_out_geometry_tests {
         );
         bytes.extend_from_slice(&1u16.to_be_bytes());
         bytes.extend_from_slice(
-            &u16::try_from(segment.len()).expect("segments fit").to_be_bytes(),
+            &u16::try_from(segment.len())
+                .expect("segments fit")
+                .to_be_bytes(),
         );
         bytes.extend_from_slice(&1.0f64.to_bits().to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
@@ -4097,5 +4127,4 @@ mod lead_out_geometry_tests {
             "{error}"
         );
     }
-
 }
