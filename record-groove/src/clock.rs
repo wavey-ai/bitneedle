@@ -433,7 +433,12 @@ pub fn encode_toned_clock_until(
         if stop() {
             bail!("{CANCELLED}");
         }
-        let palette = TonedPalette::shared(clock.config_for_key(key)).with_context(|| {
+        // Built for this pocket's pixels and dropped after them, outside the
+        // process-wide cache. A wheel has up to twice as many palettes as
+        // pockets, at three megabytes each for twenty bits, and eight more
+        // for each reverse index a decoder builds. Held together they took
+        // the browser tab past what an iPhone allows.
+        let palette = TonedPalette::from_config(clock.config_for_key(key)).with_context(|| {
             format!(
                 "tone clock pocket {} {} tone cannot make a palette at {} bits per pixel",
                 key / 2,
@@ -492,7 +497,8 @@ pub fn decode_toned_clock(
     let mut words = vec![0u32; pixel_count];
     let (order, groups) = pixels_by_key(&keys);
     for (key, start, end) in groups {
-        let palette = TonedPalette::shared(clock.config_for_key(key))?;
+        // Built and dropped for each pocket, as in the encoder.
+        let palette = TonedPalette::from_config(clock.config_for_key(key))?;
         for &pixel_index in &order[start..end] {
             let at = pixel_index * 4;
             let color = [rgba[at], rgba[at + 1], rgba[at + 2]];

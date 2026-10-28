@@ -71,19 +71,15 @@ fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// How many palettes stay resident.
 ///
 /// Eight was a whole record's worth when a record carried a handful of tone
-/// spans. A clock carries one palette per pocket, and the house wheel has
-/// twenty-four — so eight meant every cut evicted its own palettes as it
-/// built them and the next cut rebuilt all of them. Sized to a wheel now.
-///
-/// Sixty-four, not twenty-four: a wheel with track gaps carries two palettes
-/// per pocket — the track tone and its lighter gap tone — so a thirty-pocket
-/// wheel like 12 + 18 holds sixty live keys, and thirty-two would evict half
-/// of every such cut as it built it.
+/// spans. The cache was then sized to a tone clock, which carries a track
+/// palette and a gap palette for each pocket. The clock's encoder and decoder
+/// now build each pocket's palette for its own pixels and drop it, because a
+/// wheel's palettes held together took the browser tab past what an iPhone
+/// allows. The spans and the single-tone paths use this cache.
 ///
 /// A palette holds `2^bits_per_pixel` colours at three bytes each, so a
-/// twenty-bit palette takes three megabytes. This constant is a ceiling on a
-/// cache that holds the palettes of the current cut, and that cut uses each of
-/// them.
+/// twenty-bit palette takes three megabytes, and its reverse index takes eight
+/// more once a decoder has used it.
 const PALETTE_CACHE_CAPACITY: usize = 64;
 /// A balanced configuration takes a few dozen bytes, so this capacity is
 /// large. It bounds the growth of the cache.
@@ -344,8 +340,9 @@ impl TonedConfig {
         const LADDER: [u8; 12] = [0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 255];
         let max_tolerance = LADDER
             .into_iter()
-            .find(|&tol| iso_luma_count(base, tol) >= needed.saturating_mul(8))
-            .unwrap_or(255);
+            .zip(iso_luma_counts(base, &LADDER))
+            .find(|&(_, count)| count >= needed.saturating_mul(8))
+            .map_or(255, |(tol, _)| tol);
 
         let mut best: Option<(f64, u8)> = None;
         for (tol, mean) in balanced_candidate_means(base, max_tolerance, needed, &LADDER) {
@@ -376,19 +373,59 @@ impl TonedConfig {
 /// Number of 8-bit RGB colours whose rounded Rec. 709 luma is within
 /// `luma_tolerance` of the base tone's, without materialising them.
 fn iso_luma_count(base: [u8; 3], luma_tolerance: u8) -> usize {
-    let (min, max) = iso_luma_window(base, luma_tolerance);
-    fold_iso_luma_rows(
-        || 0usize,
-        |count, r| {
-            for g in 0..=255u16 {
-                let rg = red_green_luma(r, g);
-                if let Some((low, high)) = iso_luma_blue_range(rg, min, max) {
-                    *count += usize::from(high - low + 1);
-                }
+    iso_luma_counts(base, &[luma_tolerance])[0]
+}
+
+/// [`iso_luma_count`] for each of `tolerances`, from one walk of the chroma
+/// classes (see [`ChromaClass`]).
+///
+/// Along a class, luma rises by one step for each step of `g`. Each window
+/// edge is a half step from the base tone's rounded luma, so one test of the
+/// class's luma offset tells whether the estimate decides every edge. When it
+/// does, the colours of the class in the window of `tolerance` are the `g`
+/// within `tolerance` of one centre. The walk of the red-green rows bisected
+/// each row, with a library call for each rounding on wasm.
+fn iso_luma_counts(base: [u8; 3], tolerances: &[u8]) -> Vec<usize> {
+    let target = rec709_luma_of(base).round();
+    let mut counts = vec![0usize; tolerances.len()];
+    for red_less_green in -255..=255i32 {
+        for blue_less_green in -255..=255i32 {
+            let low = 0.max(-red_less_green).max(-blue_less_green);
+            let high = 255.min(255 - red_less_green).min(255 - blue_less_green);
+            if low > high {
+                continue;
             }
-        },
-        |count, piece| *count += piece,
-    )
+            let offset = class_luma_offset(red_less_green, blue_less_green);
+            let estimate = target - 0.5 - offset;
+            if !near_whole(estimate) {
+                let centre = estimate.ceil() as i32;
+                for (count, &tolerance) in counts.iter_mut().zip(tolerances) {
+                    let first = low.max(centre - i32::from(tolerance));
+                    let last = high.min(centre + i32::from(tolerance));
+                    *count += (last - first + 1).max(0) as usize;
+                }
+                continue;
+            }
+            let class = ChromaClass {
+                key: 0.0,
+                red_less_green: red_less_green as i16,
+                blue_less_green: blue_less_green as i16,
+                low: 0,
+                high: 0,
+            };
+            for (count, &tolerance) in counts.iter_mut().zip(tolerances) {
+                let (min, max) = (target - tolerance as f64, target + tolerance as f64);
+                let first = first_holding(low, high, min - 0.5 - offset, |g| {
+                    class.luma(g).round() >= min
+                });
+                let last = last_holding(first, high, max + 0.5 - offset, |g| {
+                    class.luma(g).round() <= max
+                });
+                *count += (last - first + 1).max(0) as usize;
+            }
+        }
+    }
+    counts
 }
 
 /// The rounded-luma window `[min, max]` a tolerance opens around a base.
@@ -682,6 +719,21 @@ fn select_palette_colors(
         );
     }
 
+    if ordering == ToneOrdering::ChromaProximity {
+        return Ok(select_nearest_chroma(base, luma_tolerance, needed));
+    }
+    Ok(select_by_full_walk(base, luma_tolerance, needed, available, ordering))
+}
+
+/// The `needed` colours of the window that come first by
+/// [`compare_keyed_colors`], from a walk of every colour in the window.
+fn select_by_full_walk(
+    base: [u8; 3],
+    luma_tolerance: u8,
+    needed: usize,
+    available: usize,
+    ordering: ToneOrdering,
+) -> Vec<[u8; 3]> {
     let selection = SelectionBase::new(base, ordering);
 
     // One pass over the shell, keeping only the best `needed` seen so far.
@@ -730,7 +782,7 @@ fn select_palette_colors(
         kept.truncate(needed);
     }
     kept.sort_unstable_by(compare_keyed_colors);
-    Ok(kept.into_iter().map(|entry| entry.color).collect())
+    kept.into_iter().map(|entry| entry.color).collect()
 }
 
 /// Cuts a top-`needed` buffer back to its best `needed`, and remembers the
@@ -744,6 +796,240 @@ fn prune_to_best(top: &mut (Vec<KeyedColor>, Option<f64>), needed: usize) {
     top.1 = Some(top.0[needed - 1].key);
 }
 
+/// The colours `(g + red_less_green, g, g + blue_less_green)` whose rounded
+/// luma is in a window, for `g` in `low..=high`.
+///
+/// Adding the same amount to all three channels adds the same amount to luma
+/// (the Rec. 709 weights sum to one) and leaves Cb and Cr as they were. The
+/// colours of a class therefore share one chroma, and their chroma keys agree
+/// to within the rounding of the arithmetic, which is far below
+/// [`CLASS_KEY_NOISE`]. A window `2 × tolerance + 1` luma steps deep holds up
+/// to that many colours of each class. The palette code walks the 261,121
+/// classes, where the full walk keyed each colour of the window.
+#[derive(Clone, Copy)]
+struct ChromaClass {
+    /// The class's chroma key, from its exact chroma. Each colour's own key,
+    /// as [`chroma_distance_from`] computes it, is within
+    /// [`CLASS_KEY_NOISE`] of this.
+    key: f64,
+    red_less_green: i16,
+    blue_less_green: i16,
+    low: u8,
+    high: u8,
+}
+
+/// A bound on how far a colour's computed chroma key is from its class's key.
+/// The two differ by the rounding of a few operations on numbers below 256,
+/// which is about 1e-13.
+const CLASS_KEY_NOISE: f64 = 1e-9;
+
+/// The distance by which a class's luma estimate must clear a boundary for the
+/// estimate to decide the side. A colour's computed luma is within about 1e-13
+/// of `g` plus the class's luma offset. Closer to a boundary than this, the
+/// colour's own luma decides.
+const CLASS_LUMA_MARGIN: f64 = 1e-6;
+
+impl ChromaClass {
+    fn color(&self, g: i32) -> [u8; 3] {
+        [
+            (g + i32::from(self.red_less_green)) as u8,
+            g as u8,
+            (g + i32::from(self.blue_less_green)) as u8,
+        ]
+    }
+
+    /// A colour's luma, as the enumerations compute it.
+    fn luma(&self, g: i32) -> f64 {
+        let [r, g, b] = self.color(g);
+        blue_luma(red_green_luma(u16::from(r), u16::from(g)), u16::from(b))
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.high - self.low) + 1
+    }
+}
+
+/// The luma of `(g + d1, g, g + d2)` less `g`.
+fn class_luma_offset(red_less_green: i32, blue_less_green: i32) -> f64 {
+    0.2126 * red_less_green as f64 + 0.0722 * blue_less_green as f64
+}
+
+/// Whether `value` is within [`CLASS_LUMA_MARGIN`] of a whole number. Ties
+/// to even are the wasm rounding instruction, where `round` is a library
+/// call, and either gives the same distance.
+#[inline]
+fn near_whole(value: f64) -> bool {
+    (value - value.round_ties_even()).abs() < CLASS_LUMA_MARGIN
+}
+
+/// The first `g` in `low..=high` at which `holds` is true, or `high + 1`.
+/// `holds` is false and then true along `g`, and turns true near
+/// `estimate`. `estimate` is real, and when it is clear of a whole number by
+/// [`CLASS_LUMA_MARGIN`] its ceiling is the answer.
+fn first_holding(low: i32, high: i32, estimate: f64, holds: impl Fn(i32) -> bool) -> i32 {
+    let mut g = (estimate.ceil() as i32).clamp(low, high + 1);
+    if near_whole(estimate) {
+        while g > low && holds(g - 1) {
+            g -= 1;
+        }
+        while g <= high && !holds(g) {
+            g += 1;
+        }
+    }
+    g
+}
+
+/// The last `g` in `low..=high` at which `holds` is true, or `low - 1`.
+/// `holds` is true and then false along `g`, and turns false near
+/// `estimate`. When `estimate` is clear of a whole number its floor is the
+/// answer.
+fn last_holding(low: i32, high: i32, estimate: f64, holds: impl Fn(i32) -> bool) -> i32 {
+    let mut g = (estimate.floor() as i32).clamp(low - 1, high);
+    if near_whole(estimate) {
+        while g < high && holds(g + 1) {
+            g += 1;
+        }
+        while g >= low && !holds(g) {
+            g -= 1;
+        }
+    }
+    g
+}
+
+/// Calls `visit` with each chroma class that has a colour whose rounded luma
+/// is in `[min, max]`, and the class's luma offset.
+fn for_each_window_class(
+    min: f64,
+    max: f64,
+    chroma: (f64, f64),
+    mut visit: impl FnMut(&ChromaClass, f64),
+) {
+    for red_less_green in -255..=255i32 {
+        for blue_less_green in -255..=255i32 {
+            let low = 0.max(-red_less_green).max(-blue_less_green);
+            let high = 255.min(255 - red_less_green).min(255 - blue_less_green);
+            if low > high {
+                continue;
+            }
+            let offset = class_luma_offset(red_less_green, blue_less_green);
+            // Rounded luma is at least `min` from `min - 0.5`, and at most
+            // `max` below `max + 0.5`. Luma rises with `g`.
+            if high as f64 + offset < min - 1.0 || low as f64 + offset > max + 1.0 {
+                continue;
+            }
+            let mut class = ChromaClass {
+                key: 0.0,
+                red_less_green: red_less_green as i16,
+                blue_less_green: blue_less_green as i16,
+                low: 0,
+                high: 0,
+            };
+            let first = first_holding(low, high, min - 0.5 - offset, |g| {
+                class.luma(g).round() >= min
+            });
+            let last = last_holding(first, high, max + 0.5 - offset, |g| {
+                class.luma(g).round() <= max
+            });
+            if first > last {
+                continue;
+            }
+            let cb = (blue_less_green as f64 - offset) / 1.8556;
+            let cr = (red_less_green as f64 - offset) / 1.5748;
+            let (cb, cr) = (cb - chroma.0, cr - chroma.1);
+            class.key = (cb * cb + cr * cr).sqrt();
+            class.low = first as u8;
+            class.high = last as u8;
+            visit(&class, offset);
+        }
+    }
+}
+
+/// The selection bucket of every colour in a class, or `None` when the class's
+/// key is so close to a bucket edge that its colours could fall either side.
+fn class_bucket(selection: &SelectionBase, key: f64) -> Option<usize> {
+    let bucket = selection.bucket(key - CLASS_KEY_NOISE);
+    (selection.bucket(key + CLASS_KEY_NOISE) == bucket).then_some(bucket)
+}
+
+/// The `needed` colours of the window nearest the base tone in chroma, in
+/// key order. These are the colours [`select_by_full_walk`] picks.
+///
+/// A first pass over the chroma classes counts the colours under each bucket
+/// of class key, which gives a key that `needed` colours lie below. A second
+/// pass keeps the classes up to that key, and sorts them by key. Classes whose
+/// keys are further apart than twice [`CLASS_KEY_NOISE`] are in key order as
+/// they stand, so each run of closer classes is keyed colour by colour and
+/// sorted by [`compare_keyed_colors`], and the palette is the first `needed`
+/// colours of the runs in order.
+fn select_nearest_chroma(base: [u8; 3], luma_tolerance: u8, needed: usize) -> Vec<[u8; 3]> {
+    let (min, max) = iso_luma_window(base, luma_tolerance);
+    let selection = SelectionBase::new(base, ToneOrdering::ChromaProximity);
+    let mut counts = vec![0usize; PALETTE_SELECTION_BUCKETS];
+    for_each_window_class(min, max, selection.chroma, |class, _| {
+        counts[selection.bucket(class.key)] += class.len();
+    });
+    let mut cumulative = 0usize;
+    let cutoff = counts
+        .iter()
+        .position(|&count| {
+            cumulative += count;
+            cumulative >= needed
+        })
+        .unwrap_or(PALETTE_SELECTION_BUCKETS - 1);
+    drop(counts);
+    // Every class in a bucket up to `cutoff` has a key below this, with room
+    // for rounding. Those classes hold at least `needed` colours.
+    let reach = (cutoff + 1) as f64 * 512.0 / (PALETTE_SELECTION_BUCKETS - 1) as f64 + 1e-8;
+
+    let mut classes = Vec::new();
+    for_each_window_class(min, max, selection.chroma, |class, _| {
+        if class.key <= reach {
+            classes.push(*class);
+        }
+    });
+    classes.sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+
+    let mut colors = Vec::with_capacity(needed);
+    let mut run: Vec<KeyedColor> = Vec::new();
+    let mut start = 0;
+    while colors.len() < needed && start < classes.len() {
+        let mut end = start + 1;
+        while end < classes.len() && classes[end].key - classes[end - 1].key <= 2.0 * CLASS_KEY_NOISE
+        {
+            end += 1;
+        }
+        run.clear();
+        for class in &classes[start..end] {
+            for g in i32::from(class.low)..=i32::from(class.high) {
+                let color = class.color(g);
+                run.push(KeyedColor {
+                    key: selection.key(color, class.luma(g)),
+                    color,
+                });
+            }
+        }
+        run.sort_unstable_by(compare_keyed_colors);
+        colors.extend(run.iter().take(needed - colors.len()).map(|entry| entry.color));
+        start = end;
+    }
+    colors
+}
+
+/// The mean colour of the palette that each ladder rung up to
+/// `max_tolerance` would select, for each rung that holds `needed` colours,
+/// in ladder order. These are the means the full walk found.
+///
+/// A rung's colours are the colours of the widest window whose luma is within
+/// the rung's tolerance and a half step of the base tone's rounded luma. Each
+/// colour is counted under the narrowest rung that admits it, and a rung's
+/// histogram is the sum of its own and the narrower rungs' histograms.
+///
+/// The colours of a chroma class share a selection bucket, except in the rare
+/// class whose key is at a bucket edge. Along a class, luma rises with `g`, so
+/// each rung's colours of the class are one run of `g` and the colours counted
+/// under a rung are at most two runs. The count and the channel sums of a run
+/// are arithmetic series. Only the classes in the cutoff buckets are keyed
+/// colour by colour.
 fn balanced_candidate_means(
     base: [u8; 3],
     max_tolerance: u8,
@@ -757,48 +1043,88 @@ fn balanced_candidate_means(
         .collect();
     let selection = SelectionBase::new(base, ToneOrdering::ChromaProximity);
     let base_luma = rec709_luma_of(base).round();
+    let (min, max) = iso_luma_window(base, max_tolerance);
+    let rung_of = |luma: f64| {
+        let luma_delta = (luma - base_luma).abs();
+        tolerances
+            .iter()
+            .position(|&tolerance| luma_delta <= tolerance as f64 + 0.5)
+    };
 
     // count, R sum, G sum, B sum. A complete 24-bit cube still fits each
     // channel sum in u32: 16_777_216 * 255 < u32::MAX.
-    //
-    // Each colour is tallied once, under the narrowest rung that admits it;
-    // the rungs are nested, so a running sum up the ladder afterwards gives
-    // every rung its full histogram without touching each colour once per
-    // rung.
-    let mut histograms = fold_iso_luma_colors(
-        base,
-        max_tolerance,
-        || {
-            tolerances
-                .iter()
-                .map(|_| vec![[0u32; 4]; PALETTE_SELECTION_BUCKETS])
-                .collect::<Vec<_>>()
-        },
-        |histograms, color, luma| {
-            let bucket = selection.bucket(selection.key(color, luma));
-            let luma_delta = (luma - base_luma).abs();
-            let Some(rung) = tolerances
-                .iter()
-                .position(|&tolerance| luma_delta <= tolerance as f64 + 0.5)
-            else {
-                return;
+    let mut histograms = vec![vec![[0u32; 4]; PALETTE_SELECTION_BUCKETS]; tolerances.len()];
+    for_each_window_class(min, max, selection.chroma, |class, offset| {
+        let Some(bucket) = class_bucket(&selection, class.key) else {
+            for g in i32::from(class.low)..=i32::from(class.high) {
+                let color = class.color(g);
+                let luma = class.luma(g);
+                let Some(rung) = rung_of(luma) else {
+                    continue;
+                };
+                let totals = &mut histograms[rung][selection.bucket(selection.key(color, luma))];
+                totals[0] += 1;
+                totals[1] += color[0] as u32;
+                totals[2] += color[1] as u32;
+                totals[3] += color[2] as u32;
+            }
+            return;
+        };
+        let (low, high) = (i32::from(class.low), i32::from(class.high));
+        // Every rung's edges are half steps from the base tone's luma, so one
+        // test tells whether the estimate decides all of them. When it does,
+        // the colours within `tolerance` of the base luma are the `g` within
+        // `tolerance` of `centre`.
+        let estimate = base_luma - 0.5 - offset;
+        let centre = (!near_whole(estimate)).then(|| estimate.ceil() as i32);
+        let mut narrower: Option<(i32, i32)> = None;
+        for (rung, &tolerance) in tolerances.iter().enumerate() {
+            let (first, last) = match centre {
+                Some(centre) => (
+                    low.max(centre - i32::from(tolerance)),
+                    high.min(centre + i32::from(tolerance)),
+                ),
+                None => {
+                    let reach = tolerance as f64 + 0.5;
+                    let first = first_holding(low, high, base_luma - reach - offset, |g| {
+                        class.luma(g) - base_luma >= -reach
+                    });
+                    let last = last_holding(first, high, base_luma + reach - offset, |g| {
+                        class.luma(g) - base_luma <= reach
+                    });
+                    (first, last)
+                }
             };
+            if first > last {
+                continue;
+            }
             let totals = &mut histograms[rung][bucket];
-            totals[0] += 1;
-            totals[1] += color[0] as u32;
-            totals[2] += color[1] as u32;
-            totals[3] += color[2] as u32;
-        },
-        |histograms, pieces| {
-            for (histogram, piece) in histograms.iter_mut().zip(pieces) {
-                for (totals, parts) in histogram.iter_mut().zip(piece) {
-                    for (total, part) in totals.iter_mut().zip(parts) {
-                        *total += part;
-                    }
+            let mut add = |from: i32, to: i32| {
+                if from > to {
+                    return;
+                }
+                let count = (to - from + 1) as u32;
+                let green = ((from + to) as u32 * count) / 2;
+                totals[0] += count;
+                totals[1] += (i32::from(class.red_less_green) * count as i32 + green as i32) as u32;
+                totals[2] += green;
+                totals[3] += (i32::from(class.blue_less_green) * count as i32 + green as i32) as u32;
+            };
+            match narrower {
+                None => add(first, last),
+                Some((inner_first, inner_last)) => {
+                    add(first, inner_first - 1);
+                    add(inner_last + 1, last);
                 }
             }
-        },
-    );
+            if (first, last) == (low, high) {
+                // The wider rungs hold no colour of this class that a
+                // narrower one does not.
+                break;
+            }
+            narrower = Some((first, last));
+        }
+    });
     for rung in 1..histograms.len() {
         let (narrower, wider) = histograms.split_at_mut(rung);
         for (totals, below) in wider[0].iter_mut().zip(&narrower[rung - 1]) {
@@ -843,14 +1169,23 @@ fn balanced_candidate_means(
             }
         }
     }
+    drop(histograms);
 
     // The colours sitting in each selection's cutoff bucket, from which the
     // last `remaining` are taken in key order.
-    let boundaries = fold_iso_luma_colors(
-        base,
-        max_tolerance,
-        || selections.iter().map(|_| Vec::new()).collect::<Vec<_>>(),
-        |boundaries, color, luma| {
+    let mut boundaries: Vec<Vec<KeyedColor>> = selections.iter().map(|_| Vec::new()).collect();
+    for_each_window_class(min, max, selection.chroma, |class, _| {
+        let lowest = selection.bucket(class.key - CLASS_KEY_NOISE);
+        let highest = selection.bucket(class.key + CLASS_KEY_NOISE);
+        if !selections
+            .iter()
+            .any(|candidate| (lowest..=highest).contains(&candidate.cutoff_bucket))
+        {
+            return;
+        }
+        for g in i32::from(class.low)..=i32::from(class.high) {
+            let color = class.color(g);
+            let luma = class.luma(g);
             let key = selection.key(color, luma);
             let bucket = selection.bucket(key);
             let luma_delta = (luma - base_luma).abs();
@@ -861,13 +1196,8 @@ fn balanced_candidate_means(
                     boundary.push(KeyedColor { key, color });
                 }
             }
-        },
-        |boundaries, pieces| {
-            for (boundary, piece) in boundaries.iter_mut().zip(pieces) {
-                boundary.extend(piece);
-            }
-        },
-    );
+        }
+    });
 
     selections
         .into_iter()
@@ -1236,6 +1566,153 @@ pub fn normalized_hex_color(value: Option<&str>) -> String {
 mod tests {
     use super::*;
 
+    /// The rung means as the full walk found them, before the ring walk.
+    fn full_walk_means(
+        base: [u8; 3],
+        max_tolerance: u8,
+        needed: usize,
+        ladder: &[u8],
+    ) -> Vec<(u8, [u8; 3])> {
+        let tolerances: Vec<u8> = ladder
+            .iter()
+            .copied()
+            .filter(|&tolerance| tolerance <= max_tolerance)
+            .collect();
+        let selection = SelectionBase::new(base, ToneOrdering::ChromaProximity);
+        let base_luma = rec709_luma_of(base).round();
+
+        // count, R sum, G sum, B sum. A complete 24-bit cube still fits each
+        // channel sum in u32: 16_777_216 * 255 < u32::MAX.
+        //
+        // Each colour is tallied once, under the narrowest rung that admits it;
+        // the rungs are nested, so a running sum up the ladder afterwards gives
+        // every rung its full histogram without touching each colour once per
+        // rung.
+        let mut histograms = fold_iso_luma_colors(
+            base,
+            max_tolerance,
+            || {
+                tolerances
+                    .iter()
+                    .map(|_| vec![[0u32; 4]; PALETTE_SELECTION_BUCKETS])
+                    .collect::<Vec<_>>()
+            },
+            |histograms, color, luma| {
+                let bucket = selection.bucket(selection.key(color, luma));
+                let luma_delta = (luma - base_luma).abs();
+                let Some(rung) = tolerances
+                    .iter()
+                    .position(|&tolerance| luma_delta <= tolerance as f64 + 0.5)
+                else {
+                    return;
+                };
+                let totals = &mut histograms[rung][bucket];
+                totals[0] += 1;
+                totals[1] += color[0] as u32;
+                totals[2] += color[1] as u32;
+                totals[3] += color[2] as u32;
+            },
+            |histograms, pieces| {
+                for (histogram, piece) in histograms.iter_mut().zip(pieces) {
+                    for (totals, parts) in histogram.iter_mut().zip(piece) {
+                        for (total, part) in totals.iter_mut().zip(parts) {
+                            *total += part;
+                        }
+                    }
+                }
+            },
+        );
+        for rung in 1..histograms.len() {
+            let (narrower, wider) = histograms.split_at_mut(rung);
+            for (totals, below) in wider[0].iter_mut().zip(&narrower[rung - 1]) {
+                for (total, &part) in totals.iter_mut().zip(below) {
+                    *total += part;
+                }
+            }
+        }
+
+        struct Selection {
+            tolerance: u8,
+            cutoff_bucket: usize,
+            remaining: usize,
+            sums: [u64; 3],
+        }
+
+        let mut selections = Vec::new();
+        for (index, &tolerance) in tolerances.iter().enumerate() {
+            let available: usize = histograms[index]
+                .iter()
+                .map(|totals| totals[0] as usize)
+                .sum();
+            if available < needed {
+                continue;
+            }
+            let mut count = 0usize;
+            let mut sums = [0u64; 3];
+            for (bucket, totals) in histograms[index].iter().enumerate() {
+                let bucket_count = totals[0] as usize;
+                if count + bucket_count >= needed {
+                    selections.push(Selection {
+                        tolerance,
+                        cutoff_bucket: bucket,
+                        remaining: needed - count,
+                        sums,
+                    });
+                    break;
+                }
+                count += bucket_count;
+                for channel in 0..3 {
+                    sums[channel] += totals[channel + 1] as u64;
+                }
+            }
+        }
+
+        // The colours sitting in each selection's cutoff bucket, from which the
+        // last `remaining` are taken in key order.
+        let boundaries = fold_iso_luma_colors(
+            base,
+            max_tolerance,
+            || selections.iter().map(|_| Vec::new()).collect::<Vec<_>>(),
+            |boundaries, color, luma| {
+                let key = selection.key(color, luma);
+                let bucket = selection.bucket(key);
+                let luma_delta = (luma - base_luma).abs();
+                for (candidate, boundary) in selections.iter().zip(boundaries.iter_mut()) {
+                    if bucket == candidate.cutoff_bucket
+                        && luma_delta <= candidate.tolerance as f64 + 0.5
+                    {
+                        boundary.push(KeyedColor { key, color });
+                    }
+                }
+            },
+            |boundaries, pieces| {
+                for (boundary, piece) in boundaries.iter_mut().zip(pieces) {
+                    boundary.extend(piece);
+                }
+            },
+        );
+
+        selections
+            .into_iter()
+            .zip(boundaries)
+            .map(|(mut selection, mut boundary)| {
+                boundary.sort_unstable_by(compare_keyed_colors);
+                for entry in boundary.iter().take(selection.remaining) {
+                    for channel in 0..3 {
+                        selection.sums[channel] += entry.color[channel] as u64;
+                    }
+                }
+                let count = needed as f64;
+                let mean = [
+                    (selection.sums[0] as f64 / count).round() as u8,
+                    (selection.sums[1] as f64 / count).round() as u8,
+                    (selection.sums[2] as f64 / count).round() as u8,
+                ];
+                (selection.tolerance, mean)
+            })
+            .collect()
+    }
+
     #[test]
     fn bytes_round_trip_through_rgba() {
         let bytes = [1u8, 2, 3, 4, 5];
@@ -1557,6 +2034,138 @@ mod tests {
             bytes,
             "balanced pink png did not round-trip"
         );
+    }
+
+    /// The iso-luma count as the walk of the red-green rows found it.
+    fn full_walk_count(base: [u8; 3], luma_tolerance: u8) -> usize {
+        let (min, max) = iso_luma_window(base, luma_tolerance);
+        let mut count = 0usize;
+        for r in 0..=255u16 {
+            for g in 0..=255u16 {
+                if let Some((low, high)) = iso_luma_blue_range(red_green_luma(r, g), min, max) {
+                    count += usize::from(high - low + 1);
+                }
+            }
+        }
+        count
+    }
+
+    const TOLERANCE_LADDER: [u8; 12] = [0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 255];
+
+    /// Gamut corners, greys, the house tones and a spread of other colours.
+    fn class_test_bases(spread: usize) -> Vec<[u8; 3]> {
+        let mut bases = vec![
+            [0, 0, 0],
+            [255, 255, 255],
+            [1, 1, 1],
+            [254, 254, 254],
+            [128, 128, 128],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [0, 255, 255],
+            [255, 0, 255],
+            PINK,
+            [0x1E, 0x0B, 0x2E],
+            [0xF2, 0xEE, 0xE5],
+            [0xFF, 0x25, 0x82],
+        ];
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..spread {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bases.push([state as u8, (state >> 8) as u8, (state >> 16) as u8]);
+        }
+        bases
+    }
+
+    #[test]
+    fn class_counts_match_the_row_walk() {
+        for base in class_test_bases(8) {
+            let counts = iso_luma_counts(base, &TOLERANCE_LADDER);
+            for (&tolerance, &count) in TOLERANCE_LADDER.iter().zip(&counts) {
+                assert_eq!(
+                    count,
+                    full_walk_count(base, tolerance),
+                    "{base:?} ±{tolerance}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn class_selection_matches_the_full_walk() {
+        for base in class_test_bases(4) {
+            for (tolerance, bits_per_pixel) in [(1u8, 8u32), (4, 12), (16, 14), (64, 12), (255, 10)] {
+                let needed = 1usize << bits_per_pixel;
+                let available = iso_luma_count(base, tolerance);
+                if available < needed {
+                    continue;
+                }
+                assert!(
+                    select_nearest_chroma(base, tolerance, needed)
+                        == select_by_full_walk(
+                            base,
+                            tolerance,
+                            needed,
+                            available,
+                            ToneOrdering::ChromaProximity
+                        ),
+                    "{base:?} ±{tolerance} at {bits_per_pixel} bits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn class_means_match_the_full_walk() {
+        for base in class_test_bases(4) {
+            for bits_per_pixel in [12u32, 16] {
+                let needed = 1usize << bits_per_pixel;
+                for max_tolerance in [16u8, 64] {
+                    assert_eq!(
+                        balanced_candidate_means(base, max_tolerance, needed, &TOLERANCE_LADDER),
+                        full_walk_means(base, max_tolerance, needed, &TOLERANCE_LADDER),
+                        "{base:?} up to ±{max_tolerance} at {bits_per_pixel} bits"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The groove's own size: twenty bits per pixel, from the balanced
+    /// configuration of each base.
+    #[test]
+    #[ignore] // slow: full walks of 20-bit palettes; run with --release --ignored
+    fn class_palettes_match_the_full_walk_at_twenty_bits() {
+        let needed = 1usize << 20;
+        for base in class_test_bases(48) {
+            let config = TonedConfig::balanced(base, 1.2).unwrap();
+            let max_tolerance = TOLERANCE_LADDER
+                .into_iter()
+                .find(|&tol| full_walk_count(base, tol) >= needed * 8)
+                .unwrap_or(255);
+            assert_eq!(
+                balanced_candidate_means(base, max_tolerance, needed, &TOLERANCE_LADDER),
+                full_walk_means(base, max_tolerance, needed, &TOLERANCE_LADDER),
+                "{base:?} means"
+            );
+            let available = full_walk_count(base, config.luma_tolerance);
+            assert!(
+                TonedPalette::from_config(config).unwrap().colors
+                    == select_by_full_walk(
+                        base,
+                        config.luma_tolerance,
+                        needed,
+                        available,
+                        ToneOrdering::ChromaProximity
+                    ),
+                "{base:?} palette at ±{}",
+                config.luma_tolerance
+            );
+        }
     }
 
     #[test]

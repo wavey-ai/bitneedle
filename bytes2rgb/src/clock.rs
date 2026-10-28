@@ -22,7 +22,6 @@
 use crate::{ToneOrdering, TonedConfig, TonedPalette};
 use anyhow::{bail, Context, Result};
 use std::f64::consts::{FRAC_PI_2, TAU};
-use std::sync::Arc;
 
 pub const TONE_CLOCK_MIN_SLOTS: usize = 2;
 pub const TONE_CLOCK_MAX_SLOTS: usize = 64;
@@ -515,14 +514,14 @@ pub fn decode_toned_clock_raster(
     pack_clock_words(&words, clock.bits_per_pixel, byte_length)
 }
 
-/// The wheel's words, in one pass.
+/// The wheel's words.
 ///
-/// `slot_at` gives the angle and the distance of groove pixel `i`. Each pixel
-/// is looked up once, in the palette of its own pocket; the pocket's palette
-/// is built the first time it is seen and kept for the rest of the pass. The
-/// pockets are a fixed, small set, so the table is an array indexed by the key
-/// the pixel already computes — no scan of the whole groove per pocket, no
-/// hashing, no lock.
+/// `slot_at` gives the angle and the distance of groove pixel `i`. The pixels
+/// are grouped by pocket and tone first, and each palette is then built once,
+/// used for its own pixels and dropped. A wheel has up to twice as many
+/// palettes as pockets, at three megabytes each for twenty bits and eight
+/// more for each reverse index. Held to the end of the pass, they took the
+/// browser tab past what an iPhone allows.
 fn decode_clock_words<F>(
     rgba: &[u8],
     clock: &ToneClock,
@@ -543,31 +542,66 @@ where
         }
     }
 
-    let mut palettes: Vec<Option<Arc<TonedPalette>>> = vec![None; 2 * TONE_CLOCK_MAX_CELLS];
+    let keys: Vec<u16> = (0..pixel_count)
+        .map(|pixel_index| {
+            let (angle, away) = slot_at(pixel_index);
+            let cell = clock.cell_index(pixel_index, angle, away);
+            (cell * 2 + usize::from(clock.is_gap(pixel_index))) as u16
+        })
+        .collect();
+    let (order, groups) = pixels_by_key(&keys);
+    drop(keys);
     let mut words = vec![0u32; pixel_count];
-    for (pixel_index, word) in words.iter_mut().enumerate() {
-        let (angle, away) = slot_at(pixel_index);
-        let cell = clock.cell_index(pixel_index, angle, away);
-        let key = cell * 2 + usize::from(clock.is_gap(pixel_index));
-        if palettes[key].is_none() {
-            palettes[key] = Some(TonedPalette::shared(clock.config_for_key(key as u16))?);
+    for (key, start, end) in groups {
+        let palette = TonedPalette::from_config(clock.config_for_key(key))?;
+        for &pixel_index in &order[start..end] {
+            let at = pixel_index * 4;
+            let color = [rgba[at], rgba[at + 1], rgba[at + 2]];
+            let Some(index) = palette.index_of(color) else {
+                bail!(
+                    "pixel {pixel_index} #{:02X}{:02X}{:02X} is not in tone clock pocket {}'s {} palette",
+                    color[0],
+                    color[1],
+                    color[2],
+                    key / 2,
+                    if key % 2 == 1 { "gap" } else { "track" }
+                );
+            };
+            words[pixel_index] = index;
         }
-        let palette = palettes[key].as_ref().expect("palette was just built");
-        let at = pixel_index * 4;
-        let color = [rgba[at], rgba[at + 1], rgba[at + 2]];
-        let Some(index) = palette.index_of(color) else {
-            bail!(
-                "pixel {pixel_index} #{:02X}{:02X}{:02X} is not in tone clock pocket {}'s {} palette",
-                color[0],
-                color[1],
-                color[2],
-                cell,
-                if key % 2 == 1 { "gap" } else { "track" }
-            );
-        };
-        *word = index;
     }
     Ok(words)
+}
+
+/// Pixel indices grouped by palette key, in ascending key order: one counting
+/// sort of the key list, which gives each key its own slice.
+fn pixels_by_key(keys: &[u16]) -> (Vec<usize>, Vec<(u16, usize, usize)>) {
+    const SLOTS: usize = 2 * TONE_CLOCK_MAX_CELLS;
+    let mut counts = [0usize; SLOTS];
+    for &key in keys {
+        counts[usize::from(key)] += 1;
+    }
+    let mut starts = [0usize; SLOTS];
+    let mut next = 0usize;
+    for (key, count) in counts.iter().enumerate() {
+        starts[key] = next;
+        next += count;
+    }
+    let mut order = vec![0usize; keys.len()];
+    let mut cursor = starts;
+    for (pixel_index, &key) in keys.iter().enumerate() {
+        let at = &mut cursor[usize::from(key)];
+        order[*at] = pixel_index;
+        *at += 1;
+    }
+    let mut groups = Vec::new();
+    for (key, count) in counts.iter().enumerate() {
+        if *count > 0 {
+            let start = starts[key];
+            groups.push((key as u16, start, start + count));
+        }
+    }
+    (order, groups)
 }
 
 /// Packs `bits_per_pixel`-wide words back into bytes, then trims the padding
